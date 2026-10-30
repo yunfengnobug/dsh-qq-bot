@@ -2762,6 +2762,41 @@ function sawSentText(s) {
         notice,
       )
 
+      const live = sockets.find((s) => s.readyState === 1)
+      const originalSend = live.send.bind(live)
+      live.send = (text) => {
+        const msg = JSON.parse(String(text))
+        if (msg.action === 'send_private_msg' || msg.action === 'send_group_msg') {
+          live.sent.push(msg)
+          setTimeout(() => {
+            live.onmessage?.({
+              data: JSON.stringify({ status: 'failed', retcode: 1400, message: 'mock send failed', echo: msg.echo }),
+            })
+          }, 0)
+          return
+        }
+        return originalSend(text)
+      }
+      injectedDrop = null
+      const beforeFail = (await statusOf()).recentDropped.length
+      qqTurn(13, '[QQ]发送失败这一条[/QQ]')
+      await waitForDrop(beforeFail)
+      const failedDrop = (await statusOf()).recentDropped.at(-1)
+      const failedNotice = String(injectedDrop?.content?.[0]?.text ?? '')
+      check(
+        '标记块传输失败 → 丢弃台账记 send-failed，并回注会话',
+        failedDrop?.reason === 'send-failed' &&
+          failedDrop?.via === 'marker' &&
+          failedNotice.includes('send-failed') &&
+          failedNotice.includes('mock send failed'),
+        JSON.stringify({ failedDrop, failedNotice }),
+      )
+      check(
+        '标记块传输失败不写 outbox',
+        !(await statusOf()).recentOutbox.some((e) => String(e.text).includes('发送失败这一条')),
+      )
+      live.send = originalSend
+
       // not-connected 同样进丢弃台账（关掉假 WebSocket 即造出未连接）。
       const socket = sockets.find((s) => s.readyState === 1)
       socket.close()

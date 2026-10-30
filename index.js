@@ -2267,10 +2267,16 @@ export function apply(ctx, config) {
     }
     segments.push({ type: 'text', data: { text: body } })
 
-    if (dest.kind === 'group') {
-      await transport.call('send_group_msg', { group_id: dest.groupId, message: segments })
-    } else {
-      await transport.call('send_private_msg', { user_id: dest.userId, message: segments })
+    try {
+      if (dest.kind === 'group') {
+        await transport.call('send_group_msg', { group_id: dest.groupId, message: segments })
+      } else {
+        await transport.call('send_private_msg', { user_id: dest.userId, message: segments })
+      }
+    } catch (error) {
+      const message = error?.message ?? String(error)
+      logger.warn(`outbound dropped: send-failed (${message})`)
+      return { sent: 0, dropped: true, reason: 'send-failed', error: message }
     }
     logger.info(`sent 1 message to ${dest.kind}:${dest.groupId ?? dest.userId}`)
     return { sent: 1, dropped: false, destination: dest }
@@ -2580,6 +2586,7 @@ export function apply(ctx, config) {
               reason: result.reason,
               limit: result.limit ?? null,
               length: result.length ?? null,
+              error: result.error ?? null,
             })
             return
           }
@@ -2636,11 +2643,16 @@ export function apply(ctx, config) {
   }
 
   /** 出站被拒原因 → 给模型看的中文说明。 */
-  function dropReasonText(reason) {
+  function dropReasonText(reason, error) {
     if (reason === 'too-long') return 'too-long（正文超过出站字数上限，一条都没有发出）'
     if (reason === 'not-connected') return 'not-connected（OneBot 传输未连接）'
     if (reason === 'no-destination') return 'no-destination（没有已知的发送目的地）'
     if (reason === 'empty') return 'empty（去完 Markdown 后正文为空）'
+    if (reason === 'send-failed') {
+      const detail = error ? `：${String(error).slice(0, 180)}` : ''
+      return `send-failed（发到 QQ 时传输失败，一条都没有发出${detail}）`
+    }
+    if (reason === 'not-allowlisted') return 'not-allowlisted（显式指定的群或私聊不在白名单里）'
     return String(reason)
   }
 
@@ -2657,7 +2669,7 @@ export function apply(ctx, config) {
    */
   function notifyDropToSession(sessionId, info) {
     const text =
-      `[QQ 出站被拒] 本条（${info.via}）未发到 QQ。原因：${dropReasonText(info.reason)}。` +
+      `[QQ 出站被拒] 本条（${info.via}）未发到 QQ。原因：${dropReasonText(info.reason, info.error)}。` +
       (info.reason === 'too-long' ? `实际 ${info.length} 字，上限 ${info.limit} 字。缩短后可重发。` : '')
     const agent = sessionId && typeof ctx.agents?.get === 'function' ? ctx.agents.get(sessionId) : undefined
     if (!agent || typeof agent.inject !== 'function') {
