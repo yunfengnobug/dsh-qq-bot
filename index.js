@@ -10,6 +10,7 @@
 // M1：以上全部 + 出站文本采集 + 调试工具。
 // M2：OneBot 传输层（见 onebot.js）——WS 入站映射到 handleInbound()，
 //     出站文本超过 replyMaxChars 就拒绝发送；未超长才发给最后一次入站的目的地。
+//     正文里的 [笑哭] 会拆成 face 段，NapCat 显示系统表情。
 //     传输细节（内置 WebSocket、token 走查询串、退避重连）全部封装在 onebot.js。
 
 import { randomUUID } from 'node:crypto'
@@ -35,6 +36,7 @@ import {
   STICKERS_FILE,
   upsertSticker,
 } from './stickers.js'
+import { FACE_NAME_TO_ID, textToOneBotSegments } from './faces.js'
 import {
   configDirCandidates,
   createFetcher,
@@ -51,6 +53,8 @@ import {
   DEFAULT_ASSET,
   MIN_QQ_BUILD,
 } from './napcat.js'
+
+export { FACE_NAME_TO_ID, textToOneBotSegments }
 
 export const name = 'qq-bridge'
 
@@ -2394,7 +2398,9 @@ export function apply(ctx, config) {
     if (s.replyWithQuote && quoteId) {
       segments.push({ type: 'reply', data: { id: String(quoteId) } })
     }
-    segments.push({ type: 'text', data: { text: body } })
+    // 去完 Markdown 再拆表情。标记块和 qq_bridge_send 都进 sendToQQ。
+    // qq_bridge_sticker 自己组 image 段，不经过这里。
+    segments.push(...textToOneBotSegments(body))
 
     try {
       if (dest.kind === 'group') {
@@ -3053,10 +3059,11 @@ export function apply(ctx, config) {
       '"本轮不是 QQ 发起的，确认要发吗"，同一轮里再调一次才真的发出去。' +
       'replyMode=tool 时这是唯一的出站方式；marker 模式下它是「直接发这一条」的旁路。' +
       '文本超过出站字数上限时**一条都不发**，返回 `reason: "too-long"` 与 `limit`、`length` —— 请缩短后重发。' +
+      '正文里的 [笑哭]、[挥手] 或 [表情182] 会变成 QQ 系统表情；认不出的方括号原样发出。' +
       '显式 groupId / userId 必须在对应白名单里，否则 `reason: "not-allowlisted"`，一条都不发。' +
       '发出去的内容会记进 outbox（via: tool）。',
     parameters: {
-      text: { type: 'string', required: true, description: '要发送的文本；超过出站字数上限时不会发出。' },
+      text: { type: 'string', required: true, description: '要发送的文本；超过出站字数上限时不会发出。[笑哭] 这类表情名会变成系统表情。' },
       userId: { type: 'string', description: '私聊目标 QQ 号；与 groupId 二选一，都不给则用这一轮钉住的目的地。' },
       groupId: { type: 'string', description: '群号；与 userId 二选一。显式指定时不引用别的群的消息。' },
     },
@@ -3893,6 +3900,7 @@ export function buildUsagePrompt(s = {}) {
     '- 图片由多模态模型先转成文字，**就地**贴在图片原来的位置上，形如「[图片#a1b2c3]：<描述>」—— 描述可能不准，别当成绝对事实。',
     '  方括号里的 6 位短哈希就是这张图在插件里的编号：模型可以用它把某张图存成表情包或再发出去。',
     '- 被「戳一戳」会显示成「[戳一戳]（戳的是我）」—— 那和被人 @ 一样，是有人在叫你。',
+    '- 系统表情显示成「[表情182]」这种带编号的占位符。',
     '',
     '【怎么把话说回 QQ】',
     // 出站方式是**开关**（replyMode），提示词必须跟着变 —— 否则会教模型一个在本部署里
@@ -3932,6 +3940,8 @@ export function buildUsagePrompt(s = {}) {
     '  标签起不到界定作用，只会跟着正文一起发到 QQ。',
     '- 不确定就说不知道，别假装做过某件事。',
     `- 出站会自动去掉 Markdown 记号；超过 ${maxChars} 字的回复不会发出，请缩短后重发。`,
+    '- 想发 QQ 自带表情，就写半角方括号里的表情名，例如 [笑哭]、[挥手]，或入站那种 [表情182]。',
+    '  发出去会变成系统表情。认不出的方括号会留在文字里。',
     '',
     '【无人值守：不要碰需要提权的操作】',
     '- 在 QQ 这头你是**无人值守**的：那一边没有人能替你点「同意」。审批策略是 ask，',

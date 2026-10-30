@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeMaxRecentTurns, normalizeReplyMode, normalizeSessionScope, NS, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, FACE_NAME_TO_ID, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeMaxRecentTurns, normalizeReplyMode, normalizeSessionScope, NS, textToOneBotSegments, truncateText } from './index.js'
 import { hashOfBuffer, loadStickers, saveStickers, shortHash, upsertSticker } from './stickers.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
@@ -337,6 +337,55 @@ if (sim) {
   )
 }
 
+// 出站系统表情：名字 / 入站占位符 / CQ 码拆成 face 段，对不上的方括号留在文字里。
+{
+  check('表情表：笑哭=182、挥手=129', FACE_NAME_TO_ID['笑哭'] === 182 && FACE_NAME_TO_ID['挥手'] === 129)
+  const mixed = textToOneBotSegments('哈哈[笑哭]')
+  check(
+    '哈哈[笑哭] → 文字 + face 182',
+    mixed.length === 2 &&
+      mixed[0].type === 'text' && mixed[0].data.text === '哈哈' &&
+      mixed[1].type === 'face' && mixed[1].data.id === '182',
+    JSON.stringify(mixed),
+  )
+  const unknown = textToOneBotSegments('前面[没这表情]后面')
+  check(
+    '未知方括号留在文字里',
+    unknown.length === 1 && unknown[0].type === 'text' && unknown[0].data.text === '前面[没这表情]后面',
+    JSON.stringify(unknown),
+  )
+  const byId = textToOneBotSegments('[表情182]')
+  check(
+    '[表情182] → face 182',
+    byId.length === 1 && byId[0].type === 'face' && byId[0].data.id === '182',
+    JSON.stringify(byId),
+  )
+  const wave = textToOneBotSegments('[挥手]')
+  check('[挥手] → face 129', wave.length === 1 && wave[0].type === 'face' && wave[0].data.id === '129', JSON.stringify(wave))
+  const cq = textToOneBotSegments('看[CQ:face,id=182]')
+  check(
+    '[CQ:face,id=182] → 文字 + face 182',
+    cq.length === 2 && cq[0].data.text === '看' && cq[1].type === 'face' && cq[1].data.id === '182',
+    JSON.stringify(cq),
+  )
+  const around = textToOneBotSegments('a[不认识]b[笑哭]c')
+  check(
+    '未知方括号夹在表情两侧时仍留在相邻文字里',
+    around.length === 3 &&
+      around[0].data.text === 'a[不认识]b' &&
+      around[1].type === 'face' && around[1].data.id === '182' &&
+      around[2].data.text === 'c',
+    JSON.stringify(around),
+  )
+  const plain = textToOneBotSegments('[图片][表情包#ab12][表情]')
+  check(
+    '图片和表情包占位符不会被当成系统表情',
+    plain.length === 1 && plain[0].type === 'text' && plain[0].data.text === '[图片][表情包#ab12][表情]',
+    JSON.stringify(plain),
+  )
+  check('空正文拆出来是空数组', textToOneBotSegments('').length === 0)
+}
+
 // 会话跟随（listening window）：一次性 @ 之后，线性聊天不再需要反复 @
 {
   const listen = registered.find((t) => t.name === 'qq_bridge_listen')
@@ -431,6 +480,22 @@ function sentTexts() {
 function lastSentText() {
   const a = sentTexts()
   return a.length > 0 ? a[a.length - 1] : ''
+}
+/** 最后一条真实出站帧（含 face 段）。 */
+function lastSendFrame() {
+  let last = null
+  for (const s of qqSockets) {
+    for (const frame of s.sent ?? []) {
+      if (frame.action !== 'send_group_msg' && frame.action !== 'send_private_msg') continue
+      last = frame
+    }
+  }
+  return last
+}
+/** 出站帧里去掉引用段之后的正文段。 */
+function contentSegments(frame) {
+  const segs = Array.isArray(frame?.params?.message) ? frame.params.message : []
+  return segs.filter((part) => part?.type !== 'reply')
 }
 /** 真实出站里有没有一条包含 s。 */
 function sawSentText(s) {
@@ -580,6 +645,21 @@ function sawSentText(s) {
   await endA()
   check('端到端：两个 step 写同一个块，QQ 只收到一次', lastSentText() === '在的', JSON.stringify(sentTexts()))
 
+  // 标记块出站：先去 Markdown，再把 [笑哭] 拆成 face。未知方括号仍是文字。
+  fire('user/message', { source: { kind: 'plugin', plugin: 'qq-bridge' } })
+  start()
+  reply('[QQ]**哈哈**[笑哭][没这表情][/QQ]')
+  await endA()
+  const faceSegs = contentSegments(lastSendFrame())
+  check(
+    '标记块：哈哈[笑哭] 拆成文字和 face 182，未知方括号留在文字里',
+    faceSegs.length === 3 &&
+      faceSegs[0]?.type === 'text' && faceSegs[0]?.data?.text === '哈哈' &&
+      faceSegs[1]?.type === 'face' && faceSegs[1]?.data?.id === '182' &&
+      faceSegs[2]?.type === 'text' && faceSegs[2]?.data?.text === '[没这表情]',
+    JSON.stringify(faceSegs),
+  )
+
   // 排障入口：status 里要能看到最近观测到的 user/message（哑火时看 ours 是不是 false）
   const st2 = JSON.parse(await status.execute({}))
   const probe = st2.recentInboundSources
@@ -644,6 +724,10 @@ function sawSentText(s) {
   check('用法说明：明确「回群只用标记块，别拿 send 工具当回复通道」', p.includes('qq_bridge_send') && p.includes('别拿它当回复通道'))
   check('用法说明：说明被戳会显示成「[戳一戳]（戳的是我）」', p.includes('[戳一戳]') && p.includes('戳的是我'))
   check('用法说明：发了表情包不要解释（人自己看得懂）', p.includes('不要解释') && p.includes('表情包'))
+  check(
+    '用法说明：系统表情写表情名或 [表情182]，认不出的方括号留在文字里',
+    p.includes('[笑哭]') && p.includes('[表情182]') && p.includes('系统表情') && p.includes('认不出的方括号'),
+  )
   // 表情包是产品玩法：提示词必须教模型怎么用（否则工具存在但永远没人调）
   check(
     '用法说明：图片占位符带短哈希（模型能指着一张具体的图）',
@@ -739,6 +823,13 @@ function sawSentText(s) {
     '工具发送记进 outbox（via: tool）',
     sawSentText('工具发出去的话') && ob[ob.length - 1]?.via === 'tool',
     JSON.stringify(ob[ob.length - 1]),
+  )
+  const byId = JSON.parse(await sendTool.execute({ text: '[表情182]' }))
+  const byIdSegs = contentSegments(lastSendFrame())
+  check(
+    'qq_bridge_send：[表情182] 是 face 段',
+    byId.sent === 1 && byIdSegs.length === 1 && byIdSegs[0]?.type === 'face' && byIdSegs[0]?.data?.id === '182',
+    JSON.stringify({ byId, byIdSegs }),
   )
 
   // 复位，别影响后面的块
