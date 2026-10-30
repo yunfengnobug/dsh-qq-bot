@@ -139,7 +139,7 @@ ctx.on('session/event', (session, event) => {
 ```
 
 - `sendToQQ(text, destination?)` **已经是真实发送**（不再是桩）：
-  目的地默认取 `state.lastDestination`（入站时记住的**最后一次来源**，持久化），
+  目的地优先用这一轮唤醒时钉住的群或私聊；没有钉时才取 `state.lastDestination`（入站时记住的最后一次来源，持久化），
   也可以用参数显式指定；私聊发 `send_private_msg`、群发 `send_group_msg`。
 - 按 `replyMaxChars`（下限 100）判定，超长一条都不发；`replyWithQuote` 时回复带 reply 段引用触发消息。
 - **连不上或还没有目的地时丢弃并记日志**（不静默排队堆积）。

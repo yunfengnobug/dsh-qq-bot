@@ -1,6 +1,8 @@
 # 更新日志 / Changelog
 
-## 未发布
+## v0.2.0 — 2026-10-30
+
+Fork 功能版本。Cordis 插件 id 仍是 `qq-bridge`。
 
 - **设置卡片不等宿主设置服务**：DSH 0.2.x 上 `settingsScope` / `webUiSettings` 可能不存在，以前会一直等、卡片不出现。现在加载时就挂到设置页和插件页（含插件详情，只挂在本包上）。宿主设置域还在就用它，否则走 `/api/qq-bridge/settings`。请求带上面板登录 cookie。卡片默认展开。
 - **NapCat 网页地址和缺失目录**：新增设置 `napcatWebuiUrl`（「NapCat 网页管理地址」）。留空仍读 `webui.json`；地址是 `127.0.0.1` 或 `localhost` 时，「打开 WebUI」保持可点，并说明只有跑着 NapCat 的机器能打开。安装目录不存在时「打开文件夹」不会去猜路径，提示自己部署或 Docker 要另填目录。NapCat 已经自己跑着时，可以跳过下载那一段，但 OneBot 端口仍要对上。

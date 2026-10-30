@@ -6,6 +6,8 @@
 > `<TARGET_SESSION_ID>`，<TARGET_WORKSPACE> 工作区）
 > 接到 QQ，**保留原有上下文**（同一个 sessionId，不新建会话）。
 
+> Fork 现状以 README 为准。`sessionScope` 默认仍是 `single`（一个 `targetSessionId`）。设成 `perGroup` 时，每个群、每个私聊各有一条会话。出站在一轮里钉住唤醒时的目的地，`lastDestination` 只在没有这根钉时作回落。设置接口在本机可直接用；经反向代理时认已登录的 DSH 面板会话。
+
 ## 1. 与现有 QQ 插件的根本区别
 
 | | 现有 QQ 插件（官方 / community / qqchat） | dsh-qq-bridge |
@@ -113,7 +115,7 @@ Config（`cordis.patch.yml`）另有：`agentPreset`、`statePath`、`debugTools
   消息格式为 **`array`**（非 `string`）；**`reportSelfMessage: false` 保持 false**（防回复死循环）。
 - 现场线索（未再核实）：NapCat 端口 **7998** 是否被旧 MaiBot 占用；群号 **<GROUP_ID>**。
 - 出站：`send_private_msg` / `send_group_msg`，按 `replyMaxChars` 判定，超长一条都不发，
-  目的地 = **最后一次入站消息的来源**（持久化在 `state.lastDestination`）。
+  目的地在这一轮里钉住唤醒时的群或私聊；没有钉时才回落到 `state.lastDestination`（最后一次入站来源）。
 
 ### 7.1 NapCat 自助托管（M5，“一键包”体验但不真打包）
 

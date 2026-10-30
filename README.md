@@ -21,7 +21,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
 > 上游由 DSH 写成。本 fork 的改动见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
-- 当前版本 **v0.1.3**（维护性更新，见 [`CHANGELOG.md`](./CHANGELOG.md)）
+- 当前版本 **v0.2.0**（按目的地分会话、出站目的地钉在唤醒那一轮、设置可经已登录的面板访问。见 [`CHANGELOG.md`](./CHANGELOG.md)）
 - **M1–M8 全部完成**，已在**真实 NapCat + 真实 QQ** 上端到端跑通（Windows 真机）
 
 ## 目录
