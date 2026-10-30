@@ -1388,6 +1388,19 @@ function sawSentText(s) {
     // ★ 卡片必须覆盖**每一个** settings 键 —— 用户报的“设置里配不了 visionModel”就是这个：
     // 它在 Schema 里有、卡片 FIELDS 里却没做输入框 → 用户根本改不到。这条断言专防它。
     {
+      const parseField = mod.__test?.parse
+      const wakeField = (mod.__test?.fields ?? []).find((x) => x.key === 'wakeProbability')
+      const turnsField = (mod.__test?.fields ?? []).find((x) => x.key === 'maxRecentTurns')
+      check(
+        '数字框留空不是 0',
+        wakeField && parseField(wakeField, '') === undefined && parseField(wakeField, '  ') === undefined,
+        String(parseField?.(wakeField, '')),
+      )
+      check(
+        '数字框显式 0 仍是 0，非法数字不通过',
+        parseField(turnsField, '0') === 0 && parseField(turnsField, 'abc') === undefined && parseField(wakeField, '0.25') === 0.25,
+      )
+      check('留空数字的保存文案指向撤销覆盖', src.includes('留空不会当成 0') && src.includes('撤销覆盖'))
       const cardKeys = (mod.__test?.fields ?? []).map((x) => x.key)
       const schemaKeys = Object.keys(registeredSettings[0]?.schema?.dict ?? {})
       const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k))
