@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- **出站目的地钉在唤醒那一轮**：标记块、发消息工具、表情包和会话跟随都用这一轮被叫醒时的群或私聊。别的群里只被记录的消息仍会更新“最后一次入站”，但不会把正在回答的这一轮带跑。工具里显式写了群号或 QQ 号时发到那里，并且不引用别的会话的原消息。
 - **按目的地分会话，并限制每个会话保留的轮数**：新设置 `sessionScope`（`single` 默认，沿用一个 `targetSessionId`；`perGroup` 为每个群、每个私聊自动创建或恢复一条 DSH 会话）。映射持久化在状态文件的 `sessionByDest`。`maxRecentTurns` 默认 40，`0` 表示不限制；QQ 驱动的一轮结束后，若宿主有 `compaction.compactNow`，会尽量把更早的轮次压到这个上限。
 - **Fork 品牌改为 dsh-qq-bot**：包名、界面显示名、NapCat 配置里的默认名称改为 dsh-qq-bot。Cordis 插件 id、设置命名空间和 `/api/qq-bridge/...` 仍是 `qq-bridge`，已有 profile 覆盖不用改。v4 消息来源写成 `plugin:dsh-qq-bot`，同时仍认上游的 `plugin:dsh-qq-bridge`。上游 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge) 的 MIT 版权保留。
 

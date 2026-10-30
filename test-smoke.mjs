@@ -3303,6 +3303,114 @@ function sawSentText(s) {
   rmSync(dir, { recursive: true, force: true })
 }
 
+// 出站目的地钉在唤醒那一刻：之后别的群只被记录，也不能把标记块 / 工具 / 跟随带跑。
+{
+  const prevGroup = resolvedSettings.groupWhitelist
+  const prevProb = resolvedSettings.wakeProbability
+  const prevMode = resolvedSettings.replyMode
+  const prevQuote = resolvedSettings.replyWithQuote
+  const prevDelivery = resolvedSettings.delivery
+  const prevAgent = fakeAgent
+  const listen = registered.find((t) => t.name === 'qq_bridge_listen')
+  const sendTool = registered.find((t) => t.name === 'qq_bridge_send')
+  const framesWith = (needle) => {
+    const hits = []
+    for (const socket of qqSockets) {
+      for (const frame of socket.sent ?? []) {
+        if (frame.action !== 'send_group_msg' && frame.action !== 'send_private_msg') continue
+        const segs = Array.isArray(frame.params?.message) ? frame.params.message : []
+        const text = segs.filter((part) => part?.type === 'text').map((part) => String(part.data?.text ?? '')).join('')
+        if (text.includes(needle)) hits.push(frame)
+      }
+    }
+    return hits
+  }
+  try {
+    resolvedSettings.groupWhitelist = ['111', '222']
+    resolvedSettings.wakeProbability = 0
+    resolvedSettings.replyMode = 'marker'
+    resolvedSettings.replyWithQuote = true
+    resolvedSettings.delivery = 'followup'
+    mainSessionHandler({ id: 'session-smoke' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+    await new Promise((r) => setTimeout(r, 20))
+    const transport = registered.find((t) => t.name === 'qq_bridge_transport')
+    if (JSON.parse(await transport.execute({})).transport.state !== 'open') {
+      await transport.execute({ action: 'reconnect' })
+      await new Promise((r) => setTimeout(r, 30))
+    }
+    fakeAgent = {
+      id: 'session-smoke',
+      session: { id: 'session-smoke' },
+      status: 'idle',
+      ctx: { get: () => undefined, effect: () => () => {} },
+      followup(msg) {
+        mainSessionHandler({ id: 'session-smoke' }, { type: 'user/message', data: msg })
+        mainSessionHandler({ id: 'session-smoke' }, { type: 'turn/start', data: { turn: 1 } })
+      },
+    }
+    const woke = JSON.parse(await sim.execute({ text: '244 在吗', userId: '10001', groupId: '111', messageId: 'm-a' }))
+    check('目的地钉：甲群唤醒成功', woke?.decision?.delivered === true, JSON.stringify(woke?.decision))
+    await sim.execute({ text: '乙群只记一笔', userId: '10002', groupId: '222', messageId: 'm-b' })
+    const st = JSON.parse(await status.execute({}))
+    check(
+      '目的地钉：记录仍更新 lastDestination',
+      st.lastDestination?.kind === 'group' && String(st.lastDestination.groupId) === '222',
+      JSON.stringify(st.lastDestination),
+    )
+    const opened = JSON.parse(await listen.execute({ minutes: 5 }))
+    check('目的地钉：跟随窗口开在唤醒的甲群', opened.key === 'group:111', JSON.stringify(opened))
+    await listen.execute({ off: true })
+    const viaTool = JSON.parse(await sendTool.execute({ text: '工具仍回甲群' }))
+    const toolFrame = framesWith('工具仍回甲群').at(-1)
+    check(
+      '目的地钉：工具未指定群号时仍发到甲群，并引用甲群那条',
+      viaTool.sent === 1 &&
+        toolFrame?.action === 'send_group_msg' &&
+        String(toolFrame.params.group_id) === '111' &&
+        toolFrame.params.message?.[0]?.type === 'reply' &&
+        String(toolFrame.params.message[0].data.id) === 'm-a',
+      JSON.stringify(toolFrame?.params),
+    )
+    const explicit = JSON.parse(await sendTool.execute({ text: '显式去乙群', groupId: '222' }))
+    const explicitFrame = framesWith('显式去乙群').at(-1)
+    check(
+      '目的地钉：显式群号发到乙群，且不引用甲群的消息',
+      explicit.sent === 1 &&
+        explicitFrame?.action === 'send_group_msg' &&
+        String(explicitFrame.params.group_id) === '222' &&
+        explicitFrame.params.message?.[0]?.type === 'text',
+      JSON.stringify(explicitFrame?.params),
+    )
+    mainSessionHandler(
+      { id: 'session-smoke' },
+      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '[QQ]标记块回甲群[/QQ]' }] } } },
+    )
+    mainSessionHandler({ id: 'session-smoke' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+    await new Promise((r) => setTimeout(r, 30))
+    const markerFrame = framesWith('标记块回甲群').at(-1)
+    check(
+      '目的地钉：标记块发到甲群，并引用甲群那条，而不是乙群',
+      markerFrame?.action === 'send_group_msg' &&
+        String(markerFrame.params.group_id) === '111' &&
+        markerFrame.params.message?.[0]?.type === 'reply' &&
+        String(markerFrame.params.message[0].data.id) === 'm-a',
+      JSON.stringify(markerFrame?.params),
+    )
+  } finally {
+    await listen.execute({ off: true })
+    if (prevGroup === undefined) delete resolvedSettings.groupWhitelist
+    else resolvedSettings.groupWhitelist = prevGroup
+    resolvedSettings.wakeProbability = prevProb
+    resolvedSettings.replyMode = prevMode
+    if (prevQuote === undefined) delete resolvedSettings.replyWithQuote
+    else resolvedSettings.replyWithQuote = prevQuote
+    if (prevDelivery === undefined) delete resolvedSettings.delivery
+    else resolvedSettings.delivery = prevDelivery
+    fakeAgent = prevAgent
+    mainSessionHandler({ id: 'session-smoke' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  }
+}
+
 // 用例用过的临时图片：留着只会在 %TEMP% 里积垃圾
 rmSync(cachedImagePath, { force: true })
 

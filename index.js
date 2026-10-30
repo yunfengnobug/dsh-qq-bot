@@ -1465,7 +1465,7 @@ export function apply(ctx, config) {
     return { blocks, failures }
   }
 
-  /** 记住“这条消息是谁从哪儿发的”，出站回复用它当目的地。 */
+  /** 记住“这条消息是谁从哪儿发的”。没钉住某一轮时，出站回落到这里。 */
   function rememberDestination(msg) {
     if (msg.groupId) state.lastDestination = { kind: 'group', groupId: String(msg.groupId) }
     else if (msg.userId) state.lastDestination = { kind: 'private', userId: String(msg.userId) }
@@ -1473,6 +1473,22 @@ export function apply(ctx, config) {
       state.lastMessageId = String(msg.messageId)
     }
     saveState()
+  }
+
+  /** 一条消息对应的出站目的地。没有群号也没有私聊号就是 null。 */
+  function destFromMsg(msg) {
+    if (msg?.groupId) return { kind: 'group', groupId: String(msg.groupId) }
+    if (msg?.userId) return { kind: 'private', userId: String(msg.userId) }
+    return null
+  }
+
+  function messageIdOf(msg) {
+    if (msg?.messageId === undefined || msg?.messageId === null || String(msg.messageId) === '') return null
+    return String(msg.messageId)
+  }
+
+  function sessionIdOf(agent) {
+    return agent?.session?.id || agent?.id || null
   }
 
   /**
@@ -1532,8 +1548,9 @@ export function apply(ctx, config) {
 
     // 唤醒失败必须能从事后排查里看出来：台账条目改成 `wake-failed`，调用方拿到
     // `wakeFailed` / `error`，函数**不向上抛**。
-    // 投递前会置位三面闸门标志。投递失败时必须回滚到置位前的值，否则一次失败的唤醒
-    // 会污染下一轮的归属判定。`gateBeforeWake` 在置位点紧前面快照，两者之间没有 await。
+    // 投递前会置位闸门标志，并把这一轮的出站目的地钉住。投递失败时必须回滚到置位前的值，
+    // 否则一次失败的唤醒会污染下一轮的归属判定，或把目的地钉在没发出去的那条消息上。
+    // `gateBeforeWake` 在置位点紧前面快照，两者之间没有 await。
     // 失败路径在清缓冲之前返回，所以缓冲不丢。
     let gateBeforeWake = null
     const failWake = (error) => {
@@ -1542,6 +1559,17 @@ export function apply(ctx, config) {
         pendingFromQQ = gateBeforeWake.pendingFromQQ
         currentTurnFromQQ = gateBeforeWake.currentTurnFromQQ
         claimedFromQQ = gateBeforeWake.claimedFromQQ
+        pendingDestination = gateBeforeWake.pendingDestination
+        currentTurnDestination = gateBeforeWake.currentTurnDestination
+        pendingMessageId = gateBeforeWake.pendingMessageId
+        currentTurnMessageId = gateBeforeWake.currentTurnMessageId
+        const sid = gateBeforeWake.wakeSessionId
+        if (sid) {
+          if (gateBeforeWake.pinHad) sessionPins.set(sid, gateBeforeWake.pinSnap)
+          else sessionPins.delete(sid)
+          if (gateBeforeWake.queuedHad) sessionPinQueued.set(sid, gateBeforeWake.queuedSnap)
+          else sessionPinQueued.delete(sid)
+        }
       }
       inboundLog.decision = 'wake-failed'
       inboundLog.error = reason
@@ -1595,17 +1623,56 @@ export function apply(ctx, config) {
     // `turn/start` 当场就到达，而它会快照 pending/claim。晚一步置位 = “标还没立、轮已经开了”，
     // 整轮哑火。（2026-09-30 真机抓到的时序：gate = { pending: true, current: false,
     // turnActive: true, claimed: false } —— pending 对、current 错，就是置位晚了一拍的指纹。）
-    // 置位之前快照这三面闸门标志：投递失败时按它回滚（见上面的 failWake）。
-    gateBeforeWake = { pendingFromQQ, currentTurnFromQQ, claimedFromQQ }
+    // 置位之前快照闸门标志和目的地钉：投递失败时按它回滚（见上面的 failWake）。
+    const wakeDest = destFromMsg(msg)
+    const wakeMessageId = messageIdOf(msg)
+    const wakeSessionId = sessionIdOf(agent)
+    const pinHad = Boolean(wakeSessionId && sessionPins.has(wakeSessionId))
+    const queuedHad = Boolean(wakeSessionId && sessionPinQueued.has(wakeSessionId))
+    gateBeforeWake = {
+      pendingFromQQ,
+      currentTurnFromQQ,
+      claimedFromQQ,
+      pendingDestination,
+      currentTurnDestination,
+      pendingMessageId,
+      currentTurnMessageId,
+      wakeSessionId,
+      pinHad,
+      pinSnap: pinHad ? cloneDestPin(sessionPins.get(wakeSessionId)) : undefined,
+      queuedHad,
+      queuedSnap: queuedHad ? cloneDestPin(sessionPinQueued.get(wakeSessionId)) : undefined,
+    }
     pendingFromQQ = true
+    pendingDestination = wakeDest
+    pendingMessageId = wakeMessageId
     // 没有正在跑的轮就顺手认领这一轮（会观察到 turn/start）；有正在跑的轮则不能改它。
+    // 插话插进的是正在跑的那一轮，目的地也改成这条唤醒的群，避免回错群。
+    const claimCurrent = !turnActive || wantSteer
     if (!turnActive) {
       currentTurnFromQQ = true
       claimedFromQQ = true
+      currentTurnDestination = wakeDest
+      currentTurnMessageId = wakeMessageId
     }
     // 插话插进的是**正在跑的那一轮**：从这一刻起这一轮里就有 QQ 消息要回，
     // 所以归属也得跟着算 QQ —— 否则工具会在这一轮里被拒，插话反而变成哑火。
-    if (wantSteer) currentTurnFromQQ = true
+    if (wantSteer) {
+      currentTurnFromQQ = true
+      currentTurnDestination = wakeDest
+      currentTurnMessageId = wakeMessageId
+    }
+    // 按会话钉住。perGroup 时两路会话会重叠，进程级的 currentTurnDestination 盖不住。
+    // 这一轮还没人占着，或这次是插话：钉在当前轮上。已经有一轮在跑且只是排队：先排到下一轮。
+    if (wakeSessionId && wakeDest) {
+      const existing = sessionPins.get(wakeSessionId)
+      if (!existing || claimCurrent) {
+        if (claimCurrent) sessionPinQueued.delete(wakeSessionId)
+        sessionPins.set(wakeSessionId, { dest: wakeDest, messageId: wakeMessageId, owned: claimCurrent })
+      } else {
+        sessionPinQueued.set(wakeSessionId, { dest: wakeDest, messageId: wakeMessageId })
+      }
+    }
 
     const send = () => {
       if (wantSteer && typeof agent.steer === 'function') return agent.steer(injected)
@@ -1852,15 +1919,18 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 出站：把目标会话的回复发给“最后一次入站的目的地”。
+   * 出站：发给调用方给定的目的地；没给就用这一轮钉住的，再没有才用最后一次入站。
    * M2 之前这里只是打日志的桩。
    *
    * 超长文本**一条都不发**：QQ 不该发长消息，所以只把拒绝结果回给调用方
    * （`reason: 'too-long'`），由模型缩短后重发。
+   *
+   * `options.quoteMessageId` 显式传入（含 null）时就用它，避免发的时候 `lastMessageId`
+   * 已经被另一条消息改掉。省略则用这一轮钉住的消息 id，再没有用 `lastMessageId`。
    */
-  async function sendToQQ(text, destination) {
+  async function sendToQQ(text, destination, options) {
     const s = readSettings()
-    const dest = destination ?? state.lastDestination
+    const dest = destination ?? currentTurnDestination ?? state.lastDestination
     if (!dest?.kind) {
       logger.warn('outbound dropped: no destination yet (还没有任何非丢弃的入站消息)')
       return { sent: 0, dropped: true, reason: 'no-destination' }
@@ -1881,9 +1951,12 @@ export function apply(ctx, config) {
       return { sent: 0, dropped: true, reason: 'too-long', limit: s.replyMaxChars, length }
     }
 
+    const quoteId = options && Object.prototype.hasOwnProperty.call(options, 'quoteMessageId')
+      ? options.quoteMessageId
+      : (currentTurnMessageId || state.lastMessageId)
     const segments = []
-    if (s.replyWithQuote && state.lastMessageId) {
-      segments.push({ type: 'reply', data: { id: String(state.lastMessageId) } })
+    if (s.replyWithQuote && quoteId) {
+      segments.push({ type: 'reply', data: { id: String(quoteId) } })
     }
     segments.push({ type: 'text', data: { text: body } })
 
@@ -1993,6 +2066,31 @@ export function apply(ctx, config) {
   /** 注入时对“下一轮”的直接认领（只可能由我们自己的注入置位，比 pending 权威）。 */
   let claimedFromQQ = false
   /**
+   * 出站目的地钉在“这一轮的唤醒”，不跟全局 lastDestination 走。
+   * 别的群只被记录时仍会改 lastDestination，但不能把正在回答的这一轮带跑。
+   * sessionPins 按会话各记一份：perGroup 时两路会话会重叠，一个全局变量盖不住。
+   * owned=true 表示钉的是当前这一轮；排队等下一轮的先放 sessionPinQueued。
+   */
+  let pendingDestination = null
+  let currentTurnDestination = null
+  let pendingMessageId = null
+  let currentTurnMessageId = null
+  const sessionPins = new Map()
+  const sessionPinQueued = new Map()
+  function cloneDestPin(pin) {
+    if (!pin) return undefined
+    return {
+      dest: pin.dest ? { ...pin.dest } : null,
+      messageId: pin.messageId ?? null,
+      owned: pin.owned === true,
+    }
+  }
+  function sameDest(a, b) {
+    if (!a?.kind || !b?.kind || a.kind !== b.kind) return false
+    if (a.kind === 'group') return String(a.groupId) === String(b.groupId)
+    return String(a.userId) === String(b.userId)
+  }
+  /**
    * “非 QQ 轮二次确认”状态：本轮已经回过一次“确认要发吗”。
    * `turn/start` 与 `turn/end` 都清零，所以它严格属于**某一轮**，绝不会跨轮生效。
    * 用户 2026-10-01 提议：工具模式下不是 QQ 发起的，第一次调用只回问一句，
@@ -2055,7 +2153,33 @@ export function apply(ctx, config) {
       // 注入时的“认领”优先：`claimedFromQQ` **只可能**由我们自己的注入置位，比 pending 更权威。
       //（早先这里无条件取 pending —— 一旦 pending 被同轮里的别的消息污染（harness 上下文）就哑火。）
       currentTurnFromQQ = claimedFromQQ || pendingFromQQ
+      const sid = session?.id ?? null
+      const pin = sid ? sessionPins.get(sid) : null
+      if (currentTurnFromQQ) {
+        if (pin?.dest) {
+          pin.owned = true
+          sessionPins.set(sid, pin)
+          currentTurnDestination = pin.dest
+          currentTurnMessageId = pin.messageId ?? null
+        } else if (claimedFromQQ && pendingDestination) {
+          // 唤醒时还没有会话 id，只能用这次认领带上的目的地。
+          currentTurnDestination = pendingDestination
+          currentTurnMessageId = pendingMessageId ?? null
+        } else if (claimedFromQQ) {
+          currentTurnDestination = currentTurnDestination || state.lastDestination
+          currentTurnMessageId = currentTurnMessageId || state.lastMessageId
+        } else {
+          // 多轮延续：这一轮没有新的唤醒钉，回落到最后一次非丢弃入站。
+          currentTurnDestination = state.lastDestination
+          currentTurnMessageId = state.lastMessageId
+        }
+      } else if (!pin?.owned) {
+        currentTurnDestination = null
+        currentTurnMessageId = null
+      }
       claimedFromQQ = false
+      pendingDestination = null
+      pendingMessageId = null
       // 新一轮：非 QQ 轮的“二次确认”清零（否则上一轮的确认会跨轮生效）。
       nonQQConfirmPending = false
       return
@@ -2116,8 +2240,25 @@ export function apply(ctx, config) {
       const raw = pendingReply
       pendingReply = null
       // 消费：这一轮结束，当前轮判定清空，等下一次 turn/start 重新快照。
+      // 目的地先摘下来再清。sendToQQ 是异步的，不能等它去读可能已被别的群改掉的 lastDestination。
       const fromQQ = currentTurnFromQQ
+      const sid = session?.id ?? null
+      const pin = sid ? sessionPins.get(sid) : null
+      const ownedPin = pin?.owned ? pin : null
+      const turnDest = ownedPin?.dest || currentTurnDestination
+      const turnMsgId = ownedPin ? ownedPin.messageId : currentTurnMessageId
+      if (ownedPin && sid) {
+        sessionPins.delete(sid)
+        const next = sessionPinQueued.get(sid)
+        sessionPinQueued.delete(sid)
+        if (next?.dest) sessionPins.set(sid, { dest: next.dest, messageId: next.messageId ?? null, owned: false })
+      }
+      const clearGlobal = !ownedPin || !currentTurnDestination || sameDest(currentTurnDestination, ownedPin.dest)
       currentTurnFromQQ = false
+      if (clearGlobal) {
+        currentTurnDestination = null
+        currentTurnMessageId = null
+      }
       turnActive = false
       claimedFromQQ = false
       nonQQConfirmPending = false
@@ -2156,7 +2297,8 @@ export function apply(ctx, config) {
       // 被拒绝的（含超长）不落 outbox，否则台账里会多出一条 QQ 里根本没有的消息。
       // 被拒的结果记进独立的丢弃台账。
       const via = s.replyMode === 'always' ? 'always' : 'marker'
-      sendToQQ(text)
+      const outboundDest = turnDest || state.lastDestination
+      sendToQQ(text, outboundDest, { quoteMessageId: turnMsgId || null })
         .then((result) => {
           if (result?.dropped) {
             const detail = result.reason === 'too-long' ? `（${result.length} 字 > 上限 ${result.limit} 字）` : ''
@@ -2167,7 +2309,7 @@ export function apply(ctx, config) {
               reason: result.reason,
               limit: result.limit ?? null,
               length: result.length ?? null,
-              destination: state.lastDestination,
+              destination: outboundDest,
               sessionId: session.id,
             })
             // 回注会话：标记块模式下模型收不到任何反馈，会以为已经回复了。
@@ -2389,6 +2531,7 @@ export function apply(ctx, config) {
         groupId: { type: 'string', description: '群 id（需在群白名单内）。' },
         nickname: { type: 'string', description: '发送者昵称（仅用于渲染与记录）。' },
         atSelf: { type: 'boolean', description: '是否 @ 了机器人。' },
+        messageId: { type: 'string', description: '原消息 id。出站引用时用它，不跟后来的入站混。' },
         dryRun: { type: 'boolean', description: 'true 时只返回决策、不注入。' },
       },
       output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
@@ -2400,6 +2543,7 @@ export function apply(ctx, config) {
           groupId: args.groupId ?? null,
           nickname: args.nickname ?? null,
           atSelf: args.atSelf === true,
+          messageId: args.messageId ?? null,
         }
         const preview = decide(msg, s)
         if (args.dryRun) return JSON.stringify({ preview, allowed: isAllowed(msg, s) }, null, 2)
@@ -2422,6 +2566,26 @@ export function apply(ctx, config) {
   //   ② 不是 QQ 唤醒的那一轮 → 第一次调用只回一句“确认要发吗”（**一个字都不发**），
   //      同一轮里再调一次才真的发。`nonQQConfirmPending` 按轮清零，不跨轮泄漏。
   // 返回**字符串**时调用方必须原样 return 它；返回 null = 放行。
+  /**
+   * 工具出站的目的地：显式 groupId / userId 优先，且不引用别的群的消息。
+   * 否则用这个会话钉住的目的地，再没有用当前轮，最后才是 lastDestination。
+   */
+  function resolveOutboundDest(args, exec) {
+    if (args?.groupId) {
+      return { dest: { kind: 'group', groupId: String(args.groupId) }, quoteMessageId: null }
+    }
+    if (args?.userId) {
+      return { dest: { kind: 'private', userId: String(args.userId) }, quoteMessageId: null }
+    }
+    const sid = exec?.agent?.session?.id || exec?.agent?.id || null
+    const pin = sid ? sessionPins.get(sid) : null
+    if (pin?.dest) return { dest: pin.dest, quoteMessageId: pin.messageId ?? null }
+    if (currentTurnDestination) {
+      return { dest: currentTurnDestination, quoteMessageId: currentTurnMessageId ?? null }
+    }
+    return { dest: state.lastDestination, quoteMessageId: state.lastMessageId ?? null }
+  }
+
   function outboundGate(action) {
     if (currentTurnFromQQ) return null
     if (!nonQQConfirmPending) {
@@ -2441,7 +2605,7 @@ export function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: 'qq_bridge_send',
     description:
-      '把一条消息发到 QQ（默认发给最后一次入站的目的地）。' +
+      '把一条消息发到 QQ（默认发给这一轮钉住的群或私聊；没钉住就用最后一次入站）。' +
       '**只有被 QQ 唤醒的那一轮才直接发得出去**：在 DSH 界面里直接对话时，第一次调用只会回一句' +
       '"本轮不是 QQ 发起的，确认要发吗"，同一轮里再调一次才真的发出去。' +
       'replyMode=tool 时这是唯一的出站方式；marker 模式下它是「直接发这一条」的旁路。' +
@@ -2449,24 +2613,21 @@ export function apply(ctx, config) {
       '发出去的内容会记进 outbox（via: tool）。',
     parameters: {
       text: { type: 'string', required: true, description: '要发送的文本；超过出站字数上限时不会发出。' },
-      userId: { type: 'string', description: '私聊目标 QQ 号；与 groupId 二选一，都不给则用最后一次入站目的地。' },
-      groupId: { type: 'string', description: '群号；与 userId 二选一。' },
+      userId: { type: 'string', description: '私聊目标 QQ 号；与 groupId 二选一，都不给则用这一轮钉住的目的地。' },
+      groupId: { type: 'string', description: '群号；与 userId 二选一。显式指定时不引用别的群的消息。' },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
-    async execute(args) {
+    async execute(args, exec) {
       // 来源闸门（2026-10-01 起是**二次确认**，不再是硬拒绝）：
       // 不是 QQ 唤醒的那一轮，第一次调用只回一句“确认要发吗”、**一个字都不发**；
       // 同一轮里再调一次才真的发出去。DSH 侧依然不会误发（多跨一道有意识的动作），
       // 但同时保住了“我确实想让你发到 QQ”这条能力 —— 以前是彻底发不出去。
       const blocked = outboundGate('qq_bridge_send')
       if (blocked !== null) return blocked
-      const dest = args.groupId
-        ? { kind: 'group', groupId: String(args.groupId) }
-        : args.userId
-          ? { kind: 'private', userId: String(args.userId) }
-          : undefined
+      const resolved = resolveOutboundDest(args, exec)
+      const dest = resolved.dest
       try {
-        const result = await sendToQQ(args.text, dest)
+        const result = await sendToQQ(args.text, dest, { quoteMessageId: resolved.quoteMessageId })
         // 只记真的发出去的：被拒绝的不落 outbox。
         if (result?.sent > 0) {
           recordOutbox({
@@ -2574,11 +2735,11 @@ export function apply(ctx, config) {
       fromLast: { type: 'boolean', description: 'save 时 true = 取缓冲区里最近一张图。' },
       mood: { type: 'string', description: '情绪分类，如 无语 / 开心 / 震惊。save 必填；send 只给 mood 时随机挑一张。' },
       description: { type: 'string', description: '这张图是什么。save 必填，之后识图与发送都用它。' },
-      groupId: { type: 'string', description: '发到哪个群；与 userId 二选一，都不给则用最后一次入站目的地。' },
+      groupId: { type: 'string', description: '发到哪个群；与 userId 二选一，都不给则用这一轮钉住的目的地。' },
       userId: { type: 'string', description: '发到哪个私聊 QQ 号。' },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
-    async execute(args) {
+    async execute(args, exec) {
       const store = loadStickerStore()
       const action = String(args.action ?? 'list')
       try {
@@ -2667,11 +2828,7 @@ export function apply(ctx, config) {
             }, null, 2)
           }
 
-          const dest = args.groupId
-            ? { kind: 'group', groupId: String(args.groupId) }
-            : args.userId
-              ? { kind: 'private', userId: String(args.userId) }
-              : state.lastDestination
+          const dest = resolveOutboundDest(args, exec).dest
           if (!dest?.kind) {
             return JSON.stringify({
               ok: false,
@@ -3123,7 +3280,7 @@ export function apply(ctx, config) {
       off: { type: 'boolean', description: 'true = 立刻关闭监听窗口。' },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
-    async execute(args) {
+    async execute(args, exec) {
       if (args.off === true) {
         state.listening = null
         saveState()
@@ -3133,7 +3290,7 @@ export function apply(ctx, config) {
       if (args.minutes === undefined || args.minutes === null) {
         return JSON.stringify({ listening: state.listening, now: Date.now() }, null, 2)
       }
-      const dest = state.lastDestination
+      const dest = resolveOutboundDest({}, exec).dest
       if (!dest?.kind) {
         return JSON.stringify({ error: '还没有任何入站目的地（先等一条非丢弃的 QQ 消息）' }, null, 2)
       }
