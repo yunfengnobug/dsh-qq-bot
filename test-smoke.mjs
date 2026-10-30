@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeMaxRecentTurns, normalizeReplyMode, normalizeSessionScope, NS, truncateText } from './index.js'
 import { hashOfBuffer, loadStickers, saveStickers, shortHash, upsertSticker } from './stickers.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
@@ -1009,7 +1009,7 @@ function sawSentText(s) {
   check('注册了 settings 命名空间 qq-bridge', registeredSettings.length === 1 && reg?.ns === 'qq-bridge', String(reg?.ns))
   const dict = reg?.schema?.dict ?? {}
   const keys = Object.keys(dict)
-  check('settings 键数量符合预期（23）', keys.length === 23, `实际 ${keys.length}`)
+  check('settings 键数量符合预期（25）', keys.length === 25, `实际 ${keys.length}`)
   const missing = keys.filter((k) => String(dict[k]?.meta?.description ?? '').trim() === '')
   check('每个 settings 键都有说明（设置界面里能看懂）', missing.length === 0, missing.join(', '))
   // readSettings() 会读到的键必须都在 Schema 里，否则用户在界面上改不到它
@@ -3188,6 +3188,119 @@ function sawSentText(s) {
     fakeAgent = prevAgent
     fire('turn/end', { reason: { kind: 'completed' } })
   }
+}
+
+// 默认仍是上游的单会话；轮数上限有默认值。
+{
+  const st = JSON.parse(await status.execute({}))
+  check('默认 sessionScope 是 single', st.settings?.sessionScope === 'single', JSON.stringify(st.settings?.sessionScope))
+  check('默认 maxRecentTurns 是 40', st.settings?.maxRecentTurns === 40, JSON.stringify(st.settings?.maxRecentTurns))
+  check('sessionScope 只认 perGroup，其它值回落 single', normalizeSessionScope('perGroup') === 'perGroup' && normalizeSessionScope('fixed') === 'single')
+  check('maxRecentTurns：0 保留，非法回落 40，超过 500 夹断', normalizeMaxRecentTurns(0) === 0 && normalizeMaxRecentTurns('nope') === 40 && normalizeMaxRecentTurns(900) === 500)
+}
+
+// perGroup：每个群、每个私聊各建一条会话，并记在 sessionByDest。超长会话会请求压缩。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-scope-'))
+  const stateFile = join(dir, 'state.json')
+  const created = []
+  const agents = new Map()
+  const localHandlers = {}
+  let compacts = 0
+  const scopeSettings = {
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 2,
+    nicknames: ['小助手'],
+    wakeProbability: 0,
+    whitelist: ['10000002'],
+    groupWhitelist: ['12345678', '87654321'],
+    replyMode: 'marker',
+    delivery: 'followup',
+  }
+  const iso = {
+    logger: { info() {}, warn() {} },
+    settings: { register: () => {}, get: () => scopeSettings },
+    agents: {
+      get: (id) => agents.get(id),
+      resume: async () => {
+        throw new Error('should create')
+      },
+      create: async ({ sessionId }) => {
+        const agent = {
+          id: sessionId,
+          session: {
+            id: sessionId,
+            events: () => Array.from({ length: 10 }, () => ({ type: 'turn/end' })),
+          },
+          status: 'idle',
+          followup(message) {
+            return message
+          },
+          ctx: { get: () => undefined, effect: (fn) => fn() },
+        }
+        agents.set(sessionId, agent)
+        created.push(sessionId)
+        return { agent, dispose: async () => {} }
+      },
+      withInitiator: (_agent, fn) => fn(),
+    },
+    tools: { register: (def) => tools.push(def) },
+    on: (name, fn) => {
+      localHandlers[name] = fn
+      return () => {}
+    },
+    effect: () => {},
+    get: (name) => (name === 'compaction' ? { compactNow: async () => { compacts += 1; return { ok: true } } } : undefined),
+    inject: () => {},
+  }
+  const tools = []
+  iso.tools = { register: (def) => tools.push(def) }
+  apply(iso, {
+    statePath: stateFile,
+    debugTools: true,
+    onebotUrl: '',
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 2,
+    nicknames: ['小助手'],
+    whitelist: [],
+    groupWhitelist: [],
+    napcatInstallDir: join(dir, 'no-napcat'),
+  })
+  const sim = tools.find((t) => t.name === 'qq_bridge_simulate')
+  const wake = (groupId) => sim.execute({ text: '小助手在吗', userId: '10000002', groupId, nickname: '甲' })
+  const first = JSON.parse(await wake('12345678'))
+  const again = JSON.parse(await wake('12345678'))
+  const other = JSON.parse(await wake('87654321'))
+  const priv = JSON.parse(await sim.execute({ text: '小助手在吗', userId: '10000002', nickname: '甲' }))
+  check('perGroup：群消息投递成功', first?.decision?.delivered === true, JSON.stringify(first?.decision))
+  check(
+    'perGroup：同一个群复用会话，不重复创建',
+    again?.decision?.sessionId === first?.decision?.sessionId && created.filter((id) => id === first.decision.sessionId).length === 1,
+    JSON.stringify(created),
+  )
+  check('perGroup：另一个群另开会话', other?.decision?.sessionId && other.decision.sessionId !== first.decision.sessionId, JSON.stringify(other?.decision?.sessionId))
+  check('perGroup：私聊再另开一条', priv?.decision?.sessionId && !created.slice(0, 2).includes(priv.decision.sessionId) && created.length === 3, JSON.stringify(created))
+  const saved = JSON.parse(readFileSync(stateFile, 'utf8'))
+  check(
+    'perGroup：sessionByDest 落盘为 group:/private: 键',
+    saved.sessionByDest?.['group:12345678'] === first.decision.sessionId &&
+      saved.sessionByDest?.['group:87654321'] === other.decision.sessionId &&
+      saved.sessionByDest?.['private:10000002'] === priv.decision.sessionId,
+    JSON.stringify(saved.sessionByDest),
+  )
+  localHandlers['session/event'](
+    { id: first.decision.sessionId },
+    { type: 'turn/start', data: { turn: 1 } },
+  )
+  localHandlers['session/event'](
+    { id: first.decision.sessionId },
+    { type: 'turn/end', data: { reason: { kind: 'completed' } } },
+  )
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('maxRecentTurns：超限时调用宿主 compactNow', compacts >= 1, String(compacts))
+  rmSync(dir, { recursive: true, force: true })
 }
 
 // 用例用过的临时图片：留着只会在 %TEMP% 里积垃圾

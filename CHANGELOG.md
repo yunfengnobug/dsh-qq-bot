@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- **按目的地分会话，并限制每个会话保留的轮数**：新设置 `sessionScope`（`single` 默认，沿用一个 `targetSessionId`；`perGroup` 为每个群、每个私聊自动创建或恢复一条 DSH 会话）。映射持久化在状态文件的 `sessionByDest`。`maxRecentTurns` 默认 40，`0` 表示不限制；QQ 驱动的一轮结束后，若宿主有 `compaction.compactNow`，会尽量把更早的轮次压到这个上限。
 - **Fork 品牌改为 dsh-qq-bot**：包名、界面显示名、NapCat 配置里的默认名称改为 dsh-qq-bot。Cordis 插件 id、设置命名空间和 `/api/qq-bridge/...` 仍是 `qq-bridge`，已有 profile 覆盖不用改。v4 消息来源写成 `plugin:dsh-qq-bot`，同时仍认上游的 `plugin:dsh-qq-bridge`。上游 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge) 的 MIT 版权保留。
 
 - **修 issue #1：相邻重复的 `[QQ]` 块只发一次**：模型先写回答、再调工具、随后又把同一句重写一遍时，

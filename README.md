@@ -33,8 +33,9 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
 
 ## 功能
 
-- **注入固定会话**：`targetSessionId` 指向哪个会话，QQ 的消息就注入哪个会话，该会话原有的上下文继续使用。
+- **注入固定会话**：`sessionScope` 默认 `single`。`targetSessionId` 指向哪个会话，QQ 的消息就注入哪个会话，该会话原有的上下文继续使用。
   目标会话由插件显式加载（`agents.get(id)`，取不到时用 `agents.resume({ resumeSessionId })`），不回退到别的会话。
+- **也可以按群分会话**：把 `sessionScope` 设成 `perGroup` 后，每个群、每个私聊各用一条 DSH 会话，对应关系写在状态文件的 `sessionByDest`（键是 `group:<群号>` / `private:<QQ号>`）。这种模式下 `targetSessionId` 可以留空，新建会话用宿主当前的默认模型；填了则沿用那个会话的模型。`maxRecentTurns` 默认 40，QQ 驱动的一轮结束后尽量把更早的轮次压到这个上限，`0` 表示不限制。
 - **按概率唤醒，节省 token**：被 @、命中昵称、被戳时会话必须唤醒。其余消息按概率抽样（默认 5%）。
   没有抽中的消息只记录，不调用模型。详见[唤醒策略](#唤醒策略)。
 - **出站受来源闸门限制**：出站有标记块和工具 2 种方式，由 `replyMode` 切换。2 种方式都只对“被 QQ 唤醒的那一轮”生效。
@@ -353,7 +354,9 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `targetSessionId` | `''` | 固定目标会话 id；**空 = 不驱动任何会话** |
+| `targetSessionId` | `''` | 固定目标会话 id。`single` 时**空 = 不驱动任何会话**。`perGroup` 时可以留空（新建会话用宿主当前默认模型）；填了则新建会话沿用该会话的模型 |
+| `sessionScope` | `single` | `single` = 所有群共用 `targetSessionId`；`perGroup` = 每个群、每个私聊各开一条 DSH 会话，映射写在状态文件的 `sessionByDest`（键为 `group:<群号>` / `private:<QQ号>`） |
+| `maxRecentTurns` | `40` | 每个被 QQ 驱动的会话最多保留的最近轮数。超出后调用宿主 `compaction.compactNow` 尽量压缩。`0` = 不限制 |
 | `nicknames` | `['244','小助手']` | 命中即唤醒 |
 | `wakeProbability` | `0.05` | 非昵称消息唤醒概率 |
 | `whitelist` / `groupWhitelist` | `[]` | 私聊 / 群白名单（**空 = 任何来源都不能唤醒**） |

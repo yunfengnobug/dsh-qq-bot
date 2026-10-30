@@ -12,6 +12,7 @@
 //     出站文本超过 replyMaxChars 就拒绝发送；未超长才发给最后一次入站的目的地。
 //     传输细节（内置 WebSocket、token 走查询串、退避重连）全部封装在 onebot.js。
 
+import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -139,6 +140,11 @@ export const Config = Schema.object({
   downloadProxy: Schema.string().default('').description('下载用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量，再不行直连。'),
   onebotPort: Schema.number().default(3001).description('写进 NapCat 配置、并用来连的正向 WS 端口。'),
   qqNumber: Schema.string().default('').description('快速登录用的 QQ 号（需先成功登录过一次）。'),
+  sessionScope: Schema.union([
+    Schema.const('single'),
+    Schema.const('perGroup'),
+  ]).default('single').description('会话怎么分：single = 所有群共用 targetSessionId；perGroup = 每个群、每个私聊各用一个会话。'),
+  maxRecentTurns: Schema.number().default(40).description('每个会话最多保留的最近轮数。超出后尽量压缩更早的历史。0 = 不限制。'),
   // 以下是 settings 命名空间的 composition base（装好的默认值）：
   // 设置界面里的用户层会覆盖它们。
   nicknames: Schema.array(Schema.string()).default(['244']),
@@ -178,6 +184,11 @@ const BridgeSettings = Schema.object({
   downloadProxy: Schema.string().default('').description('下载 NapCat 用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量，再不行直连。'),
   onebotPort: Schema.number().default(3001).description('写进 NapCat 配置、并用来连的正向 WS 端口。'),
   qqNumber: Schema.string().default('').description('快速登录用的 QQ 号（需先成功登录过一次）。'),
+  sessionScope: Schema.union([
+    Schema.const('single'),
+    Schema.const('perGroup'),
+  ]).default('single').description('会话怎么分：single = 所有群共用一个会话；perGroup = 每个群、每个私聊各记各的，互不串上下文。'),
+  maxRecentTurns: Schema.number().default(40).description('每个会话最多留几轮对话。默认 40。更早的内容会尽量压缩掉，好让回复更快。填 0 表示不限制。'),
 })
 
 /** OneBot 非文本消息段 → 可读占位符。
@@ -366,6 +377,8 @@ export function apply(ctx, config) {
         downloadProxy: config.downloadProxy ?? '',
         onebotPort: config.onebotPort ?? 3001,
         qqNumber: config.qqNumber ?? '',
+        sessionScope: normalizeSessionScope(config.sessionScope),
+        maxRecentTurns: normalizeMaxRecentTurns(config.maxRecentTurns),
       },
         applies: 'live',
     })
@@ -417,6 +430,8 @@ export function apply(ctx, config) {
       downloadProxy: String(s.downloadProxy ?? config.downloadProxy ?? '').trim(),
       onebotPort: Math.max(1, Math.min(65535, Number(s.onebotPort ?? config.onebotPort ?? 3001))),
       qqNumber: String(s.qqNumber ?? config.qqNumber ?? '').trim(),
+      sessionScope: normalizeSessionScope(s.sessionScope ?? config.sessionScope),
+      maxRecentTurns: normalizeMaxRecentTurns(s.maxRecentTurns ?? config.maxRecentTurns),
     }
   }
 
@@ -650,6 +665,8 @@ export function apply(ctx, config) {
     lastDestination: null,
     lastMessageId: null,
     listening: null,
+    /** destKey（group:<id> / private:<id>）→ 会话 id。perGroup 时每个群、每个私聊一条。 */
+    sessionByDest: {},
   }
   loadState()
 
@@ -664,6 +681,13 @@ export function apply(ctx, config) {
       if (raw?.lastDestination && typeof raw.lastDestination === 'object') state.lastDestination = raw.lastDestination
       if (raw?.lastMessageId !== undefined) state.lastMessageId = raw.lastMessageId
       if (raw?.listening && typeof raw.listening === 'object') state.listening = raw.listening
+      if (raw?.sessionByDest && typeof raw.sessionByDest === 'object') {
+        const next = {}
+        for (const [key, value] of Object.entries(raw.sessionByDest)) {
+          if (typeof key === 'string' && typeof value === 'string' && value.trim() !== '') next[key] = value.trim()
+        }
+        state.sessionByDest = next
+      }
     } catch (error) {
       logger.warn(`state load failed: ${error?.message ?? error}`)
     }
@@ -940,10 +964,78 @@ export function apply(ctx, config) {
     return undefined
   }
 
-  async function ensureTargetAgent() {
+  function trackedSessionIds(s = readSettings()) {
+    const ids = new Set()
+    if (s.sessionScope === 'perGroup') {
+      for (const id of Object.values(state.sessionByDest || {})) {
+        if (id) ids.add(id)
+      }
+      return ids
+    }
+    if (s.targetSessionId) ids.add(s.targetSessionId)
+    return ids
+  }
+
+  function isTrackedSession(sessionId) {
+    if (!sessionId) return false
+    return trackedSessionIds().has(sessionId)
+  }
+
+  async function resolveDefaultAgentOptions() {
+    try {
+      const fallback = ctx.get('agentDefaultModel')
+      const sel = typeof fallback?.currentSelection === 'function' ? fallback.currentSelection() : undefined
+      if (sel?.provider && sel?.model) {
+        return {
+          provider: sel.provider,
+          model: sel.model,
+          ...(sel.reasoningEffort ? { reasoningEffort: sel.reasoningEffort } : {}),
+        }
+      }
+    } catch {
+      // 没有默认模型时，新建会话仍继续；提示词里的 {{model}} 会在那一轮暴露。
+    }
+    return undefined
+  }
+
+  async function createDestSession(msg, s) {
+    const key = destinationKeyOf(msg)
+    if (!key) throw new Error('无法为该消息确定会话目的地')
+    if (typeof ctx.agents?.create !== 'function') {
+      throw new Error('这个宿主没有 agents.create，无法为每个群单独开会话')
+    }
+    const sessionId = `qq-${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    const agentOptions =
+      (s.targetSessionId ? await resolveResumeAgentOptions(s.targetSessionId) : null) ||
+      (await resolveDefaultAgentOptions())
+    const label = msg.groupId
+      ? `QQ群 ${msg.groupName || msg.groupId}`
+      : `QQ私聊 ${msg.nickname || msg.userId}`
+    const handle = await ctx.agents.create({
+      sessionId,
+      ...(agentOptions ? { agentOptions } : {}),
+      ...(s.agentPreset ? { setup: mountPreset, meta: { agentPreset: s.agentPreset } } : {}),
+    })
+    state.sessionByDest[key] = sessionId
+    saveState()
+    handles.set(sessionId, handle)
+    mountUsagePrompt(handle.agent)
+    logger.info(`created per-dest session ${sessionId} for ${key} (${label})`)
+    return handle.agent
+  }
+
+  async function ensureTargetAgent(msg) {
     const s = readSettings()
-    const id = s.targetSessionId
-    if (!id) throw new Error('未配置 targetSessionId')
+    let id
+    if (s.sessionScope === 'perGroup') {
+      const key = destinationKeyOf(msg)
+      if (!key) throw new Error('perGroup 模式下缺少 groupId 或 userId')
+      id = state.sessionByDest[key]
+      if (!id) return await createDestSession(msg, s)
+    } else {
+      id = s.targetSessionId
+      if (!id) throw new Error('未配置 targetSessionId')
+    }
 
     const live = ctx.agents.get(id)
     if (live) {
@@ -963,16 +1055,68 @@ export function apply(ctx, config) {
 
     // 显式 resume：这是与 dsh-cron 的关键差异 —— 目标会话没开着也能被唤醒。
     // ⚠️ 必须带 agentOptions（模型）—— 否则提示词里的 {{model}} 没值，整轮组装失败。
-    const agentOptions = await resolveResumeAgentOptions(id)
-    const handle = await ctx.agents.resume({
-      resumeSessionId: id,
-      ...(agentOptions ? { agentOptions } : {}),
-      ...(s.agentPreset ? { setup: mountPreset } : {}),
-    })
-    handles.set(id, handle)
-    mountUsagePrompt(handle.agent)
-    logger.info(`resumed target session ${id}`)
-    return handle.agent
+    try {
+      const agentOptions = await resolveResumeAgentOptions(id)
+      const handle = await ctx.agents.resume({
+        resumeSessionId: id,
+        ...(agentOptions ? { agentOptions } : {}),
+        ...(s.agentPreset ? { setup: mountPreset } : {}),
+      })
+      handles.set(id, handle)
+      mountUsagePrompt(handle.agent)
+      logger.info(`resumed target session ${id}`)
+      return handle.agent
+    } catch (error) {
+      if (s.sessionScope !== 'perGroup') throw error
+      logger.warn(`resume ${id} 失败，改为新建：${error?.message ?? error}`)
+      const key = destinationKeyOf(msg)
+      if (key) delete state.sessionByDest[key]
+      saveState()
+      return await createDestSession(msg, s)
+    }
+  }
+
+  /**
+   * QQ 驱动的一轮结束后，把该会话压到 maxRecentTurns。
+   * 0 或宿主没有 compaction 时什么都不做。压缩失败只记日志，不挡出站。
+   */
+  async function maybeTrimSession(agent) {
+    const max = readSettings().maxRecentTurns
+    if (!max || max <= 0 || !agent) return
+    const compaction = ctx.get('compaction')
+    if (!compaction || typeof compaction.compactNow !== 'function') return
+    const countTurns = () => {
+      try {
+        const events = typeof agent.session?.events === 'function' ? agent.session.events() : agent.session?.events
+        const list = Array.isArray(events) ? events : []
+        let turns = 0
+        for (const event of list) {
+          if (event?.type === 'turn/end') turns += 1
+        }
+        if (turns > 0) return turns
+      } catch {
+        // 读不到事件就试投影
+      }
+      try {
+        const outline = agent.session?.projection?.turnOutline?.turns
+        if (Array.isArray(outline)) return outline.length
+      } catch {
+        // 投影也没有时当作不需要压缩
+      }
+      return 0
+    }
+    for (let i = 0; i < 6; i++) {
+      const turns = countTurns()
+      if (!turns || turns <= max) return
+      try {
+        const result = await compaction.compactNow(agent)
+        if (!result) return
+        logger.info(`session ${agent.session?.id ?? agent.id} trimmed via compact (turns~${turns} > ${max})`)
+      } catch (error) {
+        logger.warn(`compact trim failed: ${error?.message ?? error}`)
+        return
+      }
+    }
   }
 
   /** resume 时把 preset 挂到该 agent 的 setup 上（可选）。 */
@@ -1408,7 +1552,7 @@ export function apply(ctx, config) {
 
     let agent
     try {
-      agent = await ensureTargetAgent()
+      agent = await ensureTargetAgent(msg)
     } catch (error) {
       // 还没走到置位点，闸门标志本来就是“置位前的值”，不必回滚。
       return failWake(error)
@@ -1774,8 +1918,10 @@ export function apply(ctx, config) {
     // 用法说明的正文是**挂载那一刻的快照**：设置或文案一变就要重挂。
     // 判据在 `mountUsagePrompt()` 里比渲染后的正文，这里只管把它叫过来 ——
     // 正文没变时它会自己早退，所以不必在外面再维护一份“依赖哪些设置”的清单。
-    const live = s.targetSessionId ? ctx.agents.get(s.targetSessionId) : undefined
-    if (live) mountUsagePrompt(live)
+    for (const id of trackedSessionIds(s)) {
+      const live = ctx.agents.get(id)
+      if (live) mountUsagePrompt(live)
+    }
 
     const key = `${s.onebotUrl}\u0000${s.accessTokenEnv}`
     if (key === lastTransportKey) return
@@ -1899,8 +2045,7 @@ export function apply(ctx, config) {
   }
 
   ctx.on('session/event', guarded('session/event', (session, event) => {
-    const targetId = readSettings().targetSessionId
-    if (!targetId || session?.id !== targetId) return
+    if (!isTrackedSession(session?.id)) return
     const data = event?.data ?? {}
 
     // 一轮开始：把“当前轮来源”定下来。
@@ -1976,6 +2121,14 @@ export function apply(ctx, config) {
       turnActive = false
       claimedFromQQ = false
       nonQQConfirmPending = false
+      if (fromQQ) {
+        const liveAgent = ctx.agents.get(session.id)
+        if (liveAgent) {
+          Promise.resolve(maybeTrimSession(liveAgent)).catch((error) =>
+            logger.warn(`maybeTrimSession: ${error?.message ?? error}`),
+          )
+        }
+      }
       if (!raw) return
 
       // 闸门的第一道：**只发 QQ 唤醒的那一轮**。DSH 界面里聊出来的标记块一个字都不发。
@@ -2172,6 +2325,7 @@ export function apply(ctx, config) {
         return JSON.stringify({
           settings: s,
           targetLoaded: Boolean(live),
+          sessionByDest: state.sessionByDest,
           resumedHandles: [...handles.keys()],
           transport: transport.status(),
           visionModel: (await findVisionModel()) ?? '(没找到支持图片输入的模型)',
@@ -2997,6 +3151,19 @@ export function apply(ctx, config) {
   }))
 
   logger.info(`ready (target=${readSettings().targetSessionId || '未设置'}, onebot=${readSettings().onebotUrl || '未配置'}, state=${statePath})`)
+}
+
+/** 会话范围：只认 single | perGroup。别的值（含空）回落到 single，与上游单会话一致。 */
+export function normalizeSessionScope(raw) {
+  return raw === 'perGroup' ? 'perGroup' : 'single'
+}
+
+/** 每个会话保留的最近轮数。非数字回落 40；夹在 0–500。0 = 不限制。 */
+export function normalizeMaxRecentTurns(raw) {
+  if (raw === undefined || raw === null || raw === '') return 40
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return 40
+  return Math.max(0, Math.min(500, Math.floor(n)))
 }
 
 /** 出站方式的归一化：只认 'marker' | 'tool' | 'always'，别的一律当 'marker'。导出是为了可测试。 */

@@ -35,6 +35,22 @@ window.__ModuleLoader__.load({
     // 加一个设置项 = 在这里加一行。kind: text | list | number | boolean | select
     const FIELDS = [
       {
+        key: 'sessionScope',
+        label: '会话怎么分',
+        kind: 'select',
+        options: [
+          ['single', '所有群共用一个会话'],
+          ['perGroup', '每个群、每个私聊各记各的'],
+        ],
+        hint: '共用一个会话：所有 QQ 消息都进下面选的那一个会话。各记各的：每个群、每个私聊自动开一条上下文，互不抢回复。',
+      },
+      {
+        key: 'maxRecentTurns',
+        label: '每个会话最多留几轮',
+        kind: 'number',
+        hint: '默认 40。聊太长会尽量把更早的内容压缩掉，回复更快。填 0 表示不限制。',
+      },
+      {
         key: 'targetSessionId',
         label: '目标会话',
         kind: 'session',
