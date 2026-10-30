@@ -114,6 +114,8 @@ const MAX_IMAGE_DOWNLOAD_BYTES = 8 * 1024 * 1024
 const DEFAULT_RECENT_CHAT_LIMIT = 8
 /** `qq_bridge_sticker` 的 `list` 最多列几条。 */
 const MAX_STICKER_LIST = 50
+/** 同时握着的会话句柄上限。超出就放开最久没用的，映射还留着，下次消息再恢复。 */
+const MAX_SESSION_HANDLES = 48
 /** `list` 里每条描述截断到多少字（紧凑列表，别把上下文吃掉）。 */
 const MAX_STICKER_DESC = 40
 
@@ -1097,6 +1099,23 @@ export function apply(ctx, config) {
     }
   }
 
+  /** 记下句柄并把它当作最近用过的。死句柄丢掉；活的超过上限就放开最久没用的。 */
+  function rememberHandle(id, handle) {
+    if (handles.has(id)) handles.delete(id)
+    handles.set(id, handle)
+    for (const [heldId, held] of [...handles]) {
+      if (heldId === id) continue
+      if (!isAgentAlive(held?.agent)) handles.delete(heldId)
+    }
+    while (handles.size > MAX_SESSION_HANDLES) {
+      const oldest = handles.keys().next().value
+      const held = handles.get(oldest)
+      handles.delete(oldest)
+      logger.info(`会话句柄超过 ${MAX_SESSION_HANDLES} 个，放开最久未用的 ${oldest}。映射还在，下次消息会再恢复。`)
+      Promise.resolve(held?.dispose?.()).catch(() => {})
+    }
+  }
+
   /**
    * 已经注入过用法说明的会话：`sessionId -> { dispose, text }`。
    *
@@ -1293,7 +1312,7 @@ export function apply(ctx, config) {
     })
     state.sessionByDest[key] = sessionId
     saveState()
-    handles.set(sessionId, handle)
+    rememberHandle(sessionId, handle)
     mountUsagePrompt(handle.agent)
     logger.info(`created per-dest session ${sessionId} for ${key} (${label})`)
     return handle.agent
@@ -1323,7 +1342,10 @@ export function apply(ctx, config) {
       // ⚠️ 走到这里时 `ctx.agents.get(id)` 已经是空 —— 死句柄留下来只会让每次唤醒都投给
       // 已销毁的 agent，`resume` 永不再执行，台账逐条记 `wake-failed`，事后查不出句柄已死。
       // 先验活：活着的（句柄记的是别的会话 id 时可能出现）直接用，死的删掉再走 resume。
-      if (isAgentAlive(held.agent)) return held.agent
+      if (isAgentAlive(held.agent)) {
+        rememberHandle(id, held)
+        return held.agent
+      }
       handles.delete(id)
       logger.warn(`目标会话 ${id} 的旧句柄已失效（agent 不在注册表），改走 resume`)
     }
@@ -1337,7 +1359,7 @@ export function apply(ctx, config) {
         ...(agentOptions ? { agentOptions } : {}),
         ...(s.agentPreset ? { setup: mountPreset } : {}),
       })
-      handles.set(id, handle)
+      rememberHandle(id, handle)
       mountUsagePrompt(handle.agent)
       logger.info(`resumed target session ${id}`)
       return handle.agent

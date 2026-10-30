@@ -3777,6 +3777,112 @@ function sawSentText(s) {
   rmSync(dir, { recursive: true, force: true })
 }
 
+// 会话句柄：死的丢掉；同时握着超过 48 个时放开最久没用的，映射还在，下次再恢复。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-handles-'))
+  const stateFile = join(dir, 'state.json')
+  const agents = new Map()
+  const created = []
+  const resumed = []
+  const disposed = []
+  const groupIds = Array.from({ length: 49 }, (_, i) => `g${i}`)
+  const iso = {
+    logger: { info() {}, warn() {} },
+    settings: {
+      register: () => {},
+      get: () => ({
+        targetSessionId: '',
+        sessionScope: 'perGroup',
+        maxRecentTurns: 0,
+        nicknames: ['小助手'],
+        wakeProbability: 0,
+        whitelist: [],
+        groupWhitelist: groupIds,
+        replyMode: 'marker',
+        delivery: 'followup',
+      }),
+    },
+    agents: {
+      get: (id) => agents.get(id),
+      resume: async ({ resumeSessionId }) => {
+        resumed.push(resumeSessionId)
+        const agent = {
+          id: resumeSessionId,
+          session: { id: resumeSessionId },
+          status: 'idle',
+          followup() {},
+          ctx: { get: () => undefined, effect: () => () => {} },
+        }
+        agents.set(resumeSessionId, agent)
+        return {
+          agent,
+          dispose: async () => {
+            disposed.push(resumeSessionId)
+            agents.delete(resumeSessionId)
+          },
+        }
+      },
+      create: async ({ sessionId }) => {
+        const agent = {
+          id: sessionId,
+          session: { id: sessionId },
+          status: 'idle',
+          followup() {},
+          ctx: { get: () => undefined, effect: () => () => {} },
+        }
+        agents.set(sessionId, agent)
+        created.push(sessionId)
+        return {
+          agent,
+          dispose: async () => {
+            disposed.push(sessionId)
+            agents.delete(sessionId)
+          },
+        }
+      },
+      withInitiator: (_agent, fn) => fn(),
+    },
+    tools: { register: () => {} },
+    on: () => () => {},
+    effect: () => {},
+    get: () => undefined,
+    inject: () => {},
+  }
+  const tools = []
+  iso.tools = { register: (def) => tools.push(def) }
+  apply(iso, {
+    statePath: stateFile,
+    debugTools: true,
+    onebotUrl: '',
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 0,
+    nicknames: ['小助手'],
+    whitelist: [],
+    groupWhitelist: groupIds,
+    napcatInstallDir: join(dir, 'no-napcat'),
+  })
+  const sim = tools.find((t) => t.name === 'qq_bridge_simulate')
+  const statusTool = tools.find((t) => t.name === 'qq_bridge_status')
+  for (const groupId of groupIds) {
+    await sim.execute({ text: '小助手在吗', userId: '1', groupId, nickname: '甲' })
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const held = JSON.parse(await statusTool.execute({})).resumedHandles
+  const saved = JSON.parse(readFileSync(stateFile, 'utf8'))
+  const firstId = created[0]
+  check('句柄上限：建满 49 个群后只握着 48 个', created.length === 49 && held.length === 48, JSON.stringify({ created: created.length, held: held.length }))
+  check('句柄上限：最久未用的已被放开', disposed.includes(firstId) && !held.includes(firstId), JSON.stringify({ disposed, held }))
+  check('句柄上限：被放开的群映射还在', saved.sessionByDest?.['group:g0'] === firstId, JSON.stringify(saved.sessionByDest?.['group:g0']))
+  const again = JSON.parse(await sim.execute({ text: '小助手在吗', userId: '1', groupId: 'g0', nickname: '甲' }))
+  check(
+    '句柄上限：旧群再来消息走恢复，不另开',
+    resumed.includes(firstId) && again?.decision?.sessionId === firstId && created.length === 49,
+    JSON.stringify({ resumed, sessionId: again?.decision?.sessionId, created: created.length }),
+  )
+  rmSync(dir, { recursive: true, force: true })
+}
+
 // 两路会话同时在跑：缓冲、闸门、标记块、跟随窗口都不能串。
 {
   const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-overlap-'))
