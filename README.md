@@ -19,7 +19,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 在 GitHub 上 Watch → Custom → **Releases**，比盯 main 稳。环境、第一次怎么开白名单、怎么升级、和官方插件为什么不能一起挂，写在[安装](#安装)。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
-- 当前版本 **v0.2.3**（商城表情按 QQ 原生表情包发送，普通图片仍是图片。见 [`CHANGELOG.md`](./CHANGELOG.md)）。稳定安装用上面的 `#v0.2.3`。
+- 源码版本 **0.2.4**（设置页可以检查更新）。GitHub 上已发布的稳定版仍是 **v0.2.3**，日常安装用上面的 `#v0.2.3`。打出新的 Release 之后，把命令里的 tag 换成那一版；卡片上的「检查更新」也会给出当时的安装命令。见 [`CHANGELOG.md`](./CHANGELOG.md)。
 - **M1–M8 全部完成**，已在**真实 NapCat + 真实 QQ** 上端到端跑通（Windows 真机）
 
 ## 目录
@@ -55,7 +55,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 
 ## 安装
 
-稳定版看 [Releases](https://github.com/yunfengnobug/dsh-qq-bot/releases)。当前是 **v0.2.3**：
+稳定版看 [Releases](https://github.com/yunfengnobug/dsh-qq-bot/releases)。已经发出的是 **v0.2.3**。仓库源码如果已经是 0.2.4，那是 main 上还没打 tag 的版本，日常不要装 main。
 
 ```sh
 dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
@@ -408,6 +408,10 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 > 宿主 `requestRejection()` 返回空、`undefined` 或 `0` **不算**已登录。已登录只认宿主明确给出的结果：`isAuthenticated`、浏览器会话，或 `admit()` 交回的身份。没有这个结果的外网请求是 403。来源是别的网站、和 `Host` 对不上的请求也是 403，就算带着 cookie 也不行。接口只写 schema 白名单里的键。
 > 判断面板监听器是不是 HTTPS 时，只通过 `ctx.get('webServer')` 读协议，不读 `ctx.webServer`。插件没有把 `webServer` 放进 inject。直接读这个属性会抛错，宿主会把这次请求收成**没有正文的 HTTP 400**，卡片诊断就显示本机接口不可用，即使浏览器里已经登录。读不到这项服务、或读取失败时，按 HTTP 继续做登录判定。
 
+卡片上方显示**当前版本**，并有一个 **检查更新** 按钮。它向本仓库的 GitHub Releases 问一次（`GET/POST /api/qq-bridge/update`，准入和设置接口相同）。GET 只读当前版本，不去 GitHub；只有点按钮的 POST 才去对比。有新版时写出最新版本号、Release 说明摘要，以及 `github:yunfengnobug/dsh-qq-bot#vX.Y.Z` 的安装命令。没有新版、连不上、被 GitHub 限流，都用白话说明。不会自动下载或安装。
+
+「启动时检查一次」默认关。打开并保存后，下次启动 dsh-web 才问一次，结果只写在日志里。
+
 卡片展开后还有 3 个操作按钮（0.1.5 与 0.2.0 上都有）：
 
 - **打开 WebUI**：用浏览器打开 NapCat 的 WebUI。填了 `napcatWebuiUrl` 就打开那个地址（地址本身没带 token 时，会补上 `webui.json` 里的 token）。没填则用 `<安装目录>/config/webui.json` 里的 host / port / token；文件不存在时仍按 `127.0.0.1:6099` 打开，按钮保持可点。地址是 `127.0.0.1` 或 `localhost` 时，旁边会写明只有跑着 NapCat 的那台机器能打开。
@@ -457,6 +461,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `downloadProxy` | `''` | 下载时走的代理；空 = 读环境变量 |
 | `onebotPort` | `3001` | OneBot 端口。自己另外部署的 NapCat 要和这边一致 |
 | `qqNumber` | `''` | 快速登录用的 QQ 号（需先手动登录过一次） |
+| `checkUpdateOnStart` | `false` | 启动时检查一次。默认关。打开后，下次启动 dsh-web 向 GitHub 问一次有没有新版本，只写日志，不自动安装。平时用卡片上的「检查更新」 |
 
 这些值优先从设置界面 / `settings.yaml` 取，未设置时回落到 `cordis.patch.yml` 里的安装配置（composition base）。
 
@@ -554,13 +559,14 @@ QQ 侧没有人能点击“同意”，因此：
 
 改用法、设置或运行行为时，同一次提交里更新本文件。约定见 [`AGENTS.md`](./AGENTS.md)。
 
-4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **679 条断言**：
+5 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器；检查更新不连真 GitHub），共 **718 条断言**：
 
 ```powershell
-node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具（含 mface）+ 系统表情分段 + 设置卡片字段（假 ctx，纯离线）
+node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具（含 mface）+ 系统表情分段 + 设置卡片字段 + 检查更新接口（假 ctx，纯离线）
 node test-onebot.mjs    # M2 端到端：内置最小 OneBot WS 服务器，验证收发全链路
 node test-napcat.mjs    # M5：ZIP 解包 / sha256 校验 / 发行包选择 / 配置写入
 node test-stickers.mjs  # 表情包登记表：哈希 / 读写 / 查找 / 原子写 / importSticker / mface 字段
+node test-updates.mjs   # 检查更新：semver 比较、Release 摘要、限流和断网的白话
 ```
 
 ## 路线

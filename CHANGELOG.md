@@ -1,8 +1,10 @@
 # 更新日志
 
-## 未发布
+## v0.2.4 — 2026-10-30
 
-- **安装说明**：README 写清推荐用 Release tag（当前 `v0.2.3`）、Watch Releases、最低环境、白名单先填再 @、三条升级路径（面板升级 / `#vX.Y.Z` / 重装后重启 dsh-web）、与官方 `sj244/dsh-qq-bridge` 不能同时挂同一个 OneBot，以及以后的发版流程（改版本号 → CHANGELOG → tag `vX.Y.Z` → GitHub Release）。
+- **设置页可以检查 GitHub 上有没有新版本**：卡片显示当前版本。点「检查更新」才请求 `yunfengnobug/dsh-qq-bot` 的 Releases，按 semver 对比。有新版时写出最新版本号、说明摘要，以及 `github:yunfengnobug/dsh-qq-bot#vX.Y.Z` 的安装命令。没有新版、连不上、被限流，都用白话说明，不把英文报错摆到界面上。不会自动下载或安装。
+- **新设置「启动时检查一次」**（`checkUpdateOnStart`，默认 `false`）：打开并保存后，下次启动 dsh-web 向 GitHub 问一次，只写日志。默认关。
+- **安装说明**：README 写清推荐用 Release tag（已发布的是 `v0.2.3`）、Watch Releases、最低环境、白名单先填再 @、三条升级路径（面板升级 / `#vX.Y.Z` / 重装后重启 dsh-web）、与官方 `sj244/dsh-qq-bridge` 不能同时挂同一个 OneBot，以及以后的发版流程（改版本号 → CHANGELOG → tag `vX.Y.Z` → GitHub Release）。
 
 ## v0.2.3 — 2026-10-30
 
