@@ -10,20 +10,16 @@
 
 **Cordis 插件 id 仍是 `qq-bridge`**（`cordis.patch.yml` 里的 `id`）。包名和界面显示名是 **dsh-qq-bot**。已有 profile 里按 `id: qq-bridge` 写的覆盖继续生效。设置命名空间、状态文件和 `/api/qq-bridge/...` 也沿用这个 id，避免升级时对不上。
 
-```sh
-dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
-```
-
-指定某次提交时：
+**想装：** 用已经发布的 tag，不要盯着 main。
 
 ```sh
-dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 ```
 
-> 上游由 DSH 写成。本 fork 的改动见 [`CHANGELOG.md`](./CHANGELOG.md)。
+在 GitHub 上 Watch → Custom → **Releases**，比盯 main 稳。环境、第一次怎么开白名单、怎么升级、和官方插件为什么不能一起挂，写在[安装](#安装)。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
-- 当前版本 **v0.2.3**（商城表情按 QQ 原生表情包发送，普通图片仍是图片。见 [`CHANGELOG.md`](./CHANGELOG.md)）
+- 当前版本 **v0.2.3**（商城表情按 QQ 原生表情包发送，普通图片仍是图片。见 [`CHANGELOG.md`](./CHANGELOG.md)）。稳定安装用上面的 `#v0.2.3`。
 - **M1–M8 全部完成**，已在**真实 NapCat + 真实 QQ** 上端到端跑通（Windows 真机）
 
 ## 目录
@@ -59,29 +55,84 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
 
 ## 安装
 
-**正式安装**（从 GitHub）：
+稳定版看 [Releases](https://github.com/yunfengnobug/dsh-qq-bot/releases)。当前是 **v0.2.3**：
+
+```sh
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
+```
+
+不写 tag 会装 main 上最新一次提交。主分支随时在改，日常别用这条：
 
 ```sh
 dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
 ```
 
-**开发期**（修改本仓库代码时用 link 安装）：
+装完要重启 `dsh web`（面板里就是重启 dsh-web），插件才会加载。
+
+### 环境
+
+和[已知限制](#已知限制与环境要求)同一套，没有另写一份要求：
+
+- **DSH**：0.1.5-rc.3 能用；0.2.0 及以后也能用。0.2.0 起宿主不给第三方插件可写设置域，本插件自己挂设置接口，卡片照常能改。
+- **NapCat**：OneBot v11 的正向 WebSocket。真机结论来自 **Windows 10 + NapCat Shell**（记录过 4.18.28）。仓库没有承诺更低的 NapCat 版本。NapCat 发行说明里的最低 QQ NT 构建号是 **40768**。主动戳人还要落在官方说的 **40768–44343**；真机上的 QQ 9.9.36-53644 发不出主动戳，别人戳我仍然会叫醒。
+- **Node ≥ 22**。插件用 Node 自带的 WebSocket，测试套件同样要求。
+
+### 第一次用
+
+白名单默认全关。私聊和群都是空的，这时候 @ 也不会醒。
+
+打开 **设置 → 插件 → 插件配置 → QQ 桥接**，先填「哪些群可以叫醒」或「哪些私聊可以叫醒」，保存，再去 @。例子里只用占位号，比如群 `123456789`。不要把真实群号、QQ 号写进仓库、Issue 或截图说明。
+
+### 升级
+
+三条路。装完都要重启 dsh-web：
+
+1. 面板的插件管理里升级（有这个入口再用）。
+2. 指定新 tag：`dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#vX.Y.Z`
+3. 卸掉再装同一条命令，然后重启。
+
+### 不要和官方插件一起挂
+
+官方仓库是 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge)。两边的 Cordis id 都是 `qq-bridge`，连的是同一个 OneBot。一起装会抢这条连接，消息对不上。只用其中一个。
+
+从官方换成这个 fork 时，包名一般是 `dsh-qq-bridge`。下面没有真实路径，profile 用你自己的：
+
+```sh
+dsh plugin --profile web remove dsh-qq-bridge
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
+```
+
+然后重启 dsh-web。profile 里原来按 `id: qq-bridge` 写的覆盖可以留着。`list` 里如果包名不是 `dsh-qq-bridge`，卸你看到的那一个官方包，不要卸别的插件。
+
+### 开发期
+
+改本仓库代码时用本地目录：
 
 ```powershell
 dsh plugin --profile web add "<REPO>"   # <REPO> = 本仓库在你机器上的绝对路径
 ```
 
-> 注意：`link:` 安装的依赖解析可能失败。`dsh plugin add <本地目录>` 安装的是**符号链接**，
-> Node 按真实路径解析依赖，而 DSH 的包位于 `~/.dsh/profiles/node_modules/@deepseek-ai`，
-> 从工作区向上找不到该目录，插件 `import` 因此失败。解决办法是在插件目录里挂一个 junction：
->
-> ```powershell
-> New-Item -ItemType Junction `
->   -Path "<REPO>\node_modules\@deepseek-ai" `
->   -Target "$env:USERPROFILE\.dsh\profiles\node_modules\@deepseek-ai"
-> ```
+`dsh plugin add <本地目录>` 装的是符号链接。Node 按真实路径找依赖，DSH 的包在 `~/.dsh/profiles/node_modules/@deepseek-ai`，从工作区向上找不到，插件 `import` 会失败。在插件目录挂一个 junction：
 
-装完、以及每次修改插件代码之后，都要重启 `dsh web` 才会加载。
+```powershell
+New-Item -ItemType Junction `
+  -Path "<REPO>\node_modules\@deepseek-ai" `
+  -Target "$env:USERPROFILE\.dsh\profiles\node_modules\@deepseek-ai"
+```
+
+每次改完插件代码，重启 `dsh web` 再刷新页面。
+
+### 以后怎么发版
+
+维护者按这个顺序，不要跳：
+
+1. 改 `package.json` 的 `version`。
+2. 在 [`CHANGELOG.md`](./CHANGELOG.md) 顶部写这一版做了什么。
+3. 提交并合进 main。
+4. 在含这个版本号的提交上打 annotated tag：`vX.Y.Z`。
+5. 用 CHANGELOG 里对应那一节的中文摘要发 GitHub Release。
+
+Release 不附带密钥、日志或本机文件。源码压缩包让 GitHub 自己生成即可，不必另外上传。用户侧安装始终用 `#vX.Y.Z`，不要把 main 当稳定版。
 
 ## 唤醒策略
 
