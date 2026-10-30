@@ -1907,6 +1907,11 @@ export function apply(ctx, config) {
       g.claimedFromQQ = true
       g.currentTurnDestination = wakeDest
       g.currentTurnMessageId = wakeMessageId
+    } else if (!wantSteer) {
+      // 正忙且这次只是排队：不能改正在跑的那一轮，但下一轮必须仍算 QQ。
+      // turn/end 会清掉 claimedFromQQ；排队期间若再来一条 DSH 消息，pendingFromQQ 也会被改成 false。
+      // nextClaimedFromQQ 跨过这次 turn/end，到下一轮 turn/start 才消费。
+      g.nextClaimedFromQQ = true
     }
     // 插话插进的是**正在跑的那一轮**：从这一刻起这一轮里就有 QQ 消息要回，
     // 所以归属也得跟着算 QQ —— 否则工具会在这一轮里被拒，插话反而变成哑火。

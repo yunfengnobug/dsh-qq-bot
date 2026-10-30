@@ -859,6 +859,38 @@ function sawSentText(s) {
   fire('turn/start', { turn: 1 })
   await sim.execute({ text: '244 排队', userId: 'test-user' })
   check("delivery='followup'：正忙也排队", followed === 1 && steered === 0, JSON.stringify({ steered, followed }))
+  fire('turn/end', { reason: { kind: 'completed' } })
+
+  // 正忙 + followup，且 followup 不在当场开轮（真机排队就是这样）。
+  // 当前轮结束前若再来一条 DSH 消息，pending 会被改成 false；下一轮仍必须算 QQ。
+  steered = followed = 0
+  fire('user/message', { id: 'dsh-typing', source: { kind: 'user' }, content: [{ type: 'text', text: '我在 DSH 里说话' }] })
+  fire('turn/start', { turn: 9 })
+  check('铺垫：DSH 自己的一轮不算 QQ', (await gate()).currentTurnFromQQ === false, JSON.stringify(await gate()))
+  fakeAgent = {
+    id: 'session-smoke',
+    status: 'running',
+    ctx: { get: () => undefined, effect: () => () => {} },
+    steer: () => {
+      steered++
+    },
+    followup: (msg) => {
+      followed++
+      injected = msg
+    },
+  }
+  await sim.execute({ text: '244 等下一轮', userId: 'test-user' })
+  check('忙时 followup 没有当场开新轮', followed === 1 && steered === 0, JSON.stringify({ steered, followed }))
+  fire('user/message', { id: 'dsh-between', source: { kind: 'user' }, content: [{ type: 'text', text: '排队期间又打了一句' }] })
+  check('排队期间的 DSH 消息把 pending 改成了非 QQ', (await gate()).pendingFromQQ === false, JSON.stringify(await gate()))
+  fire('turn/end', { reason: { kind: 'completed' } })
+  fire('turn/start', { turn: 10 })
+  check(
+    '忙时排队的下一轮仍算 QQ 唤醒',
+    (await gate()).currentTurnFromQQ === true,
+    JSON.stringify(await gate()),
+  )
+  fire('turn/end', { reason: { kind: 'completed' } })
 
   fakeAgent = null
   resolvedSettings.replyMode = 'marker'
