@@ -1,0 +1,35 @@
+name: 连不上
+description: OneBot / NapCat 连不上，或设置页里没有这张卡片
+title: "[连不上] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        不要填写真实 QQ 号、群号、token、服务器地址、域名或私人路径。
+        需要举例时用群 `123456789`、QQ `10000001`。日志里如果有令牌，先涂掉再贴。
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 用白话写你做了哪一步、屏幕或日志里看到什么。
+      placeholder: 例如：OneBot 地址留空；点了「启动 NapCat」没有反应。
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: DSH / NapCat / 插件版本
+      description: 插件版本在设置卡片上方。不知道就写「不知道」。
+      placeholder: 例如 DSH 0.2.0，NapCat v4.18.28，插件 0.2.4
+  - type: dropdown
+    id: where
+    attributes:
+      label: 卡在哪
+      options:
+        - 设置里没有 QQ 桥接
+        - OneBot 没连上
+        - NapCat 起不来
+        - 检查更新失败
+        - 其它
+    validations:
+      required: true

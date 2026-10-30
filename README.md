@@ -24,7 +24,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 
 ## 目录
 
-[功能](#功能) ｜ [安装](#安装) ｜ [唤醒策略](#唤醒策略) ｜ [接入 QQ](#接入-qqonebot--napcat)
+[功能](#功能) ｜ [安装](#安装) ｜ [npm](#用-npm-安装) ｜ [插件市场](#插件市场) ｜ [唤醒策略](#唤醒策略) ｜ [接入 QQ](#接入-qqonebot--napcat)
 ｜ [NapCat 一键托管](#napcat-一键托管) ｜ [出站](#出站三种模式--来源闸门) ｜ [消息与图片](#消息占位符戳一戳图片)
 ｜ [表情包](#表情包) ｜ [设置界面](#设置界面与全部设置项) ｜ [注入的系统提示](#注入给目标会话的系统提示) ｜ [无人值守边界](#无人值守的安全边界不提供审批桥接)
 ｜ [上下文上限](#上下文上限) ｜ [工具一览](#工具一览) ｜ [已知限制](#已知限制与环境要求) ｜ [测试](#测试) ｜ [路线](#路线)
@@ -132,7 +132,46 @@ New-Item -ItemType Junction `
 4. 在含这个版本号的提交上打 annotated tag：`vX.Y.Z`。
 5. 用 CHANGELOG 里对应那一节的中文摘要发 GitHub Release。
 
-Release 不附带密钥、日志或本机文件。源码压缩包让 GitHub 自己生成即可，不必另外上传。用户侧安装始终用 `#vX.Y.Z`，不要把 main 当稳定版。
+Release 不附带密钥、日志或本机文件。源码压缩包让 GitHub 自己生成即可，不必另外上传。用户侧安装始终用 `#vX.Y.Z`，不要把 main 当稳定版。npm 不是这条流程的必经步骤，见[用 npm 安装](#用-npm-安装)。
+
+## 用 npm 安装
+
+日常请用上面的 GitHub Release。`dsh plugin` 是 pnpm 的包装；维护者把包发到 npm 之后，也可以按包名装：
+
+```sh
+dsh plugin --profile web add dsh-qq-bot@0.2.4
+```
+
+包还没发布时这条会失败，改回 GitHub：
+
+```sh
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
+```
+
+某台机器上的 `dsh plugin --help` 如果只认 `github:`，就继续用 Release tag。GitHub 是主路径，npm 是辅路径。
+
+维护者自己发布（仓库里没有 npm token，也不会在 CI 里代发）：
+
+1. `npm login`
+2. 确认 `package.json` 的 `version` 和要发的 tag 一致。
+3. `npm pack --dry-run`，看清单里没有测试、密钥、本机路径。
+4. `npm publish`
+
+`files` 是白名单。Node 要求 `>=22`（`engines`）。`@deepseek-ai/*` 仍是 `peerDependencies`，由 DSH 的 profile 提供，不要改成普通 dependencies。
+
+## 插件市场
+
+[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 里已经有上游 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge)。本 fork 还没进索引，所以现在用 GitHub Release 安装。
+
+要申请收录，按[贡献说明](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/main/contributing.md)做：
+
+1. 在 GitHub 仓库页面加上 topic `dsh-plugin`。这个 topic 不会跟着 git 走，要在网页上加。
+2. 把本仓库的 [`docs/awesome-dsh-plugin-entry.yml`](./docs/awesome-dsh-plugin-entry.yml) 复制成对方仓库的 `data/plugins/yunfengnobug__dsh-qq-bot.yml`，提一个 PR。不要改上游那条。一个 PR 最多 3 条。对方的 README 由脚本生成，不要手改。
+3. 描述只写插件实际做的事。`repository` 必须指回本仓库（`package.json` 里已经是了）。yml 里不要手写 `npm:`，市场自己从 registry 认。
+
+npm 发布是可选的。发了，市场才能显示下载量；不发也能收录，安装仍走 GitHub。
+
+用着有问题，到 [Issues](https://github.com/yunfengnobug/dsh-qq-bot/issues/new/choose) 选模板：**连不上**、**不回**、**发不出**。不要在 Issue 里贴真实 QQ 号、群号、token 或服务器地址。
 
 ## 唤醒策略
 

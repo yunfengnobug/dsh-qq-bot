@@ -25,6 +25,12 @@
   "bugs": {
     "url": "https://github.com/yunfengnobug/dsh-qq-bot/issues"
   },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -56,6 +62,7 @@
     "screenshots.json",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "DESIGN.md",
     "LICENSE"
   ],

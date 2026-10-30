@@ -1,0 +1,33 @@
+name: 发不出
+description: 模型回了，但 QQ 里没有这条消息
+title: "[发不出] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        默认只发出 `[QQ]…[/QQ]` 里面的字。超长、没连上、目的地不在白名单里，都会整条不发。
+        不要贴 token、服务器地址或真实群号。原因用插件给的白话（例如太长、没连上、不在白名单）。
+  - type: textarea
+    id: what
+    attributes:
+      label: 发出去的应该是哪一句，实际怎样
+      description: 可以贴打码后的那一句，以及界面或工具返回的原因。
+      placeholder: 例如：写了 [QQ]在的[/QQ]，QQ 里没有。工具说超过字数上限。
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 群里发出去的是哪一段
+      options:
+        - 只发「发给群」里的那段
+        - 用发消息工具
+        - 整段回答都进群
+        - 不知道
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: DSH / NapCat / 插件版本
+      placeholder: 例如 DSH 0.2.0，NapCat v4.18.28，插件 0.2.4

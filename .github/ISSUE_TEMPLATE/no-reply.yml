@@ -1,0 +1,32 @@
+name: 不回
+description: 已经连上，但 @ 了或叫了名字却不回话
+title: "[不回] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        白名单默认全关。先确认「哪些群可以叫醒」或「哪些私聊可以叫醒」里有对应的号，保存后再 @。
+        不要贴真实群号或 QQ 号。写「群白名单已填」或「还是空的」即可。
+  - type: textarea
+    id: what
+    attributes:
+      label: 你怎么叫醒它的
+      description: 说是群还是私聊、有没有 @、有没有喊昵称。不要贴聊天记录里的账号。
+      placeholder: 例如：群里 @ 了一次，白名单已填（号码不贴在这里）。
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 会话怎么分
+      options:
+        - 所有群共用一个会话
+        - 每个群、每个私聊各记各的
+        - 不知道
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: DSH / 插件版本
+      placeholder: 例如 DSH 0.2.0，插件 0.2.4
