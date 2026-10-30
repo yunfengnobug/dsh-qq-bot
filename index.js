@@ -556,9 +556,23 @@ export function apply(ctx, config) {
     return null
   }
 
+  /**
+   * 监听器是不是 HTTPS（`'https:'`）。
+   *
+   * 设置路由挂在 `inject(['webServer'])` 的子上下文上，处理函数闭包用的却是插件自己的 ctx。
+   * 插件的 inject 里没有 webServer。Cordis 对没注入的属性会抛
+   * `cannot get property "webServer" without inject`，`ctx.webServer?.protocol` 也挡不住：
+   * 可选链仍然会走属性读取。已登录的面板请求会走到这里；抛错被宿主 webserver 收成空的 HTTP 400，
+   * 卡片诊断就显示本机接口不可用。`ctx.get` 不要求 inject，没有这项服务时返回 undefined。
+   * 取不到、或读取失败时按 HTTP 处理，请求继续走登录判定，而不是变成空 400。
+   */
   function panelHttps() {
-    const protocol = ctx.webServer?.protocol ?? ctx.get?.('webServer')?.protocol
-    return String(protocol ?? '') === 'https:'
+    try {
+      const server = typeof ctx.get === 'function' ? ctx.get('webServer') : undefined
+      return String(server?.protocol ?? '') === 'https:'
+    } catch {
+      return false
+    }
   }
 
   function authSaysYes(fn, thisArg, req) {

@@ -2013,6 +2013,106 @@ function sawSentText(s) {
       const resClean = makeRes()
       await route.handler(req('POST', { body: { unset: ['wakeProbability'] } }), resClean)
     }
+
+    // 已登录的反向代理请求会读监听器协议。插件 fiber 没 inject webServer 时，
+    // 直接读 ctx.webServer 会抛，宿主把它收成空 HTTP 400。这里钉住：不读那个属性，接口仍返回 JSON。
+    {
+      const previousGet = apiCtx.get
+      const previousDescriptor = Object.getOwnPropertyDescriptor(apiCtx, 'webServer')
+      let propertyReads = 0
+      Object.defineProperty(apiCtx, 'webServer', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          propertyReads += 1
+          throw new Error('cannot get property "webServer" without inject')
+        },
+      })
+      let secureArg = null
+      const loggedIn = {
+        requestRejection() {
+          return undefined
+        },
+        isAuthenticated(_req, secure) {
+          secureArg = secure
+          return true
+        },
+      }
+      const run = async (getImpl) => {
+        propertyReads = 0
+        secureArg = null
+        apiCtx.get = getImpl
+        const res = makeRes()
+        let threw = null
+        try {
+          await route.handler(
+            req('GET', {
+              headers: {
+                origin: 'https://panel.example',
+                host: 'panel.example',
+                cookie: 'session=present',
+              },
+            }),
+            res,
+          )
+        } catch (error) {
+          threw = error
+        }
+        return { res, threw, propertyReads, secureArg }
+      }
+      try {
+        const https = await run((name) => {
+          if (name === 'webServer') return { protocol: 'https:' }
+          if (name === 'connection') return loggedIn
+          return previousGet(name)
+        })
+        check(
+          'S1：未 inject webServer 时已登录请求不抛、返回 200',
+          https.threw === null && https.res.out.status === 200,
+          https.threw ? String(https.threw) : `${https.res.out.status} ${https.res.out.body.slice(0, 80)}`,
+        )
+        check(
+          'S1：协议只走 ctx.get，不读会抛错的 ctx.webServer',
+          https.propertyReads === 0,
+          String(https.propertyReads),
+        )
+        check(
+          'S1：ctx.get(webServer).protocol 为 https: 时，isAuthenticated 收到 secure=true',
+          https.secureArg === true,
+          JSON.stringify(https.secureArg),
+        )
+
+        const missing = await run((name) => {
+          if (name === 'webServer') return undefined
+          if (name === 'connection') return loggedIn
+          return previousGet(name)
+        })
+        check(
+          'S1：get(webServer) 为空时按 HTTP，已登录请求仍 200',
+          missing.threw === null &&
+            missing.res.out.status === 200 &&
+            missing.secureArg === false &&
+            missing.propertyReads === 0,
+          missing.threw
+            ? String(missing.threw)
+            : JSON.stringify({ status: missing.res.out.status, secureArg: missing.secureArg, reads: missing.propertyReads }),
+        )
+
+        const boom = await run((name) => {
+          if (name === 'webServer') throw new Error('get webServer failed')
+          if (name === 'connection') return loggedIn
+          return previousGet(name)
+        })
+        check(
+          'S1：get(webServer) 抛错时不变成空 400，已登录请求仍 200',
+          boom.threw === null && boom.res.out.status === 200 && boom.secureArg === false,
+          boom.threw ? String(boom.threw) : `${boom.res.out.status} secure=${boom.secureArg}`,
+        )
+      } finally {
+        apiCtx.get = previousGet
+        if (previousDescriptor) Object.defineProperty(apiCtx, 'webServer', previousDescriptor)
+      }
+    }
   }
 }
 
