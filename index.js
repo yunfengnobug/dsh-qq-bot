@@ -1346,6 +1346,13 @@ export function apply(ctx, config) {
     const compaction = ctx.get('compaction')
     if (!compaction || typeof compaction.compactNow !== 'function') return
     const countTurns = () => {
+      // 投影里的轮次是压缩之后还留着的。历史事件里的 turn/end 压不掉，先数它会一直超限。
+      try {
+        const outline = agent.session?.projection?.turnOutline?.turns
+        if (Array.isArray(outline)) return outline.length
+      } catch {
+        // 没有投影再数事件
+      }
       try {
         const events = typeof agent.session?.events === 'function' ? agent.session.events() : agent.session?.events
         const list = Array.isArray(events) ? events : []
@@ -1353,21 +1360,20 @@ export function apply(ctx, config) {
         for (const event of list) {
           if (event?.type === 'turn/end') turns += 1
         }
-        if (turns > 0) return turns
+        return turns
       } catch {
-        // 读不到事件就试投影
+        return 0
       }
-      try {
-        const outline = agent.session?.projection?.turnOutline?.turns
-        if (Array.isArray(outline)) return outline.length
-      } catch {
-        // 投影也没有时当作不需要压缩
-      }
-      return 0
     }
+    let previous = Infinity
     for (let i = 0; i < 6; i++) {
       const turns = countTurns()
       if (!turns || turns <= max) return
+      if (turns >= previous) {
+        logger.info(`session ${agent.session?.id ?? agent.id} compact 后轮次没有减少（${turns}），停止`)
+        return
+      }
+      previous = turns
       try {
         const result = await compaction.compactNow(agent)
         if (!result) return

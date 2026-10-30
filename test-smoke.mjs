@@ -3608,6 +3608,7 @@ function sawSentText(s) {
   const agents = new Map()
   const localHandlers = {}
   let compacts = 0
+  let outlineLen = null
   const scopeSettings = {
     targetSessionId: '',
     sessionScope: 'perGroup',
@@ -3652,7 +3653,13 @@ function sawSentText(s) {
       return () => {}
     },
     effect: () => {},
-    get: (name) => (name === 'compaction' ? { compactNow: async () => { compacts += 1; return { ok: true } } } : undefined),
+    get: (name) => (name === 'compaction' ? {
+      compactNow: async () => {
+        compacts += 1
+        if (outlineLen != null) outlineLen = Math.max(0, outlineLen - 4)
+        return { ok: true }
+      },
+    } : undefined),
     inject: () => {},
   }
   const tools = []
@@ -3700,7 +3707,25 @@ function sawSentText(s) {
     { type: 'turn/end', data: { reason: { kind: 'completed' } } },
   )
   await new Promise((resolve) => setTimeout(resolve, 20))
-  check('maxRecentTurns：超限时调用宿主 compactNow', compacts >= 1, String(compacts))
+  check('maxRecentTurns：超限时调用宿主 compactNow', compacts === 1, String(compacts))
+  const trimmed = agents.get(first.decision.sessionId)
+  outlineLen = 6
+  trimmed.session.projection = {
+    turnOutline: { get turns() { return Array.from({ length: outlineLen }, () => ({})) } },
+  }
+  localHandlers['session/event'](
+    { id: first.decision.sessionId },
+    { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'qq-bridge' }, content: [{ type: 'text', text: '[QQ · 群] 甲：又来' }] } },
+  )
+  localHandlers['session/event']({ id: first.decision.sessionId }, { type: 'turn/start', data: { turn: 2 } })
+  localHandlers['session/event']({ id: first.decision.sessionId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('maxRecentTurns：投影降到上限以内就停', compacts === 2 && outlineLen === 2, JSON.stringify({ compacts, outlineLen }))
+  outlineLen = 8
+  localHandlers['session/event']({ id: first.decision.sessionId }, { type: 'turn/start', data: { turn: 3 } })
+  localHandlers['session/event']({ id: first.decision.sessionId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('maxRecentTurns：投影还超限就再压一次，降下来就停', compacts === 4 && outlineLen === 0, JSON.stringify({ compacts, outlineLen }))
   rmSync(dir, { recursive: true, force: true })
 }
 
