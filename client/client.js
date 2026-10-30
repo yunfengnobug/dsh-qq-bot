@@ -13,12 +13,12 @@
  *   参考实现：第三方插件 `dshmarket` 的 `client/client.js`（同样是手写/预构建产物）。
  *
  * 与宿主半的约定：
- *   - `id` 必须等于包名 `dsh-qq-bot`；
+ *   - `id` 必须等于 npm 包名 `@fengye_nobug/dsh-qq-bot`；
  *   - 卡片注册进 `settings.plugin.item`，**key 必须等于宿主注册的 settings 命名空间** `qq-bridge`，
  *     否则配置页那一栏里什么都不会出现（它按命名空间派发）。
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-qq-bot',
+  id: '@fengye_nobug/dsh-qq-bot',
   factory: (require) => {
     var module = { exports: {} }
     var exports = module.exports
@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
         key: 'checkUpdateOnStart',
         label: '启动时检查一次',
         kind: 'boolean',
-        hint: '默认关。打开并保存后，下次启动 dsh-web 会向 GitHub 问一次有没有新版本，只写在日志里，不会自动安装。平时用上面的「检查更新」就够了。',
+        hint: '默认关。打开并保存后，下次启动 dsh-web 会先问 npm 上的 @fengye_nobug/dsh-qq-bot 有没有新版本；npm 上还没有更新时再看 GitHub。只写在日志里，不会自动安装。要装新版本，用检查之后出现的更新按钮。',
       },
       {
         key: 'sessionScope',
@@ -358,6 +358,8 @@ window.__ModuleLoader__.load({
       const [pluginVersion, setPluginVersion] = react.useState('')
       const [versionState, setVersionState] = react.useState('loading')
       const [updateBusy, setUpdateBusy] = react.useState(false)
+      const [updateKind, setUpdateKind] = react.useState('')
+      const [updateOffer, setUpdateOffer] = react.useState(null)
       const [updateNote, setUpdateNote] = react.useState('')
       const [updateIsError, setUpdateIsError] = react.useState(false)
 
@@ -449,9 +451,11 @@ window.__ModuleLoader__.load({
       }
 
       async function checkForUpdate() {
+        setUpdateKind('check')
         setUpdateBusy(true)
         setUpdateNote('')
         setUpdateIsError(false)
+        setUpdateOffer(null)
         try {
           if (typeof fetch !== 'function') {
             setUpdateIsError(true)
@@ -474,11 +478,56 @@ window.__ModuleLoader__.load({
           const ok = body.ok === true
           setUpdateIsError(!ok)
           setUpdateNote(plainUpdateText(ok ? body.message : body.error, ok))
+          const tag = typeof body.tag === 'string' ? body.tag : ''
+          const version = typeof body.latest === 'string' ? body.latest : ''
+          if (ok && body.updateAvailable === true && tag !== '' && version !== '') {
+            setUpdateOffer({ tag, version })
+          }
         } catch {
           setUpdateIsError(true)
           setUpdateNote('连不上本机的检查更新接口。确认 dsh-web 在跑，稍后再试。')
         } finally {
           setUpdateBusy(false)
+          setUpdateKind('')
+        }
+      }
+
+      async function applyUpdate() {
+        if (!updateOffer) return
+        const version = updateOffer.version
+        const tag = updateOffer.tag
+        setUpdateKind('apply')
+        setUpdateBusy(true)
+        setUpdateNote('')
+        setUpdateIsError(false)
+        try {
+          if (typeof fetch !== 'function') {
+            setUpdateIsError(true)
+            setUpdateNote('这个页面没有网络接口，装不了更新。')
+            return
+          }
+          const res = await fetch(UPDATE_API, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { accept: 'application/json', 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'apply', version }),
+          })
+          const body = await res.json().catch(() => null)
+          if (!body || typeof body !== 'object') {
+            setUpdateIsError(true)
+            setUpdateNote('更新没有返回能看懂的结果。稍后再试。')
+            return
+          }
+          const ok = body.ok === true
+          setUpdateIsError(!ok)
+          setUpdateNote(plainUpdateText(ok ? body.message : body.error, ok))
+          if (ok) setUpdateOffer(null)
+        } catch {
+          setUpdateIsError(true)
+          setUpdateNote(`更新到 ${tag} 的请求没返回。如果面板马上断开，多半是正在重启，请稍后刷新；登录口令可能会变。如果还是旧版本，再点一次。`)
+        } finally {
+          setUpdateBusy(false)
+          setUpdateKind('')
         }
       }
 
@@ -794,10 +843,27 @@ window.__ModuleLoader__.load({
                 checkForUpdate()
               },
             },
-            updateBusy ? '检查中…' : '检查更新',
+            updateBusy && updateKind === 'check' ? '检查中…' : '检查更新',
           ),
+          updateOffer
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  style: disabled({ ...S.btn, ...S.primary }, updateBusy),
+                  disabled: updateBusy,
+                  onClick: () => {
+                    applyUpdate()
+                  },
+                },
+                updateBusy && updateKind === 'apply' ? '正在更新…' : `更新到 ${updateOffer.tag}`,
+              )
+            : null,
         ),
-        h('div', { style: S.hint }, '向 GitHub 问一次有没有新版本。不会自动下载，也不会自动安装。'),
+        h('div', { style: S.hint }, '先问 npm 上有没有新版本。这里只检查，不会安装。'),
+        updateOffer
+          ? h('div', { style: S.hint }, '优先从 npm 安装 @fengye_nobug/dsh-qq-bot 的这一版并重启面板。这一版还没发到 npm 时，会改从 GitHub 下载。设置还在，不改 NapCat。重启后请刷新，登录口令可能会变。')
+          : null,
         updateNote
           ? h('div', { style: { ...(updateIsError ? S.err : S.note), whiteSpace: 'pre-wrap' } }, updateNote)
           : null,
@@ -866,7 +932,7 @@ window.__ModuleLoader__.load({
     const API_PATH = '/api/qq-bridge/settings'
     /** NapCat 操作接口（宿主半不受 legacy 门控，两代宿主都挂）。 */
     const NAPCAT_API = '/api/qq-bridge/napcat'
-    /** 检查更新。GET 只读当前版本，POST 才访问 GitHub。 */
+    /** 检查更新。GET 只读当前版本；POST 不带 action 只检查。安装要另发 action 为 apply。浏览器不直接访问 npm 或 GitHub。 */
     const UPDATE_API = '/api/qq-bridge/update'
     /** 稳定引用：useSyncExternalStore 的 getSnapshot 每次返回新对象会死循环。 */
     const LOADING_SNAPSHOT = { status: 'loading' }
@@ -975,7 +1041,7 @@ window.__ModuleLoader__.load({
       const candidates = []
       // 0.2.0 的表单 key 到底叫什么，源码里能看到的写法**全试一遍**（谁 ready 用谁）：
       // settings 命名空间 / profile entry id / 包名，以及带 include: 前缀的两种。
-      for (const namespace of [NS, `include:${NS}`, 'dsh-qq-bot', 'include:dsh-qq-bot', 'dsh-qq-bridge', 'include:dsh-qq-bridge']) {
+      for (const namespace of [NS, `include:${NS}`, '@fengye_nobug/dsh-qq-bot', 'include:@fengye_nobug/dsh-qq-bot', 'dsh-qq-bot', 'include:dsh-qq-bot', 'dsh-qq-bridge', 'include:dsh-qq-bridge']) {
         try {
           const scope = service.bind({ namespace })
           if (scope && typeof scope === 'object') candidates.push({ namespace, scope })
@@ -1064,12 +1130,12 @@ window.__ModuleLoader__.load({
     function subjectIsOurs(subject) {
       if (!subject || typeof subject !== 'object') return false
       const pkgName = subject.pkg && typeof subject.pkg === 'object' ? String(subject.pkg.name ?? '') : ''
-      if (pkgName === 'dsh-qq-bot' || pkgName === 'dsh-qq-bridge') return true
+      if (pkgName === '@fengye_nobug/dsh-qq-bot' || pkgName === 'dsh-qq-bot' || pkgName === 'dsh-qq-bridge') return true
       const id = String(subject.id ?? '')
-      if (id === NS || id === 'dsh-qq-bot' || id === 'dsh-qq-bridge') return true
+      if (id === NS || id === '@fengye_nobug/dsh-qq-bot' || id === 'dsh-qq-bot' || id === 'dsh-qq-bridge') return true
       if (subject.kind === 'item' && id.includes('qq-bridge')) return true
       const pkg = String(subject.package ?? subject.packageName ?? '')
-      return pkg === 'dsh-qq-bot' || pkg === 'dsh-qq-bridge'
+      return pkg === '@fengye_nobug/dsh-qq-bot' || pkg === 'dsh-qq-bot' || pkg === 'dsh-qq-bridge'
     }
 
     /**
@@ -1194,7 +1260,7 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     // 导出 name：Cordis 用它做插件标识，Slots inspect 里的 registrant 会显示成它
     // （不导的话那边显示的是产物里的 fallback 短名，排障时认不出是谁注册的卡片）。
-    exports.name = 'dsh-qq-bot'
+    exports.name = '@fengye_nobug/dsh-qq-bot'
     // 纯函数给离线测试用（test-smoke.mjs 会在假 ctx 里真跑这个 bundle）。
     // Cordis 只认 apply / inject / name / Config，多余的导出它不管。
     exports.__test = { sessionOptions, draftFrom, parse, fields: FIELDS, bindSettings }

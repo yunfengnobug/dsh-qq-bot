@@ -1,11 +1,17 @@
 # 更新日志
 
+## v0.2.5 — 2026-10-30
+
+- **设置卡片可以一键更新**：有新正式版时出现「更新到 vX.Y.Z」。点下去才安装，并重启面板。优先执行 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@版本`，走本机 npm / pnpm 已经配置的 registry。插件不写死镜像地址。registry 里找不到这个版本时，改从 GitHub 下载官方源码包（先 github.com，连不上再试同一标签的 codeload.github.com），不走第三方镜像。v0.2.3 及更早标签里的 `package.json` 仍是无作用域名，这种源码包仍然能装。装完提示刷新页面，登录口令可能会变。现有设置还在，不改 NapCat。已经是最新时没有这个按钮。不会安装更旧的版本，也不装草稿和预发布。连不上、安装失败、没能重启，都用白话说明。
+- **「检查更新」和「启动时检查一次」仍然只询问**：不下载、不安装。先问 npm 上的 `@fengye_nobug/dsh-qq-bot`。有比当前新的正式版时不再访问 GitHub。npm 上没有更新，或包还连不上时，才看 GitHub Releases。
+- **npm 包名改为 `@fengye_nobug/dsh-qq-bot`**：无作用域的 `dsh-qq-bot` 发不出去，npm 认为它和已有的 `dsh-qqbot` 太像。npm 上已经发出的是 `@fengye_nobug/dsh-qq-bot@0.2.4`。源码 0.2.5 还没发到 npm，GitHub Release 仍是 v0.2.3。界面显示名和消息来源 `plugin:dsh-qq-bot` 不变，Cordis id 仍是 `qq-bridge`。不要再用 `dsh plugin add dsh-qq-bot@版本`。
+
 ## v0.2.4 — 2026-10-30
 
 - **设置页可以检查 GitHub 上有没有新版本**：卡片显示当前版本。点「检查更新」才请求 `yunfengnobug/dsh-qq-bot` 的 Releases，按 semver 对比。有新版时写出最新版本号、说明摘要，以及 `github:yunfengnobug/dsh-qq-bot#vX.Y.Z` 的安装命令。没有新版、连不上、被限流，都用白话说明，不把英文报错摆到界面上。不会自动下载或安装。
 - **新设置「启动时检查一次」**（`checkUpdateOnStart`，默认 `false`）：打开并保存后，下次启动 dsh-web 向 GitHub 问一次，只写日志。默认关。
 - **安装说明**：README 写清推荐用 Release tag（已发布的是 `v0.2.3`）、Watch Releases、最低环境、白名单先填再 @、三条升级路径（面板升级 / `#vX.Y.Z` / 重装后重启 dsh-web）、与官方 `sj244/dsh-qq-bridge` 不能同时挂同一个 OneBot，以及以后的发版流程（改版本号 → CHANGELOG → tag `vX.Y.Z` → GitHub Release）。
-- **npm 与插件市场**：`package.json` 补了 `publishConfig.access`（`public`）和 `engines.node`（`>=22`），`files` 白名单含更新检查模块和 CHANGELOG。维护者用 `npm login` 后自己 `npm publish`，本仓库不代发。包发布之后，用户可以 `dsh plugin --profile web add dsh-qq-bot@<版本>`；没发布时仍用 GitHub Release。本 fork 还没进 awesome-dsh-plugin，申请步骤和 Issue 模板（连不上 / 不回 / 发不出）写在 README。
+- **npm 与插件市场**：`package.json` 补了 `publishConfig.access`（`public`）和 `engines.node`（`>=22`），`files` 白名单含更新检查模块和 CHANGELOG。维护者用 `npm login` 后自己 `npm publish`，本仓库不代发。当时写的安装命令是无作用域的 `dsh-qq-bot@<版本>`。这个名字发不出去，实际包名和命令见 v0.2.5。本 fork 还没进 awesome-dsh-plugin，申请步骤和 Issue 模板（连不上 / 不回 / 发不出）写在 README。
 
 ## v0.2.3 — 2026-10-30
 

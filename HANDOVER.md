@@ -1,6 +1,6 @@
 # 交接说明
 
-> 这份交接说明来自上游 sj244/dsh-qq-bridge。本 fork 的包名是 **dsh-qq-bot**，Cordis 插件 id 仍是 `qq-bridge`。文中的本机路径、会话 id 若出现占位符，不要换成真实环境。
+> 这份交接说明来自上游 sj244/dsh-qq-bridge。本 fork 的 npm 包名是 **`@fengye_nobug/dsh-qq-bot`**（无作用域的 `dsh-qq-bot` 发不出去）。界面显示名仍是 dsh-qq-bot。Cordis 插件 id 仍是 `qq-bridge`。文中的本机路径、会话 id 若出现占位符，不要换成真实环境。
 
 > 交接对象：接手本项目的专门 agent
 > 交接人：DSH 工作区会话 `<HANDOVER_SESSION>` 的 agent
@@ -56,7 +56,7 @@
 | `stickers.js` | 6.5 KB | **表情包登记表**：内容哈希、读写、查找、原子写、复制图片本体（见 §13.9） |
 | `cordis.patch.yml` | 3.3 KB | bundle 挂载声明 + 安装期默认配置（composition base，含 M2/M5 键） |
 | `client\client.js` | 42.7 KB | **M3 浏览器半**：设置页里那张“QQ 桥接”卡片（手写 `__ModuleLoader__` bundle，见 §15） |
-| `package.json` | 1.6 KB | 包声明：`name=dsh-qq-bot`、`type=module`、`dsh.bundle.patch`、**`dsh.client`**。Cordis id 仍是 `qq-bridge` |
+| `package.json` | 1.6 KB | 包声明：`name=@fengye_nobug/dsh-qq-bot`、`type=module`、`dsh.bundle.patch`、**`dsh.client`**。Cordis id 仍是 `qq-bridge`。界面显示名仍是 dsh-qq-bot |
 | `DESIGN.md` | 12.9 KB | 设计草案：与现有 QQ 插件的区别、唤醒策略、接口表、设置项、里程碑、安全注意 |
 | `README.md` | 31.6 KB | 安装/使用说明，含 OneBot 接入、access_token 配置、NapCat 一键托管、依赖解析坑与解法 |
 | `CHANGELOG.md` | 23.1 KB | 逐版本变更记录，最新版本在最前面 |
@@ -400,8 +400,8 @@ node test-napcat.mjs           # M5：自造 zip 验证解包/CRC/zip-slip/摘�
 
 # 3) 从 profile 里做加载检查
 cd "$env:USERPROFILE\.dsh\profiles\web"
-node -e "import('dsh-qq-bot').then(m=>console.log(m.name, JSON.stringify(m.inject))).catch(e=>{console.error(e.message);process.exit(1)})"
-# 期望：qq-bridge ["agents","tools","settings"]（导出的 name 是 Cordis id，包名是 dsh-qq-bot）
+node -e "import('@fengye_nobug/dsh-qq-bot').then(m=>console.log(m.name, JSON.stringify(m.inject))).catch(e=>{console.error(e.message);process.exit(1)})"
+# 期望：qq-bridge ["agents","tools","settings"]（导出的 name 是 Cordis id，npm 包名是 @fengye_nobug/dsh-qq-bot）
 
 # 4) 安装 + 组合检查
 dsh plugin --profile web add "<REPO>"          # ⚠️ 用 dsh.cmd，别用 dsh（见 §7 坑 8）
