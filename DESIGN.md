@@ -1,6 +1,6 @@
 # dsh-qq-bot 设计草案
 
-> 本文记录上游 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge) 的设计。本 fork 的包名是 dsh-qq-bot，Cordis 插件 id 仍是 `qq-bridge`。文中的 `qq-bridge` 是插件 id，不是包名。上游许可证为 MIT，版权归 sj244。
+> 本文记录上游 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge) 的设计。本 fork 的 npm 包名是 `@fengye_nobug/dsh-qq-bot`（无作用域的 `dsh-qq-bot` 发不出去，它和已有的 `dsh-qqbot` 太像）。界面显示名仍是 dsh-qq-bot。Cordis 插件 id 仍是 `qq-bridge`。文中的 `qq-bridge` 是插件 id，不是包名。上游许可证为 MIT，版权归 sj244。
 
 > 目标：把 **一个指定的、已存在的 DSH 会话**（当前目标：
 > `<TARGET_SESSION_ID>`，<TARGET_WORKSPACE> 工作区）

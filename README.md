@@ -8,9 +8,13 @@
 
 本仓库 fork 自 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge)。上游许可证为 MIT，版权归 sj244；本 fork 的版权声明见 [`LICENSE`](./LICENSE)。安装和更新都走 `dsh plugin`，不要在服务器上打补丁脚本。
 
-**Cordis 插件 id 仍是 `qq-bridge`**（`cordis.patch.yml` 里的 `id`）。包名和界面显示名是 **dsh-qq-bot**。已有 profile 里按 `id: qq-bridge` 写的覆盖继续生效。设置命名空间、状态文件和 `/api/qq-bridge/...` 也沿用这个 id，避免升级时对不上。
+**Cordis 插件 id 仍是 `qq-bridge`**（`cordis.patch.yml` 里的 `id`）。npm 包名是 **`@fengye_nobug/dsh-qq-bot`**。界面显示名仍是 **dsh-qq-bot**，消息来源仍是 `plugin:dsh-qq-bot`。无作用域的 `dsh-qq-bot` 发不出去：npm 认为它和已有的 `dsh-qqbot` 太像。已有 profile 里按 `id: qq-bridge` 写的覆盖继续生效。设置命名空间、状态文件和 `/api/qq-bridge/...` 也沿用这个 id，避免升级时对不上。
 
-**想装：** 用已经发布的 tag，不要盯着 main。
+**想装：** 优先用 npm 上已经发出的版本。连不上 npm，或 registry 里还没有这一版时，再用已经发布的 GitHub tag，不要盯着 main。
+
+```sh
+dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@0.2.4
+```
 
 ```sh
 dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
@@ -19,7 +23,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 在 GitHub 上 Watch → Custom → **Releases**，比盯 main 稳。环境、第一次怎么开白名单、怎么升级、和官方插件为什么不能一起挂，写在[安装](#安装)。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
-- 源码版本 **0.2.5**（设置页可以一键更新）。GitHub 上已发布的稳定版仍是 **v0.2.3**，日常安装用上面的 `#v0.2.3`。这个提交不代发 npm。registry 里一旦有 `dsh-qq-bot`，卡片上的「更新到 vX.Y.Z」就从 npm 安装，不再打开 GitHub。见 [`CHANGELOG.md`](./CHANGELOG.md)。
+- 源码版本 **0.2.5**（设置页可以一键更新）。npm 上已经发出的是 **`@fengye_nobug/dsh-qq-bot@0.2.4`**。GitHub 上已发布的稳定版仍是 **v0.2.3**。源码这一版还没打 tag，也还没 `npm publish`。卡片上的「更新到 vX.Y.Z」安装 `@fengye_nobug/dsh-qq-bot@版本`。见 [`CHANGELOG.md`](./CHANGELOG.md)。
 - **M1–M8 全部完成**，已在**真实 NapCat + 真实 QQ** 上端到端跑通（Windows 真机）
 
 ## 目录
@@ -45,7 +49,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
   也认 `[表情182]` 和 `[CQ:face,id=182]`。详见[出站](#出站三种模式--来源闸门)。
 - **有设置卡片**：名称是白话（哪些群可以叫醒、群里发出去的是哪一段、忙的时候怎么插话等），
   配置键仍是英文。在 `设置 → 插件 → 插件配置` 里修改，保存即生效。
-- **可以一键更新**：先点「检查更新」。有新正式版时再点「更新到 vX.Y.Z」，面板会装上并重启。优先从 npm 安装；这个包还没发到 npm 时，改从 GitHub 下载。启动时检查不会自动安装。
+- **可以一键更新**：先点「检查更新」。有新正式版时再点「更新到 vX.Y.Z」，面板会装上并重启。优先从 npm 安装 `@fengye_nobug/dsh-qq-bot@版本`；这一版还没发到 npm 时，改从 GitHub 下载。启动时检查不会自动安装。
 - **NapCat 自助托管**：插件可以按需下载、校验、解包、写配置、启停 NapCat。
 
 **不做的三件事**：
@@ -56,7 +60,13 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 
 ## 安装
 
-稳定版看 [Releases](https://github.com/yunfengnobug/dsh-qq-bot/releases)。已经发出的是 **v0.2.3**。仓库源码如果已经是 0.2.5，那是 main 上还没打 tag 的版本，日常不要装 main。`dsh-qq-bot@版本` 要等这个版本出现在 npm 上才装得上；还没有时，一键更新会改从 GitHub 下载。
+日常安装用 npm 上已经发出的 **`@fengye_nobug/dsh-qq-bot@0.2.4`**。无作用域的 `dsh-qq-bot@版本` 装不上：npm 不接受这个名字，它和已有的 `dsh-qqbot` 太像。GitHub [Releases](https://github.com/yunfengnobug/dsh-qq-bot/releases) 上已经发出的是 **v0.2.3**。仓库源码如果已经是 0.2.5，那是还没打 tag、也还没发到 npm 的版本，日常不要装 main。某一版还没出现在 registry 里时，一键更新会改从 GitHub 下载。
+
+```sh
+dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@0.2.4
+```
+
+GitHub 备用：
 
 ```sh
 dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
@@ -88,12 +98,12 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
 
 四条路。装完都要让 dsh-web 重新加载插件：
 
-1. 设置卡片里先点「检查更新」。有新正式版时出现「更新到 vX.Y.Z」。点下去优先执行 `dsh plugin --profile web add dsh-qq-bot@X.Y.Z`，走这台机器上 pnpm 已经配置的 registry，然后重启面板。设置还在，不改 NapCat。重启后刷新页面；登录口令可能会变。
-2. 包已经发到 npm 时，自己执行同一条命令。
+1. 设置卡片里先点「检查更新」。有新正式版时出现「更新到 vX.Y.Z」。点下去优先执行 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@X.Y.Z`，走这台机器上 pnpm 已经配置的 registry，然后重启面板。设置还在，不改 NapCat。重启后刷新页面；登录口令可能会变。
+2. 自己执行同一条命令。npm 上已经发出的是 `@fengye_nobug/dsh-qq-bot@0.2.4`。
 3. 指定 GitHub tag：`dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#vX.Y.Z`
 4. 卸掉再装，然后重启。
 
-这个仓库不代发 npm。第 1 步如果发现 registry 里没有 `dsh-qq-bot` 或没有这个版本，会改从 GitHub 下载该标签的官方源码包：先 `github.com`，连不上再试同一标签的 `codeload.github.com`，然后交给 `dsh plugin add`。插件不写死第三方镜像。registry 里已经有比当前新的正式版时，检查和安装不再访问 GitHub。
+无作用域名字发不出去。第 1 步如果发现 registry 里没有 `@fengye_nobug/dsh-qq-bot` 的这一版，会改从 GitHub 下载该标签的官方源码包：先 `github.com`，连不上再试同一标签的 `codeload.github.com`，然后交给 `dsh plugin add`。v0.2.3 及更早标签里的 `package.json` 仍是无作用域名，这种源码包仍然能装。插件不写死第三方镜像。registry 里已经有比当前新的正式版时，检查和安装不再访问 GitHub。
 
 「检查更新」和「启动时检查一次」只询问，不会安装。已经是最新正式版时不出现更新按钮。不会装比当前更旧的版本，也不装草稿和预发布。连不上、安装失败、面板没能重启，都用白话说明。安装已经成功但没能安排重启时，新版本在磁盘上，需要自己重启 dsh-web。
 
@@ -109,8 +119,10 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
 
 ```sh
 dsh plugin --profile web remove dsh-qq-bridge
-dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
+dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@0.2.4
 ```
+
+连不上 npm 时，把上面第二条换成 `dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3`。
 
 然后重启 dsh-web。profile 里原来按 `id: qq-bridge` 写的覆盖可以留着。`list` 里如果包名不是 `dsh-qq-bridge`，卸你看到的那一个官方包，不要卸别的插件。
 
@@ -142,28 +154,30 @@ New-Item -ItemType Junction `
 4. 在含这个版本号的提交上打 annotated tag：`vX.Y.Z`。
 5. 用 CHANGELOG 里对应那一节的中文摘要发 GitHub Release。
 
-Release 不附带密钥、日志或本机文件。源码压缩包让 GitHub 自己生成即可，不必另外上传。用户侧安装始终用 `#vX.Y.Z`，不要把 main 当稳定版。npm 不是这条流程的必经步骤，见[用 npm 安装](#用-npm-安装)。
+Release 不附带密钥、日志或本机文件。源码压缩包让 GitHub 自己生成即可，不必另外上传。用户侧安装优先用 npm 上的 `@fengye_nobug/dsh-qq-bot@版本`，不要把 main 当稳定版。见[用 npm 安装](#用-npm-安装)。
 
 ## 用 npm 安装
 
-日常安装请用上面的 GitHub Release。`dsh plugin` 是 pnpm 的包装。维护者把包发到 npm 之后，安装和一键更新都优先按包名：
+`dsh plugin` 是 pnpm 的包装。安装和一键更新都用作用域包名。npm 上已经发出的是 0.2.4：
 
 ```sh
-dsh plugin --profile web add dsh-qq-bot@0.2.5
+dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@0.2.4
 ```
 
-维护者还没执行 `npm publish` 时，上面这条会 404，请改回 GitHub：
+无作用域的 `dsh-qq-bot` 发不出去，npm 认为它和已有的 `dsh-qqbot` 太像。不要写成 `dsh plugin add dsh-qq-bot@版本`。
+
+registry 里还没有要装的那一版时（源码 0.2.5 尚未发布），改用 GitHub：
 
 ```sh
 dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 ```
 
-发布之后，一键更新的顺利路径是 npm，不再要求打开 github.com。某台机器上的 `dsh plugin --help` 如果只认 `github:`，就继续用 Release tag。想用镜像，配置这台机器的 npm / pnpm registry，不要等插件内置一个镜像地址。
+一键更新的顺利路径是 npm，不再要求打开 github.com。某台机器上的 `dsh plugin --help` 如果只认 `github:`，就继续用 Release tag。想用镜像，配置这台机器的 npm / pnpm registry，不要等插件内置一个镜像地址。
 
-维护者自己发布（仓库里没有 npm token，也不会在 CI 里代发）：
+维护者发布下一版（仓库里没有 npm token，也不会在 CI 里代发）：
 
 1. `npm login`
-2. 确认 `package.json` 的 `version` 和要发的 tag 一致。
+2. 确认 `package.json` 的 `name` 是 `@fengye_nobug/dsh-qq-bot`，`version` 和要发的 tag 一致。
 3. `npm pack --dry-run`，看清单里没有测试、密钥、本机路径。
 4. `npm publish`
 
@@ -171,7 +185,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 
 ## 插件市场
 
-[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 里已经有上游 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge)。本 fork 还没进索引，所以现在用 GitHub Release 安装。
+[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 里已经有上游 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge)。本 fork 还没进索引。安装不必等收录，用上面的 `@fengye_nobug/dsh-qq-bot` 即可。
 
 要申请收录，按[贡献说明](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/main/contributing.md)做：
 
@@ -179,7 +193,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 2. 把本仓库的 [`docs/awesome-dsh-plugin-entry.yml`](./docs/awesome-dsh-plugin-entry.yml) 复制成对方仓库的 `data/plugins/yunfengnobug__dsh-qq-bot.yml`，提一个 PR。不要改上游那条。一个 PR 最多 3 条。对方的 README 由脚本生成，不要手改。
 3. 描述只写插件实际做的事。`repository` 必须指回本仓库（`package.json` 里已经是了）。yml 里不要手写 `npm:`，市场自己从 registry 认。
 
-npm 发布是可选的。发了，市场才能显示下载量；不发也能收录，安装仍走 GitHub。
+npm 上已经有 `@fengye_nobug/dsh-qq-bot`（目前是 0.2.4）。无作用域名发不出去。发到 npm 之后，市场才能显示下载量；不发也能收录。
 
 用着有问题，到 [Issues](https://github.com/yunfengnobug/dsh-qq-bot/issues/new/choose) 选模板：**连不上**、**不回**、**发不出**。不要在 Issue 里贴真实 QQ 号、群号、token 或服务器地址。
 
@@ -457,9 +471,9 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 > 宿主 `requestRejection()` 返回空、`undefined` 或 `0` **不算**已登录。已登录只认宿主明确给出的结果：`isAuthenticated`、浏览器会话，或 `admit()` 交回的身份。没有这个结果的外网请求是 403。来源是别的网站、和 `Host` 对不上的请求也是 403，就算带着 cookie 也不行。接口只写 schema 白名单里的键。
 > 判断面板监听器是不是 HTTPS 时，只通过 `ctx.get('webServer')` 读协议，不读 `ctx.webServer`。插件没有把 `webServer` 放进 inject。直接读这个属性会抛错，宿主会把这次请求收成**没有正文的 HTTP 400**，卡片诊断就显示本机接口不可用，即使浏览器里已经登录。读不到这项服务、或读取失败时，按 HTTP 继续做登录判定。
 
-卡片上方显示**当前版本**，并有 **检查更新**。接口是 `GET/POST /api/qq-bridge/update`，准入和设置接口相同。GET 只读当前版本，不去 npm，也不去 GitHub。POST 不带 `action` 才对比版本：先问 npm registry 里的 `dsh-qq-bot` 正式版。有比当前新的版本时，写出版本号和 `dsh plugin --profile web add dsh-qq-bot@x.y.z`，并且不再访问 GitHub。这个包还没发到 npm，或者 npm 上的版本不比当前新、但 GitHub Release 上有更新时，才改问 GitHub，并说明一键更新会从 GitHub 下载。没有新版、连不上、被限流，都用白话说明。检查本身不会下载或安装。
+卡片上方显示**当前版本**，并有 **检查更新**。接口是 `GET/POST /api/qq-bridge/update`，准入和设置接口相同。GET 只读当前版本，不去 npm，也不去 GitHub。POST 不带 `action` 才对比版本：先问 npm registry 里的 `@fengye_nobug/dsh-qq-bot` 正式版。有比当前新的版本时，写出版本号和 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@x.y.z`，并且不再访问 GitHub。npm 上还没有更新、但 GitHub Release 上有更新时，才改问 GitHub，并说明一键更新会从 GitHub 下载。没有新版、连不上、被限流，都用白话说明。检查本身不会下载或安装。
 
-有新版时出现 **更新到 vX.Y.Z**。点下去才发送 `POST { "action": "apply", "version": "x.y.z" }`。优先 `dsh plugin --profile web add dsh-qq-bot@x.y.z`。registry 里没有这个版本时，改从 GitHub 的官方源码包装上，再重启面板。按钮下面写着：设置还在，不改 NapCat；重启后请刷新，登录口令可能会变。进行中显示「正在更新…」。已经是最新正式版时没有这个按钮。
+有新版时出现 **更新到 vX.Y.Z**。点下去才发送 `POST { "action": "apply", "version": "x.y.z" }`。优先 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@x.y.z`。registry 里没有这个版本时，改从 GitHub 的官方源码包装上，再重启面板。按钮下面写着：设置还在，不改 NapCat；重启后请刷新，登录口令可能会变。进行中显示「正在更新…」。已经是最新正式版时没有这个按钮。
 
 「启动时检查一次」默认关。打开并保存后，下次启动 dsh-web 才问一次，结果只写在日志里，不会安装。
 
@@ -512,7 +526,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `downloadProxy` | `''` | 下载时走的代理；空 = 先看 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`。NapCat 下载，以及一键更新改从 GitHub 下载时，都用它。从 npm 安装时走 pnpm 自己的 registry，不读这个框。界面上不显示代理地址 |
 | `onebotPort` | `3001` | OneBot 端口。自己另外部署的 NapCat 要和这边一致 |
 | `qqNumber` | `''` | 快速登录用的 QQ 号（需先手动登录过一次） |
-| `checkUpdateOnStart` | `false` | 启动时检查一次。默认关。打开后，下次启动先问 npm；这个包还没发到 npm 时再问 GitHub。只写日志，不自动安装。要装用卡片上的「更新到 vX.Y.Z」 |
+| `checkUpdateOnStart` | `false` | 启动时检查一次。默认关。打开后，下次启动先问 npm 上的 `@fengye_nobug/dsh-qq-bot`；npm 上还没有更新时再问 GitHub。只写日志，不自动安装。要装用卡片上的「更新到 vX.Y.Z」 |
 
 这些值优先从设置界面 / `settings.yaml` 取，未设置时回落到 `cordis.patch.yml` 里的安装配置（composition base）。
 
@@ -525,7 +539,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 1. `package.json` 里的 `dsh.client` 还在；
 2. **重启过 `dsh web`**。浏览器端的内容是启动时读盘并计算指纹的，修改后必须重启；
 3. **重启之后刷新过页面（F5）**。清单是页面加载时注入的，只重启服务器时，已经打开的页面手里还是旧清单；
-4. DSH 版本：0.2.0 把客户端设置服务从 `settingsScope` 改名为 `webUiSettings`，插件配置页的挂载点从 `settings.plugin.item` 改成 `settings.plugins.tab`。有的 0.2.x 上这两个服务都不存在，`ctx.inject` 会一直等。本插件**不等它们**：`apply` 时就挂上卡片。宿主设置域还在就用它；否则读写 `/api/qq-bridge/settings`。挂载点有四个：`settings.plugins.tab`、`settings.plugin.item`、`plugins.tab`、`plugins.detail.section`（详情页只在本包 `dsh-qq-bot`、旧包名 `dsh-qq-bridge`，或 id `qq-bridge` 上显示）。卡片默认展开。
+4. DSH 版本：0.2.0 把客户端设置服务从 `settingsScope` 改名为 `webUiSettings`，插件配置页的挂载点从 `settings.plugin.item` 改成 `settings.plugins.tab`。有的 0.2.x 上这两个服务都不存在，`ctx.inject` 会一直等。本插件**不等它们**：`apply` 时就挂上卡片。宿主设置域还在就用它；否则读写 `/api/qq-bridge/settings`。挂载点有四个：`settings.plugins.tab`、`settings.plugin.item`、`plugins.tab`、`plugins.detail.section`（详情页在 npm 包 `@fengye_nobug/dsh-qq-bot`、旧包名 `dsh-qq-bot` 和 `dsh-qq-bridge`，或 id `qq-bridge` 上显示）。卡片默认展开。
 
 > 卡片按 settings 命名空间派发，`client/client.js` 里的 key 必须逐字等于 `qq-bridge`。
 > 对不上不会报错，只是静默不显示（`test-smoke.mjs` 包含该一致性的断言）。

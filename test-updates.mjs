@@ -16,6 +16,7 @@ import {
   installCommand,
   npmInstallCommand,
   npmInstallSpec,
+  npmPackageUrl,
   NPM_REGISTRY,
   normalizeRegistry,
   parseSemver,
@@ -165,7 +166,7 @@ const unflaggedRc = assessUpdate({
 })
 check('标签里带预发布、即使没标 prerelease，也不当正式版', unflaggedRc.kind === 'no-release' && unflaggedRc.updateAvailable === false)
 
-function packageJson(version, name = 'dsh-qq-bot') {
+function packageJson(version, name = '@fengye_nobug/dsh-qq-bot') {
   return JSON.stringify({ name, version })
 }
 
@@ -189,7 +190,20 @@ try {
 } catch (error) {
   rejectedName = error?.code === 'wrong-name'
 }
-check('包名不是这个插件就拒绝', rejectedName)
+let legacyName = false
+try {
+  repackReleaseTarball(fixtureTarball([{ name: 'package.json', data: packageJson('9.9.9', 'dsh-qq-bot') }]), { version: '9.9.9' })
+  legacyName = true
+} catch {
+  legacyName = false
+}
+let rejectedOtherScope = false
+try {
+  repackReleaseTarball(fixtureTarball([{ name: 'package.json', data: packageJson('9.9.9', '@other/dsh-qq-bot') }]), { version: '9.9.9' })
+} catch (error) {
+  rejectedOtherScope = error?.code === 'wrong-name'
+}
+check('包名不是这个插件就拒绝，GitHub 旧标签里的无作用域名仍可装', rejectedName && legacyName && rejectedOtherScope)
 
 let rejectedVersion = false
 try {
@@ -382,7 +396,7 @@ await checkPluginUpdate({ current: '0.2.3', fetchImpl: checkOnly.fetchImpl })
 check(
   '只检查时不会去下压缩包',
   checkOnly.calls.length === 2 &&
-    checkOnly.calls[0].url === 'https://registry.npmjs.org/dsh-qq-bot' &&
+    checkOnly.calls[0].url === npmPackageUrl() &&
     checkOnly.calls[1].url.includes('api.github.com') &&
     checkOnly.calls.every((call) => !call.url.includes('codeload') && !call.url.includes('/archive/')),
 )
@@ -469,7 +483,7 @@ check(
     /已经是最新正式版/.test(already.result.error) &&
     already.seen.length === 0 &&
     already.calls.length === 2 &&
-    already.calls[0].url === 'https://registry.npmjs.org/dsh-qq-bot' &&
+    already.calls[0].url === npmPackageUrl() &&
     already.calls.every((call) => !call.url.includes('/archive/') && !call.url.includes('codeload')),
   String(already.result.error),
 )
@@ -761,26 +775,28 @@ check(
 )
 check(
   'npm 安装命令是包名加版本',
-  npmInstallSpec('v9.9.9') === 'dsh-qq-bot@9.9.9' &&
-    npmInstallCommand('9.9.9') === 'dsh plugin --profile web add dsh-qq-bot@9.9.9' &&
+  npmInstallSpec('v9.9.9') === '@fengye_nobug/dsh-qq-bot@9.9.9' &&
+    npmInstallCommand('9.9.9') === 'dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@9.9.9' &&
     npmInstallSpec('9.9.9-rc.1') === '' &&
-    npmInstallSpec('9.9.9;rm') === '',
+    npmInstallSpec('9.9.9;rm') === '' &&
+    npmInstallSpec('9.9.9', 'dsh-qq-bot') === '' &&
+    npmPackageUrl() === 'https://registry.npmjs.org/@fengye_nobug%2Fdsh-qq-bot',
 )
-const npmAdd = dshPluginAddSpec({ packageSpec: 'dsh-qq-bot@9.9.9', platform: 'linux' })
+const npmAdd = dshPluginAddSpec({ packageSpec: '@fengye_nobug/dsh-qq-bot@9.9.9', platform: 'linux' })
 check(
   'Linux 上优先 dsh plugin add 这个 npm 包',
-  npmAdd.command === 'dsh' && npmAdd.shell === false && npmAdd.args.join(' ') === 'plugin --profile web add dsh-qq-bot@9.9.9',
+  npmAdd.command === 'dsh' && npmAdd.shell === false && npmAdd.args.join(' ') === 'plugin --profile web add @fengye_nobug/dsh-qq-bot@9.9.9',
 )
 let badSpec = false
 try {
-  dshPluginAddSpec({ packageSpec: 'dsh-qq-bot@9.9.9 && echo', platform: 'linux' })
+  dshPluginAddSpec({ packageSpec: 'dsh-qq-bot@9.9.9', platform: 'linux' })
 } catch (error) {
   badSpec = error?.code === 'bad-package'
 }
-check('npm 包说明里夹命令就不交给 dsh', badSpec)
+check('无作用域包名和夹命令的说明都不交给 dsh', badSpec)
 
 const npmPack = fakeFetch((url) => {
-  if (url === 'https://registry.npmjs.org/dsh-qq-bot') {
+  if (url === npmPackageUrl()) {
     return {
       ok: true,
       status: 200,
@@ -795,7 +811,7 @@ check(
   npmChecked.ok === true &&
     npmChecked.updateAvailable === true &&
     npmChecked.latest === '9.9.9' &&
-    npmChecked.install === 'dsh-qq-bot@9.9.9' &&
+    npmChecked.install === '@fengye_nobug/dsh-qq-bot@9.9.9' &&
     npmChecked.command === npmInstallCommand('9.9.9') &&
     npmChecked.message.includes('从 npm 装上') &&
     !npmChecked.message.includes('github:') &&
@@ -806,24 +822,24 @@ check(
 const viaNpm = await applyWith({
   current: '0.2.3',
   onFetch: (url) => {
-    if (url === 'https://registry.npmjs.org/dsh-qq-bot') {
+    if (url === npmPackageUrl()) {
       return { ok: true, status: 200, json: async () => ({ versions: { '9.9.9': { version: '9.9.9' } } }) }
     }
     throw new Error(`不该访问 ${url}`)
   },
-  runCommand: async (spec) => ({ ok: spec.packageSpec === 'dsh-qq-bot@9.9.9' && spec.tarballPath == null, code: 0 }),
+  runCommand: async (spec) => ({ ok: spec.packageSpec === '@fengye_nobug/dsh-qq-bot@9.9.9' && spec.tarballPath == null, code: 0 }),
 })
 check(
   '有新版：先装 npm 上的包，不下载 GitHub',
   viaNpm.result.ok === true &&
     viaNpm.result.channel === 'npm' &&
-    viaNpm.result.install === 'dsh-qq-bot@9.9.9' &&
+    viaNpm.result.install === '@fengye_nobug/dsh-qq-bot@9.9.9' &&
     viaNpm.result.command === npmInstallCommand('9.9.9') &&
     /已经装上 v9.9.9/.test(viaNpm.result.message) &&
     /从 npm 装的/.test(viaNpm.result.message) &&
     /没有改动 NapCat/.test(viaNpm.result.message) &&
     viaNpm.seen.length === 1 &&
-    viaNpm.seen[0].packageSpec === 'dsh-qq-bot@9.9.9' &&
+    viaNpm.seen[0].packageSpec === '@fengye_nobug/dsh-qq-bot@9.9.9' &&
     viaNpm.seen[0].profile === 'web' &&
     !viaNpm.calls.some((call) => /github\.com|codeload|ghproxy|npmmirror/.test(call.url)),
   JSON.stringify({ message: viaNpm.result.message, urls: viaNpm.calls.map((call) => call.url) }),
@@ -832,7 +848,7 @@ check(
 const npmMissThenGithub = await applyWith({
   current: '0.2.3',
   onFetch: (url) => {
-    if (url === 'https://registry.npmjs.org/dsh-qq-bot') {
+    if (url === npmPackageUrl()) {
       return { ok: true, status: 200, json: async () => ({ versions: { '9.9.9': { version: '9.9.9' } } }) }
     }
     if (url === githubArchiveUrl('9.9.9')) {
@@ -852,7 +868,7 @@ check(
     npmMissThenGithub.result.install === 'github:yunfengnobug/dsh-qq-bot#v9.9.9' &&
     /从 GitHub 装上/.test(npmMissThenGithub.result.message) &&
     npmMissThenGithub.seen.length === 2 &&
-    npmMissThenGithub.seen[0].packageSpec === 'dsh-qq-bot@9.9.9' &&
+    npmMissThenGithub.seen[0].packageSpec === '@fengye_nobug/dsh-qq-bot@9.9.9' &&
     String(npmMissThenGithub.seen[1].tarballPath).endsWith('dsh-qq-bot-9.9.9.tgz') &&
     npmMissThenGithub.calls.some((call) => call.url === githubArchiveUrl('9.9.9')) &&
     !npmMissThenGithub.calls.some((call) => /ghproxy|npmmirror|codeload/.test(call.url)),

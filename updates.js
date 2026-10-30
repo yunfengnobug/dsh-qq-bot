@@ -2,7 +2,7 @@
 //
 // checkPluginUpdate 只比较版本、拼白话说明，不下载、不安装、不改配置。
 // 启动时检查必须走这一条，不能调用 applyPluginUpdate。
-// 有新版本时，applyPluginUpdate 先执行 `dsh plugin --profile web add dsh-qq-bot@x.y.z`，
+// 有新版本时，applyPluginUpdate 先执行 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@x.y.z`，
 // 走这台机器 npm / pnpm 已经配好的 registry（可以是官方，也可以是用户自己的镜像）。
 // 插件不写死第三方镜像。包还没发到 npm，或 registry 里没有这个版本时，才改从 GitHub 下载：
 // 先要 github.com 上的官方源码包，连不上再试同一标签的 codeload。只跟随仍指向同一标签的
@@ -15,7 +15,10 @@ import { join } from 'node:path'
 import { gunzipSync, gzipSync } from 'node:zlib'
 
 export const UPDATE_REPO = 'yunfengnobug/dsh-qq-bot'
-export const PACKAGE_NAME = 'dsh-qq-bot'
+/** npm 上的包名。无作用域的 dsh-qq-bot 发不出去（和已有的 dsh-qqbot 太像）。本地压缩包文件名仍不带作用域，避免路径里出现斜杠。 */
+export const PACKAGE_NAME = '@fengye_nobug/dsh-qq-bot'
+/** GitHub 上 v0.2.3 及更早标签的 package.json 仍是这个无作用域名。下载校验认它，不认别的作用域。 */
+const LEGACY_UNSCOPED_NAME = 'dsh-qq-bot'
 /** 没读到用户自己的 registry 时用官方源。不把第三方镜像写进默认值。 */
 export const NPM_REGISTRY = 'https://registry.npmjs.org/'
 /** 下载下来的压缩包上限。本仓库是源码包，远小于这个数。 */
@@ -123,12 +126,16 @@ export function normalizeRegistry(raw) {
   return `${url.origin}/`
 }
 
-/** npm 上的安装说明。只拼正式版，预发布和夹带别的字符都不出命令。 */
+function isOurNpmName(name) {
+  return name === PACKAGE_NAME
+}
+
+/** npm 上的安装说明。只拼这个作用域包的正式版，别的名字和预发布都不出命令。 */
 export function npmInstallSpec(version, name = PACKAGE_NAME) {
   const parsed = parseSemver(version)
   if (!parsed || parsed.pre.length > 0) return ''
-  if (!/^[a-z0-9][a-z0-9._-]*$/.test(String(name))) return ''
-  return `${name}@${parsed.raw}`
+  if (!isOurNpmName(name)) return ''
+  return `${PACKAGE_NAME}@${parsed.raw}`
 }
 
 export function npmInstallCommand(version, name = PACKAGE_NAME) {
@@ -136,10 +143,19 @@ export function npmInstallCommand(version, name = PACKAGE_NAME) {
   return spec === '' ? '' : `dsh plugin --profile web add ${spec}`
 }
 
+/** registry 路径把作用域里的斜杠编码成 %2F，@ 保留。 */
 export function npmPackageUrl(registry = NPM_REGISTRY, name = PACKAGE_NAME) {
   const base = normalizeRegistry(registry)
-  if (base === '' || !/^[a-z0-9][a-z0-9._-]*$/.test(String(name))) return ''
-  return `${base}${name}`
+  if (base === '' || !isOurNpmName(name)) return ''
+  return `${base}${name.replace('/', '%2F')}`
+}
+
+function registryPackagePath(pathname) {
+  try {
+    return decodeURIComponent(String(pathname ?? '')).replace(/\/+$/, '')
+  } catch {
+    return ''
+  }
 }
 
 export function releasePage(tag, repo = UPDATE_REPO) {
@@ -395,7 +411,7 @@ export async function queryNpmVersions(input = {}) {
       } catch {
         return { ok: false, code: 'network' }
       }
-      if (next.origin !== origin || next.pathname !== new URL(url).pathname || next.username !== '' || next.password !== '') {
+      if (next.origin !== origin || registryPackagePath(next.pathname) !== `/${name}` || next.username !== '' || next.password !== '') {
         return { ok: false, code: 'network' }
       }
       current = next.toString()
@@ -1052,8 +1068,11 @@ export function repackReleaseTarball(bytes, expected) {
     error.code = 'bad-package'
     throw error
   }
-  const wantName = expected.name || PACKAGE_NAME
-  if (!manifest || manifest.name !== wantName) {
+  const wantName = expected.name || ''
+  const nameOk = wantName !== ''
+    ? manifest?.name === wantName
+    : manifest?.name === PACKAGE_NAME || manifest?.name === LEGACY_UNSCOPED_NAME
+  if (!nameOk) {
     const error = new Error('name')
     error.code = 'wrong-name'
     throw error
@@ -1126,10 +1145,13 @@ export function dshPluginAddSpec(spec) {
   }
   const packageSpec = spec.packageSpec == null ? '' : String(spec.packageSpec)
   const tarballPath = spec.tarballPath == null ? '' : String(spec.tarballPath)
-  if (packageSpec !== '' && !/^[a-z0-9][a-z0-9._-]*@\d+\.\d+\.\d+$/.test(packageSpec)) {
-    const error = new Error('spec')
-    error.code = 'bad-package'
-    throw error
+  if (packageSpec !== '') {
+    const version = packageSpec.startsWith(`${PACKAGE_NAME}@`) ? packageSpec.slice(PACKAGE_NAME.length + 1) : ''
+    if (npmInstallSpec(version) !== packageSpec) {
+      const error = new Error('spec')
+      error.code = 'bad-package'
+      throw error
+    }
   }
   if (packageSpec === '' && tarballPath === '') {
     const error = new Error('target')
@@ -1356,7 +1378,7 @@ function shownInstall(channel, version, repo) {
 /**
  * 下载并安装一次检查允许的版本，然后安排重启。
  * 调用方要自己做登录校验。这里不读设置文件，也不碰 NapCat。
- * 先 `dsh plugin add dsh-qq-bot@版本`。registry 里没有这个版本时，才下载 GitHub 上的同一标签。
+ * 先 `dsh plugin add @fengye_nobug/dsh-qq-bot@版本`。registry 里没有这个版本时，才下载 GitHub 上的同一标签。
  * @param {{ current: unknown, version?: unknown, force?: boolean, repo?: string, fetchImpl?: typeof fetch, registry?: string, proxy?: string, platform?: string, profile?: string, runCommand?: (spec: object) => Promise<{ ok: boolean, code?: string | number }>, scheduleRestart?: (spec: object) => Promise<{ ok: boolean, error?: string }>, spawnImpl?: typeof spawn, timeoutMs?: number, downloadTimeoutMs?: number, maxBytes?: number }} input
  */
 export async function applyPluginUpdate(input = {}) {

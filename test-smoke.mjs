@@ -1480,7 +1480,8 @@ function sawSentText(s) {
       )
       check(
         '插件详情：本包和旧包名、以及 qq-bridge 这个 id 才显示',
-        Boolean(detail.cell({ subject: { kind: 'bundle', pkg: { name: 'dsh-qq-bot' } } })) &&
+        Boolean(detail.cell({ subject: { kind: 'bundle', pkg: { name: '@fengye_nobug/dsh-qq-bot' } } })) &&
+          Boolean(detail.cell({ subject: { kind: 'bundle', pkg: { name: 'dsh-qq-bot' } } })) &&
           Boolean(detail.cell({ subject: { kind: 'bundle', pkg: { name: 'dsh-qq-bridge' } } })) &&
           Boolean(detail.cell({ subject: { kind: 'item', id: 'qq-bridge' } })),
       )
@@ -1519,7 +1520,8 @@ function sawSentText(s) {
         src.includes('更新到 ') &&
           src.includes("action: 'apply'") &&
           src.includes('正在更新…') &&
-          src.includes('装上这一版并重启面板') &&
+          src.includes('这一版并重启面板') &&
+          src.includes('@fengye_nobug/dsh-qq-bot') &&
           src.includes('优先从 npm') &&
           src.includes('先问 npm') &&
           src.includes('登录口令可能会变') &&
