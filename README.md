@@ -19,7 +19,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 在 GitHub 上 Watch → Custom → **Releases**，比盯 main 稳。环境、第一次怎么开白名单、怎么升级、和官方插件为什么不能一起挂，写在[安装](#安装)。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
-- 源码版本 **0.2.4**（设置页可以检查更新）。GitHub 上已发布的稳定版仍是 **v0.2.3**，日常安装用上面的 `#v0.2.3`。打出新的 Release 之后，把命令里的 tag 换成那一版；卡片上的「检查更新」也会给出当时的安装命令。见 [`CHANGELOG.md`](./CHANGELOG.md)。
+- 源码版本 **0.2.5**（设置页可以一键更新）。GitHub 上已发布的稳定版仍是 **v0.2.3**，日常安装用上面的 `#v0.2.3`。这个提交不代发 npm。registry 里一旦有 `dsh-qq-bot`，卡片上的「更新到 vX.Y.Z」就从 npm 安装，不再打开 GitHub。见 [`CHANGELOG.md`](./CHANGELOG.md)。
 - **M1–M8 全部完成**，已在**真实 NapCat + 真实 QQ** 上端到端跑通（Windows 真机）
 
 ## 目录
@@ -45,6 +45,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
   也认 `[表情182]` 和 `[CQ:face,id=182]`。详见[出站](#出站三种模式--来源闸门)。
 - **有设置卡片**：名称是白话（哪些群可以叫醒、群里发出去的是哪一段、忙的时候怎么插话等），
   配置键仍是英文。在 `设置 → 插件 → 插件配置` 里修改，保存即生效。
+- **可以一键更新**：先点「检查更新」。有新正式版时再点「更新到 vX.Y.Z」，面板会装上并重启。优先从 npm 安装；这个包还没发到 npm 时，改从 GitHub 下载。启动时检查不会自动安装。
 - **NapCat 自助托管**：插件可以按需下载、校验、解包、写配置、启停 NapCat。
 
 **不做的三件事**：
@@ -55,7 +56,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 
 ## 安装
 
-稳定版看 [Releases](https://github.com/yunfengnobug/dsh-qq-bot/releases)。已经发出的是 **v0.2.3**。仓库源码如果已经是 0.2.4，那是 main 上还没打 tag 的版本，日常不要装 main。
+稳定版看 [Releases](https://github.com/yunfengnobug/dsh-qq-bot/releases)。已经发出的是 **v0.2.3**。仓库源码如果已经是 0.2.5，那是 main 上还没打 tag 的版本，日常不要装 main。`dsh-qq-bot@版本` 要等这个版本出现在 npm 上才装得上；还没有时，一键更新会改从 GitHub 下载。
 
 ```sh
 dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
@@ -85,11 +86,20 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
 
 ### 升级
 
-三条路。装完都要重启 dsh-web：
+四条路。装完都要让 dsh-web 重新加载插件：
 
-1. 面板的插件管理里升级（有这个入口再用）。
-2. 指定新 tag：`dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#vX.Y.Z`
-3. 卸掉再装同一条命令，然后重启。
+1. 设置卡片里先点「检查更新」。有新正式版时出现「更新到 vX.Y.Z」。点下去优先执行 `dsh plugin --profile web add dsh-qq-bot@X.Y.Z`，走这台机器上 pnpm 已经配置的 registry，然后重启面板。设置还在，不改 NapCat。重启后刷新页面；登录口令可能会变。
+2. 包已经发到 npm 时，自己执行同一条命令。
+3. 指定 GitHub tag：`dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#vX.Y.Z`
+4. 卸掉再装，然后重启。
+
+这个仓库不代发 npm。第 1 步如果发现 registry 里没有 `dsh-qq-bot` 或没有这个版本，会改从 GitHub 下载该标签的官方源码包：先 `github.com`，连不上再试同一标签的 `codeload.github.com`，然后交给 `dsh plugin add`。插件不写死第三方镜像。registry 里已经有比当前新的正式版时，检查和安装不再访问 GitHub。
+
+「检查更新」和「启动时检查一次」只询问，不会安装。已经是最新正式版时不出现更新按钮。不会装比当前更旧的版本，也不装草稿和预发布。连不上、安装失败、面板没能重启，都用白话说明。安装已经成功但没能安排重启时，新版本在磁盘上，需要自己重启 dsh-web。
+
+在 Linux 上，进程由 systemd 拉起并且能认出具体服务时，大约 3 秒后只重启那个服务。只看到用户会话、认不出单独服务时，请自己重启 dsh-web。没有被 systemd 拉起时，响应发出后按当前的 node 命令行再拉起一次。这次更新不改 NapCat 的配置，也不去停它。插件自己拉起的 NapCat 会随 dsh-web 退出而结束；已经在外面跑着的 NapCat 继续运行。
+
+想让 npm 走镜像，把 npm / pnpm 的 registry 配成你自己的镜像。插件只在没读到配置时用 `https://registry.npmjs.org/`。
 
 ### 不要和官方插件一起挂
 
@@ -136,19 +146,19 @@ Release 不附带密钥、日志或本机文件。源码压缩包让 GitHub 自�
 
 ## 用 npm 安装
 
-日常请用上面的 GitHub Release。`dsh plugin` 是 pnpm 的包装；维护者把包发到 npm 之后，也可以按包名装：
+日常安装请用上面的 GitHub Release。`dsh plugin` 是 pnpm 的包装。维护者把包发到 npm 之后，安装和一键更新都优先按包名：
 
 ```sh
-dsh plugin --profile web add dsh-qq-bot@0.2.4
+dsh plugin --profile web add dsh-qq-bot@0.2.5
 ```
 
-包还没发布时这条会失败，改回 GitHub：
+维护者还没执行 `npm publish` 时，上面这条会 404，请改回 GitHub：
 
 ```sh
 dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 ```
 
-某台机器上的 `dsh plugin --help` 如果只认 `github:`，就继续用 Release tag。GitHub 是主路径，npm 是辅路径。
+发布之后，一键更新的顺利路径是 npm，不再要求打开 github.com。某台机器上的 `dsh plugin --help` 如果只认 `github:`，就继续用 Release tag。想用镜像，配置这台机器的 npm / pnpm registry，不要等插件内置一个镜像地址。
 
 维护者自己发布（仓库里没有 npm token，也不会在 CI 里代发）：
 
@@ -447,9 +457,11 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 > 宿主 `requestRejection()` 返回空、`undefined` 或 `0` **不算**已登录。已登录只认宿主明确给出的结果：`isAuthenticated`、浏览器会话，或 `admit()` 交回的身份。没有这个结果的外网请求是 403。来源是别的网站、和 `Host` 对不上的请求也是 403，就算带着 cookie 也不行。接口只写 schema 白名单里的键。
 > 判断面板监听器是不是 HTTPS 时，只通过 `ctx.get('webServer')` 读协议，不读 `ctx.webServer`。插件没有把 `webServer` 放进 inject。直接读这个属性会抛错，宿主会把这次请求收成**没有正文的 HTTP 400**，卡片诊断就显示本机接口不可用，即使浏览器里已经登录。读不到这项服务、或读取失败时，按 HTTP 继续做登录判定。
 
-卡片上方显示**当前版本**，并有一个 **检查更新** 按钮。它向本仓库的 GitHub Releases 问一次（`GET/POST /api/qq-bridge/update`，准入和设置接口相同）。GET 只读当前版本，不去 GitHub；只有点按钮的 POST 才去对比。有新版时写出最新版本号、Release 说明摘要，以及 `github:yunfengnobug/dsh-qq-bot#vX.Y.Z` 的安装命令。没有新版、连不上、被 GitHub 限流，都用白话说明。不会自动下载或安装。
+卡片上方显示**当前版本**，并有 **检查更新**。接口是 `GET/POST /api/qq-bridge/update`，准入和设置接口相同。GET 只读当前版本，不去 npm，也不去 GitHub。POST 不带 `action` 才对比版本：先问 npm registry 里的 `dsh-qq-bot` 正式版。有比当前新的版本时，写出版本号和 `dsh plugin --profile web add dsh-qq-bot@x.y.z`，并且不再访问 GitHub。这个包还没发到 npm，或者 npm 上的版本不比当前新、但 GitHub Release 上有更新时，才改问 GitHub，并说明一键更新会从 GitHub 下载。没有新版、连不上、被限流，都用白话说明。检查本身不会下载或安装。
 
-「启动时检查一次」默认关。打开并保存后，下次启动 dsh-web 才问一次，结果只写在日志里。
+有新版时出现 **更新到 vX.Y.Z**。点下去才发送 `POST { "action": "apply", "version": "x.y.z" }`。优先 `dsh plugin --profile web add dsh-qq-bot@x.y.z`。registry 里没有这个版本时，改从 GitHub 的官方源码包装上，再重启面板。按钮下面写着：设置还在，不改 NapCat；重启后请刷新，登录口令可能会变。进行中显示「正在更新…」。已经是最新正式版时没有这个按钮。
+
+「启动时检查一次」默认关。打开并保存后，下次启动 dsh-web 才问一次，结果只写在日志里，不会安装。
 
 卡片展开后还有 3 个操作按钮（0.1.5 与 0.2.0 上都有）：
 
@@ -497,10 +509,10 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `napcatInstallDir` | `''` | NapCat 安装目录；空 = `$DSH_HOME/napcat`。自己装的或 Docker 里的请填实际目录 |
 | `napcatWebuiUrl` | `''` | NapCat 网页管理地址。空 = 读 `webui.json`（通常是 `127.0.0.1`，只有跑着 NapCat 的机器能打开）。远程使用时填外面打得开的地址 |
 | `napcatVersion` | `''` | 要下载的 NapCat 版本；空 = 最新 |
-| `downloadProxy` | `''` | 下载时走的代理；空 = 读环境变量 |
+| `downloadProxy` | `''` | 下载时走的代理；空 = 先看 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`。NapCat 下载，以及一键更新改从 GitHub 下载时，都用它。从 npm 安装时走 pnpm 自己的 registry，不读这个框。界面上不显示代理地址 |
 | `onebotPort` | `3001` | OneBot 端口。自己另外部署的 NapCat 要和这边一致 |
 | `qqNumber` | `''` | 快速登录用的 QQ 号（需先手动登录过一次） |
-| `checkUpdateOnStart` | `false` | 启动时检查一次。默认关。打开后，下次启动 dsh-web 向 GitHub 问一次有没有新版本，只写日志，不自动安装。平时用卡片上的「检查更新」 |
+| `checkUpdateOnStart` | `false` | 启动时检查一次。默认关。打开后，下次启动先问 npm；这个包还没发到 npm 时再问 GitHub。只写日志，不自动安装。要装用卡片上的「更新到 vX.Y.Z」 |
 
 这些值优先从设置界面 / `settings.yaml` 取，未设置时回落到 `cordis.patch.yml` 里的安装配置（composition base）。
 
@@ -598,14 +610,14 @@ QQ 侧没有人能点击“同意”，因此：
 
 改用法、设置或运行行为时，同一次提交里更新本文件。约定见 [`AGENTS.md`](./AGENTS.md)。
 
-5 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器；检查更新不连真 GitHub），共 **718 条断言**：
+5 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器；检查更新不连真 npm、也不连真 GitHub），共 **778 条断言**：
 
 ```powershell
-node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具（含 mface）+ 系统表情分段 + 设置卡片字段 + 检查更新接口（假 ctx，纯离线）
+node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具（含 mface）+ 系统表情分段 + 设置卡片字段 + 检查更新和一键安装接口（假 ctx，纯离线）
 node test-onebot.mjs    # M2 端到端：内置最小 OneBot WS 服务器，验证收发全链路
 node test-napcat.mjs    # M5：ZIP 解包 / sha256 校验 / 发行包选择 / 配置写入
 node test-stickers.mjs  # 表情包登记表：哈希 / 读写 / 查找 / 原子写 / importSticker / mface 字段
-node test-updates.mjs   # 检查更新：semver 比较、Release 摘要、限流和断网的白话
+node test-updates.mjs   # 检查更新和一键安装：semver、npm 正式版、GitHub 备用下载、限流和断网的白话
 ```
 
 ## 路线

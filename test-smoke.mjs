@@ -1513,7 +1513,21 @@ function sawSentText(s) {
         updateField?.label === '启动时检查一次' && /不会自动安装/.test(String(updateField?.hint ?? '')),
         JSON.stringify(updateField),
       )
-      check('检查更新按钮不在浏览器里直接打 GitHub', src.includes('检查更新') && src.includes('/api/qq-bridge/update') && !src.includes('api.github.com'))
+      check('检查更新按钮不在浏览器里直接打 GitHub', src.includes('检查更新') && src.includes('/api/qq-bridge/update') && !src.includes('api.github.com') && !src.includes('codeload.github.com'))
+      check(
+        '有新版本才出现更新按钮，并说明会重启、登录口令可能变',
+        src.includes('更新到 ') &&
+          src.includes("action: 'apply'") &&
+          src.includes('正在更新…') &&
+          src.includes('装上这一版并重启面板') &&
+          src.includes('优先从 npm') &&
+          src.includes('先问 npm') &&
+          src.includes('登录口令可能会变') &&
+          src.includes('不改 NapCat') &&
+          src.includes('updateAvailable') &&
+          !src.includes('npmmirror') &&
+          !src.includes('ghproxy'),
+      )
       const cardKeys = (mod.__test?.fields ?? []).map((x) => x.key)
       const schemaKeys = Object.keys(registeredSettings[0]?.schema?.dict ?? {})
       const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k))
@@ -4866,16 +4880,18 @@ function sawSentText(s) {
     const out = { status: 0, body: '' }
     return { out, writeHead: (status) => { out.status = status }, end: (body) => { out.body = String(body ?? '') } }
   }
-  const req = (method, { addr = '127.0.0.1', headers = {} } = {}) => ({
+  const req = (method, { addr = '127.0.0.1', headers = {}, body = '{}' } = {}) => ({
     method,
     url: '/api/qq-bridge/update',
     socket: { remoteAddress: addr },
     headers: {
-      ...(method === 'POST' ? { 'content-type': 'application/json', 'content-length': '2' } : {}),
+      ...(method === 'POST'
+        ? { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) }
+        : {}),
       ...headers,
     },
     async *[Symbol.asyncIterator]() {
-      if (method === 'POST') yield Buffer.from('{}')
+      if (method === 'POST') yield Buffer.from(body)
     },
   })
   check('检查更新路由已挂上', typeof handler === 'function')
@@ -4965,6 +4981,71 @@ function sawSentText(s) {
         String(newer.command).includes('dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v9.9.9'),
       JSON.stringify(newer).slice(0, 240),
     )
+
+    globalThis.fetch = async () => {
+      throw new TypeError('fetch failed')
+    }
+    const resApplyDown = makeRes()
+    await handler(req('POST', { body: JSON.stringify({ action: 'apply', version: '9.9.9' }) }), resApplyDown)
+    const applyDown = JSON.parse(resApplyDown.out.body)
+    check(
+      'POST apply：GitHub 连不上是白话，不会当成装好了',
+      resApplyDown.out.status === 200 &&
+        applyDown.ok === false &&
+        applyDown.stage === 'github' &&
+        applyDown.applied !== true &&
+        /连不上 GitHub/.test(String(applyDown.error)) &&
+        !/fetch failed|TypeError/.test(String(applyDown.error)),
+      String(applyDown.error),
+    )
+
+    let applyFetches = 0
+    globalThis.fetch = async (url) => {
+      applyFetches += 1
+      if (String(url).includes('codeload') || String(url).includes('/archive/')) throw new Error('已经是当前版本时不该下载')
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          {
+            tag_name: `v${PLUGIN_VERSION}`,
+            draft: false,
+            prerelease: false,
+            body: '',
+            html_url: `https://github.com/yunfengnobug/dsh-qq-bot/releases/tag/v${PLUGIN_VERSION}`,
+          },
+        ],
+      }
+    }
+    const resApplySame = makeRes()
+    await handler(req('POST', { body: JSON.stringify({ action: 'apply' }) }), resApplySame)
+    const applySame = JSON.parse(resApplySame.out.body)
+    check(
+      'POST apply：已经是最新时不下载、不安装',
+      applySame.ok === false && /已经是最新/.test(String(applySame.error)) && applyFetches === 2 && applySame.applied !== true && applySame.restarting !== true,
+      `${applySame.error} fetches=${applyFetches}`,
+    )
+
+    const fetchesBeforeFar = applyFetches
+    const resApplyFar = makeRes()
+    await handler(req('POST', { addr: '10.0.0.9', body: JSON.stringify({ action: 'apply', version: '9.9.9' }) }), resApplyFar)
+    check(
+      'POST apply：外网且没有登录会话 → 403，也不会去 GitHub',
+      resApplyFar.out.status === 403 && /[\u4e00-\u9fa5]/.test(resApplyFar.out.body) && applyFetches === fetchesBeforeFar,
+      resApplyFar.out.body.slice(0, 160),
+    )
+
+    const resBadJson = makeRes()
+    await handler(req('POST', { body: '{' }), resBadJson)
+    check('POST 非法 JSON → 400', resBadJson.out.status === 400 && /JSON/.test(resBadJson.out.body), resBadJson.out.body.slice(0, 120))
+
+    const resNope = makeRes()
+    await handler(req('POST', { body: JSON.stringify({ action: 'nope' }) }), resNope)
+    check(
+      'POST 未知操作 → 400，并说明安装要用 apply',
+      resNope.out.status === 400 && /apply/.test(resNope.out.body) && /[\u4e00-\u9fa5]/.test(resNope.out.body),
+      resNope.out.body.slice(0, 160),
+    )
     globalThis.fetch = savedFetch
   }
 }
@@ -5008,8 +5089,11 @@ function sawSentText(s) {
     checkUpdateOnStart: true,
     onebotUrl: '',
   })
-  await new Promise((resolve) => setTimeout(resolve, 30))
-  check('启动时检查一次：开关打开才会问 GitHub', fetches === 1, String(fetches))
+  const deadline = Date.now() + 3000
+  while (Date.now() < deadline && (fetches < 2 || !logs.some((line) => line.includes('启动时检查更新')))) {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  check('启动时检查一次：开关打开才会问 npm，包还不在 npm 上时再问 GitHub', fetches === 2, String(fetches))
   check(
     '启动时检查一次：日志是白话，链接不跟到别的网站',
     logs.some((line) => line.includes('启动时检查更新：') && line.includes('9.9.9') && line.includes('github.com/yunfengnobug/dsh-qq-bot') && !line.includes('evil.example') && !/TypeError|fetch failed/.test(line)),
@@ -5017,6 +5101,14 @@ function sawSentText(s) {
   )
   globalThis.fetch = savedFetch
   rmSync(dir, { recursive: true, force: true })
+  const indexSrc = readFileSync(new URL('./index.js', import.meta.url), 'utf8')
+  const startAt = indexSrc.indexOf('if (readSettings().checkUpdateOnStart === true)')
+  const startBlock = indexSrc.slice(startAt, startAt + 700)
+  check(
+    '启动时检查只询问，不会调用安装',
+    startAt > 0 && startBlock.includes('checkPluginUpdate') && !startBlock.includes('applyPluginUpdate'),
+    startBlock.slice(0, 180),
+  )
 }
 
 // 用例用过的临时图片：留着只会在 %TEMP% 里积垃圾

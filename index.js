@@ -41,7 +41,7 @@ import {
   upsertSticker,
 } from './stickers.js'
 import { FACE_NAME_TO_ID, textToOneBotSegments } from './faces.js'
-import { checkPluginUpdate } from './updates.js'
+import { applyPluginUpdate, checkPluginUpdate } from './updates.js'
 
 const require = createRequire(import.meta.url)
 /** 当前安装的包版本。设置页和检查更新都读这一处，避免卡片里手写一份。 */
@@ -3886,9 +3886,37 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 检查更新。GET 只报当前版本，不去 GitHub。POST 才问 Releases。
-   * 有新版只返回说明和安装命令，不下载、不安装。
-   * 两代宿主都挂：按钮跟“设置存在哪”无关。
+   * 把检查或安装的结果收成卡片用的字段。不把临时路径、堆栈或代理地址带出去。
+   * @param {Record<string, unknown>} result
+   */
+  function presentUpdate(result) {
+    const body = {
+      ok: result.ok === true,
+      current: result.current || PLUGIN_VERSION,
+      latest: result.latest || result.version || '',
+      updateAvailable: result.updateAvailable === true,
+      summary: result.summary || '',
+      install: result.install || '',
+      command: result.command || '',
+      url: result.url || '',
+      tag: result.tag || '',
+      message: result.message || '',
+    }
+    if (result.applied === true) body.applied = true
+    if (result.restarting === true) body.restarting = true
+    if (result.installed === true) body.installed = true
+    if (result.stage) body.stage = result.stage
+    if (result.ok !== true) body.error = String(result.error || result.message || '更新没有完成。稍后再试。')
+    return body
+  }
+
+  /**
+   * 检查更新，以及在用户点了安装之后才装。
+   * GET 只报当前版本，不去 GitHub。
+   * POST 不带 action（或 action 为 check）只问 Releases，不下载、不安装。
+   * POST `{ action: 'apply', version }` 才安装这次检查允许的更新版本，并安排重启面板。
+   * 安装先走 npm（`dsh plugin add dsh-qq-bot@版本`）。包还没发布时才改从 GitHub 下载。
+   * 启动时检查不会走到 apply。两代宿主都挂：按钮跟“设置存在哪”无关。
    */
   async function handleUpdateRequest(req, res) {
     if (rejectLocalRequest(req, res)) return
@@ -3907,25 +3935,49 @@ export function apply(ctx, config) {
         error: '这个接口只接受 GET 与 POST。GET 看当前版本，POST 才去 GitHub 检查更新。',
       })
     }
-    const result = await checkPluginUpdate({ current })
-    if (result.ok === false) {
-      return sendJson(res, 200, {
+    let payload = {}
+    try {
+      const raw = (await readRequestBody(req)).trim()
+      payload = raw === '' ? {} : JSON.parse(raw)
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('not-object')
+    } catch {
+      return sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON。' })
+    }
+    const action = payload.action == null || payload.action === '' ? 'check' : String(payload.action)
+    if (action === 'check') {
+      const result = await checkPluginUpdate({ current })
+      if (result.ok === false) {
+        return sendJson(res, 200, {
+          ok: false,
+          current,
+          error: String(result.error || result.message || '检查更新失败，稍后再试。'),
+        })
+      }
+      return sendJson(res, 200, presentUpdate(result))
+    }
+    if (action !== 'apply') {
+      return sendJson(res, 400, {
         ok: false,
-        current,
-        error: String(result.error || result.message || '检查更新失败，稍后再试。'),
+        error: '不认识这个操作。检查更新不用带 action；安装请把 action 设为 apply。',
       })
     }
-    return sendJson(res, 200, {
-      ok: true,
-      current: result.current || current,
-      latest: result.latest || '',
-      updateAvailable: result.updateAvailable === true,
-      summary: result.summary || '',
-      install: result.install || '',
-      command: result.command || '',
-      url: result.url || '',
-      message: result.message,
-    })
+    if (payload.version != null && payload.version !== '' && typeof payload.version !== 'string') {
+      return sendJson(res, 400, { ok: false, error: '版本号格式不对，没有安装。' })
+    }
+    let result
+    try {
+      result = await applyPluginUpdate({
+        current,
+        version: typeof payload.version === 'string' ? payload.version : '',
+        force: payload.force === true,
+        proxy: proxyFor(readSettings()),
+      })
+    } catch {
+      return sendJson(res, 200, { ok: false, stage: 'install', error: '更新没有完成。稍后再试。' })
+    }
+    if (result.ok === true) logger.info(`一键更新：${result.message}`)
+    else logger.warn(`一键更新：${result.error || result.message}`)
+    return sendJson(res, 200, presentUpdate(result))
   }
 
   // TODO: accessTokenEnv 留空时，可回退读 NapCat 的 onebot11*.json 里的 token（用户说可做可不做）。
@@ -4068,7 +4120,7 @@ export function apply(ctx, config) {
     },
   }))
 
-  // 默认关。打开后每次进程启动问一次，只写日志，不下载、不安装、不挡住 ready。
+  // 默认关。打开后每次进程启动只问一次并写日志。这里不能调用 applyPluginUpdate。
   if (readSettings().checkUpdateOnStart === true) {
     const current = PLUGIN_VERSION
     Promise.resolve()
