@@ -47,7 +47,7 @@ writeFileSync(
         at: 1,
         userId: 'test-user',
         nickname: '群友',
-        groupId: '12345678',
+        groupId: null,
         groupName: null,
         text: '看这个 [图片]',
         images: [{ path: cachedImagePath, mediaType: 'image/png', bytes: CACHED_PNG.length, hash: CACHED_HASH }],
@@ -3526,6 +3526,202 @@ function sawSentText(s) {
   )
   await new Promise((resolve) => setTimeout(resolve, 20))
   check('maxRecentTurns：超限时调用宿主 compactNow', compacts >= 1, String(compacts))
+  rmSync(dir, { recursive: true, force: true })
+}
+
+// 两路会话同时在跑：缓冲、闸门、标记块、跟随窗口都不能串。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-overlap-'))
+  const stateFile = join(dir, 'state.json')
+  const agents = new Map()
+  const injectedBySession = new Map()
+  const localHandlers = {}
+  const scopeSettings = {
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 0,
+    nicknames: ['小助手'],
+    wakeProbability: 0,
+    whitelist: [],
+    groupWhitelist: ['111', '222'],
+    replyMode: 'marker',
+    delivery: 'followup',
+    onebotUrl: 'ws://127.0.0.1:3001/',
+  }
+  const tools = []
+  let stopTransport = () => {}
+  const iso = {
+    logger: { info() {}, warn() {} },
+    settings: { register: () => {}, get: () => scopeSettings },
+    agents: {
+      get: (id) => agents.get(id),
+      resume: async () => {
+        throw new Error('should create')
+      },
+      create: async ({ sessionId }) => {
+        const agent = {
+          id: sessionId,
+          session: { id: sessionId, events: () => [] },
+          status: 'idle',
+          followup(message) {
+            injectedBySession.set(sessionId, String(message?.content?.[0]?.text ?? ''))
+            return message
+          },
+          ctx: { get: () => undefined, effect: (fn) => fn() },
+        }
+        agents.set(sessionId, agent)
+        return { agent, dispose: async () => {} }
+      },
+      withInitiator: (_agent, fn) => fn(),
+    },
+    tools: { register: (def) => tools.push(def) },
+    on: (name, fn) => {
+      localHandlers[name] = fn
+      return () => {}
+    },
+    effect: (fn) => {
+      const stop = fn()
+      stopTransport = typeof stop === 'function' ? stop : () => {}
+      return stopTransport
+    },
+    get: () => undefined,
+    inject: () => {},
+  }
+  const socketMark = qqSockets.length
+  apply(iso, {
+    statePath: stateFile,
+    debugTools: true,
+    onebotUrl: 'ws://127.0.0.1:3001/',
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 0,
+    nicknames: ['小助手'],
+    wakeProbability: 0,
+    whitelist: [],
+    groupWhitelist: ['111', '222'],
+    replyMode: 'marker',
+    napcatInstallDir: join(dir, 'no-napcat'),
+  })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const sim = tools.find((t) => t.name === 'qq_bridge_simulate')
+  const listen = tools.find((t) => t.name === 'qq_bridge_listen')
+  const sendTool = tools.find((t) => t.name === 'qq_bridge_send')
+  const statusTool = tools.find((t) => t.name === 'qq_bridge_status')
+  const readState = () => JSON.parse(readFileSync(stateFile, 'utf8'))
+  const gateOfSession = async (id) => (JSON.parse(await statusTool.execute({}))).sessionGates?.[id]
+  const frameText = (frame) => {
+    const segs = Array.isArray(frame?.params?.message) ? frame.params.message : []
+    return segs.filter((part) => part?.type === 'text').map((part) => String(part.data?.text ?? '')).join('')
+  }
+  const sentFrames = () => {
+    const hits = []
+    for (const socket of qqSockets.slice(socketMark)) {
+      for (const frame of socket.sent ?? []) {
+        if (frame.action === 'send_group_msg' || frame.action === 'send_private_msg') hits.push(frame)
+      }
+    }
+    return hits
+  }
+  const fire = (id, type, data) => localHandlers['session/event']({ id }, { type, data })
+
+  await sim.execute({ text: '甲群闲聊', userId: '9', groupId: '111' })
+  await sim.execute({ text: '乙群闲聊', userId: '9', groupId: '222' })
+  const buffered = readState().buffers
+  check(
+    '重叠：两个群的未唤醒缓冲分开',
+    buffered?.['group:111']?.some((m) => String(m.text).includes('甲群闲聊')) &&
+      !buffered?.['group:111']?.some((m) => String(m.text).includes('乙群闲聊')) &&
+      buffered?.['group:222']?.some((m) => String(m.text).includes('乙群闲聊')),
+    JSON.stringify(buffered),
+  )
+
+  const wokeA = JSON.parse(await sim.execute({ text: '小助手看甲', userId: '9', groupId: '111', messageId: 'ma' }))
+  const idA = wokeA?.decision?.sessionId
+  const textA = injectedBySession.get(idA) ?? ''
+  check(
+    '重叠：唤醒甲群只带甲群的闲聊',
+    wokeA?.decision?.delivered === true && textA.includes('甲群闲聊') && !textA.includes('乙群闲聊'),
+    textA.slice(0, 180),
+  )
+  check(
+    '重叠：甲群唤醒后乙群缓冲还在',
+    readState().buffers?.['group:222']?.some((m) => String(m.text).includes('乙群闲聊')) === true,
+    JSON.stringify(readState().buffers),
+  )
+
+  const wokeB = JSON.parse(await sim.execute({ text: '小助手看乙', userId: '9', groupId: '222', messageId: 'mb' }))
+  const idB = wokeB?.decision?.sessionId
+  check('重叠：乙群是另一条会话', idA && idB && idA !== idB, JSON.stringify({ idA, idB }))
+
+  const openedA = JSON.parse(await listen.execute({ minutes: 5 }, { agent: agents.get(idA) }))
+  const openedB = JSON.parse(await listen.execute({ minutes: 4 }, { agent: agents.get(idB) }))
+  check('重叠：甲群跟随窗口开在甲群', openedA.key === 'group:111', JSON.stringify(openedA))
+  check('重叠：乙群跟随窗口开在乙群，且没有关掉甲群', openedB.key === 'group:222', JSON.stringify(openedB))
+  const duringA = JSON.parse(await sim.execute({ text: '甲群普通', userId: '9', groupId: '111', dryRun: true }))
+  const duringB = JSON.parse(await sim.execute({ text: '乙群普通', userId: '9', groupId: '222', dryRun: true }))
+  check(
+    '重叠：两个目的地的跟随窗口同时有效',
+    duringA.preview?.reason === 'listening' && duringB.preview?.reason === 'listening',
+    JSON.stringify({ a: duringA.preview, b: duringB.preview }),
+  )
+  await listen.execute({ off: true }, { agent: agents.get(idA) })
+  const afterOffA = JSON.parse(await sim.execute({ text: '甲群普通', userId: '9', groupId: '111', dryRun: true }))
+  const stillB = JSON.parse(await sim.execute({ text: '乙群普通', userId: '9', groupId: '222', dryRun: true }))
+  check(
+    '重叠：关掉甲群窗口不影响乙群',
+    afterOffA.preview?.reason !== 'listening' && stillB.preview?.reason === 'listening',
+    JSON.stringify({ a: afterOffA.preview, b: stillB.preview }),
+  )
+  await listen.execute({ off: true }, { agent: agents.get(idB) })
+
+  // 乙群这次 QQ 唤醒先收掉（没有回复），再开一轮 DSH 对话。甲群的 QQ 轮一直留着。
+  fire(idB, 'turn/end', { reason: { kind: 'completed' } })
+  fire(idB, 'user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: '在 DSH 里说话' }] })
+  fire(idB, 'turn/start', { turn: 2 })
+  fire(idB, 'assistant/message', { message: { content: [{ type: 'text', text: '[QQ]乙群不该出现[/QQ]' }] } })
+  fire(idA, 'assistant/message', { message: { content: [{ type: 'text', text: '[QQ]只给甲群[/QQ]' }] } })
+  const midA = await gateOfSession(idA)
+  const midB = await gateOfSession(idB)
+  check(
+    '重叠：乙群的 DSH 轮不算 QQ，甲群的归属还在',
+    midB?.currentTurnFromQQ === false && midA?.currentTurnFromQQ === true,
+    JSON.stringify({ midA, midB }),
+  )
+  const toolA = JSON.parse(await sendTool.execute({ text: '工具甲' }, { agent: agents.get(idA) }))
+  const toolB = JSON.parse(await sendTool.execute({ text: '工具乙' }, { agent: agents.get(idB) }))
+  check('重叠：甲群的工具直接放行', toolA.needsConfirm !== true && toolA.sent === 1, JSON.stringify(toolA))
+  check('重叠：乙群的工具先要确认，且确认状态不落到甲群', toolB.needsConfirm === true && toolB.sent === 0, JSON.stringify(toolB))
+  check(
+    '重叠：乙群的二次确认没有改掉甲群',
+    (await gateOfSession(idA))?.currentTurnFromQQ === true && (await gateOfSession(idA))?.nonQQConfirmPending !== true,
+    JSON.stringify(await gateOfSession(idA)),
+  )
+
+  fire(idB, 'turn/end', { reason: { kind: 'completed' } })
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  check(
+    '重叠：乙群结束时没有把标记块发出去',
+    !sentFrames().some((frame) => frameText(frame).includes('乙群不该出现')),
+    JSON.stringify(sentFrames().map(frameText)),
+  )
+  check('重叠：乙群结束后甲群闸门还在', (await gateOfSession(idA))?.currentTurnFromQQ === true, JSON.stringify(await gateOfSession(idA)))
+
+  fire(idA, 'turn/end', { reason: { kind: 'completed' } })
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  const marker = sentFrames().filter((frame) => frameText(frame).includes('只给甲群'))
+  check(
+    '重叠：甲群的标记块发到甲群，正文里没有乙群那句',
+    marker.length === 1 &&
+      String(marker[0].params?.group_id) === '111' &&
+      !sentFrames().some((frame) => frameText(frame).includes('乙群不该出现')),
+    JSON.stringify(sentFrames().map((frame) => ({ group: frame.params?.group_id, text: frameText(frame) }))),
+  )
+  try {
+    stopTransport()
+  } catch {
+    // 测试结束，连接关掉即可
+  }
+  qqSockets.splice(socketMark)
   rmSync(dir, { recursive: true, force: true })
 }
 
