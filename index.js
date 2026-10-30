@@ -108,10 +108,14 @@ const MAX_BUFFER_IMAGES_TOTAL = 10
 /** 图片本地缓存：容量上限，超出就淘汰最旧的（用户提议的方案）。 */
 const MAX_IMAGE_CACHE_BYTES = 64 * 1024 * 1024
 const MAX_IMAGE_CACHE_FILES = 300
+/** 单次下载的上限。缓存目录的 64MB 管的是落盘总量，不管这一张读进来多大。 */
+const MAX_IMAGE_DOWNLOAD_BYTES = 8 * 1024 * 1024
 /** 摘要默认取最近几条（`recentChatLimit` 的默认值）。 */
 const DEFAULT_RECENT_CHAT_LIMIT = 8
 /** `qq_bridge_sticker` 的 `list` 最多列几条。 */
 const MAX_STICKER_LIST = 50
+/** 同时握着的会话句柄上限。超出就放开最久没用的，映射还留着，下次消息再恢复。 */
+const MAX_SESSION_HANDLES = 48
 /** `list` 里每条描述截断到多少字（紧凑列表，别把上下文吃掉）。 */
 const MAX_STICKER_DESC = 40
 
@@ -529,23 +533,27 @@ export function apply(ctx, config) {
   /**
    * 设置接口与 NapCat 按钮的准入。
    *
-   * 本机回环照旧放行（命令行、SSH 隧道、本机面板）。本机上若 Origin/Referer 指向别的网站，
-   * 仍然拒绝：浏览器里的任意网页都能对 `127.0.0.1` 发无预检请求，会话也不能拿来盖过这条。
+   * 本机回环、且没有外来源（命令行）或来源也是本机（本机打开的面板）时直接放行。
+   * 反向代理常常把公网面板转到 `127.0.0.1`，这时来源是公网主机名：只有宿主明确判定已登录，
+   * 并且来源主机名与本次请求的 `Host` 一致，才放行。来源对不上 `Host` 的网页（含带着 cookie
+   * 打到本机的别的网站）仍然拒绝。
    *
-   * 不是回环地址时，不再要求 trustedHosts。DSH 面板自己的登录已经挡住了未授权访问：
-   * `connection.requestRejection` 为空表示宿主已经放行；它因主机围栏返回 403 时，
-   * 再看会话是否已登录。没有可确认的会话就拒绝，避免把接口开成公网。
+   * 不是回环地址时同样要明确登录，不再要求 trustedHosts。
+   * `requestRejection()` 返回空、`undefined`、`null`、`false`、`0` 或 `''` 只表示「没有给出拒绝码」，
+   * 不算已登录。已登录只认 `isAuthenticated` / `browserAuth.isAuthenticated` /
+   * `auth.isAuthenticated` 返回 `true`，或 `admit()` 交回一个没有拒绝码的 peer。
+   * `requestRejection` 给出 401，或给出除 403 以外的拒绝码时，直接拒绝（403 是主机围栏，
+   * 已登录的会话仍可过）。
    *
    * 带体 POST 仍必须声明 JSON。放行返回 `null`，拒绝返回中文原因。
    */
   function rejectionStatus(rejection) {
-    if (rejection == null || rejection === false || rejection === 0 || rejection === '') return 0
     if (typeof rejection === 'number') return rejection
-    if (typeof rejection === 'object') {
+    if (rejection && typeof rejection === 'object') {
       const status = rejection.status ?? rejection.statusCode
       if (typeof status === 'number') return status
     }
-    return 403
+    return null
   }
 
   function panelHttps() {
@@ -564,7 +572,58 @@ export function apply(ctx, config) {
     }
   }
 
-  /** 宿主已经认出这是一次登录过的 DSH 面板请求。认不出就当没有。 */
+  /** `Host` 头里的主机名。取不到时返回 `null`。端口不参与比较。 */
+  function requestHostName(req) {
+    const raw = String(req?.headers?.host ?? '').trim()
+    if (raw === '') return null
+    try {
+      return new URL(`http://${raw}`).hostname
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 来源（Origin，没有则 Referer）的主机名是否就是这次请求的 `Host`。
+   * 反向代理把公网面板转到本机时，两者都是面板自己的主机名；别的网站打到本机时对不上。
+   */
+  function sourceMatchesRequestHost(req, source) {
+    const from = originHostOf(source)
+    const host = requestHostName(req)
+    if (!from || !host) return false
+    return from.toLowerCase() === host.toLowerCase()
+  }
+
+  /** 浏览器把这次请求标成跨站。这种请求不能改设置。 */
+  function isCrossSiteRequest(req) {
+    return String(req?.headers?.['sec-fetch-site'] ?? '').toLowerCase() === 'cross-site'
+  }
+
+  /**
+   * 宿主明确判定这次请求已登录。
+   * `requestRejection()` 没给拒绝码不算登录：当前 DSH 上 `undefined` 表示 admit 已通过，
+   * 但空返回也可能只是没实现认证，所以这里再要一个明确的已登录信号。
+   */
+  function explicitPanelLogin(connection, req) {
+    if (
+      authSaysYes(connection.isAuthenticated, connection, req) ||
+      authSaysYes(connection.browserAuth?.isAuthenticated, connection.browserAuth, req) ||
+      authSaysYes(connection.auth?.isAuthenticated, connection.auth, req)
+    ) {
+      return true
+    }
+    if (typeof connection.admit !== 'function') return false
+    try {
+      const admission = connection.admit(req)
+      if (!admission || typeof admission !== 'object') return false
+      if ('rejection' in admission && admission.rejection) return false
+      return admission.peer != null
+    } catch {
+      return false
+    }
+  }
+
+  /** 宿主已经明确认出这是一次登录过的 DSH 面板请求。认不出就当没有。 */
   function panelSessionAllows(req) {
     const connection = ctx.get?.('connection')
     if (!connection || typeof connection !== 'object') return false
@@ -576,14 +635,12 @@ export function apply(ctx, config) {
         return false
       }
       const status = rejectionStatus(rejection)
-      if (status === 0) return true
-      if (status === 401 || status !== 403) return false
+      // 401 是明确未登录。除 403（主机围栏）以外的拒绝码也直接拒绝。
+      // null 是空返回，不算已登录，落到下面的明确登录判定。
+      if (status === 401) return false
+      if (status != null && status !== 403) return false
     }
-    return (
-      authSaysYes(connection.isAuthenticated, connection, req) ||
-      authSaysYes(connection.browserAuth?.isAuthenticated, connection.browserAuth, req) ||
-      authSaysYes(connection.auth?.isAuthenticated, connection.auth, req)
-    )
+    return explicitPanelLogin(connection, req)
   }
 
   function checkLocalRequest(req) {
@@ -592,15 +649,22 @@ export function apply(ctx, config) {
     const origin = String(req?.headers?.origin ?? '').trim()
     const referer = String(req?.headers?.referer ?? '').trim()
     const source = origin !== '' ? origin : referer
+    if (isCrossSiteRequest(req)) {
+      return '浏览器把这次请求标成了跨站，设置接口不接受。请在 DSH 面板自己的页面里操作。'
+    }
     if (loopback && source !== '') {
       const host = originHostOf(source)
       if (host === null || !isLoopbackHost(host)) {
-        return `只接受本机页面发来的请求（来源 ${source} 不是本机）。请在本机打开的 DSH 界面里操作。`
+        if (sourceMatchesRequestHost(req, source) && panelSessionAllows(req)) {
+          // 反向代理：对端是本机，来源是公网面板，且已登录、来源与 Host 一致。
+        } else {
+          return `只接受本机页面，或与当前 Host 同源且已登录的面板请求（来源 ${source}）。请在 DSH 面板里操作。`
+        }
       }
     }
     if (!loopback && !panelSessionAllows(req)) {
       const who = addr === '' ? '未知' : addr
-      return `这个接口不按回环地址拦截。对端 ${who} 不是本机，且没有已通过的 DSH 面板会话。请用带登录 token 的面板打开后再改设置（不需要再配 trustedHosts）。`
+      return `这个接口不按回环地址拦截。对端 ${who} 不是本机，且没有已登录的 DSH 面板会话。请用带登录 token 的面板打开后再改设置（不需要再配 trustedHosts）。`
     }
     if (String(req?.method ?? '').toUpperCase() === 'POST' && requestHasBody(req) && !isJsonContentType(req)) {
       const got = String(req?.headers?.['content-type'] ?? '')
@@ -639,8 +703,8 @@ export function apply(ctx, config) {
    * - `POST` → `{ set?: {...}, unset?: [...] }`：先过 schema 校验，再写文件，
    *   最后跑一遍副作用（传输重连 / 用法说明重挂）。
    *
-   * 准入判定见 `checkLocalRequest`：对端不是回环地址、来源不是本机、或 POST 没声明
-   * `application/json` 时一律 403。只写 schema 白名单里的键。
+   * 准入判定见 `checkLocalRequest`：未登录的非本机请求、来源与 Host 对不上的请求、
+   * 或带体 POST 没声明 `application/json` 时一律 403。只写 schema 白名单里的键。
    */
   async function handleSettingsRequest(req, res) {
     // 与 NapCat 路由共用同一道闸门，不许某一条路由自己少判一项。
@@ -704,7 +768,8 @@ export function apply(ctx, config) {
 
   const statePath = config.statePath || join(home, 'qq-bridge-state.json')
   const state = {
-    buffer: [],
+    /** destKey → 未唤醒消息。每个群、每个私聊各一份，唤醒时只带自己的。 */
+    buffers: {},
     log: [],
     outbox: [],
     // 出站**丢弃台账**：与 outbox 分开。outbox 的语义是“真的发到 QQ 了”，
@@ -712,23 +777,54 @@ export function apply(ctx, config) {
     dropped: [],
     lastDestination: null,
     lastMessageId: null,
-    listening: null,
+    /** destKey → { until, setAt }。每个目的地一个跟随窗口，互不覆盖。 */
+    listeningByDest: {},
     /** destKey（group:<id> / private:<id>）→ 会话 id。perGroup 时每个群、每个私聊一条。 */
     sessionByDest: {},
   }
+  /** 出站闸门按会话一份。perGroup 两路同时跑时，不能共用一套 pending / 回复缓冲。 */
+  const gates = new Map()
   loadState()
 
   function loadState() {
     try {
       if (!existsSync(statePath)) return
       const raw = JSON.parse(readFileSync(statePath, 'utf8'))
-      if (Array.isArray(raw?.buffer)) state.buffer = raw.buffer.slice(-MAX_BUFFER)
+      if (raw?.buffers && typeof raw.buffers === 'object') {
+        for (const [key, value] of Object.entries(raw.buffers)) {
+          if (typeof key !== 'string' || !Array.isArray(value)) continue
+          state.buffers[key] = value.slice(-MAX_BUFFER)
+        }
+      } else if (Array.isArray(raw?.buffer)) {
+        // 旧状态文件是一条总缓冲。按目的地拆开，避免升级后第一次唤醒把别的群的闲聊带走。
+        for (const item of raw.buffer) {
+          const key = destinationKeyOf(item) || '_unknown'
+          if (!state.buffers[key]) state.buffers[key] = []
+          state.buffers[key].push(item)
+        }
+        for (const key of Object.keys(state.buffers)) state.buffers[key] = state.buffers[key].slice(-MAX_BUFFER)
+      }
       if (Array.isArray(raw?.log)) state.log = raw.log.slice(-MAX_LOG)
       if (Array.isArray(raw?.outbox)) state.outbox = raw.outbox.slice(-MAX_OUTBOX)
       if (Array.isArray(raw?.dropped)) state.dropped = raw.dropped.slice(-MAX_DROPPED)
       if (raw?.lastDestination && typeof raw.lastDestination === 'object') state.lastDestination = raw.lastDestination
       if (raw?.lastMessageId !== undefined) state.lastMessageId = raw.lastMessageId
-      if (raw?.listening && typeof raw.listening === 'object') state.listening = raw.listening
+      if (raw?.listeningByDest && typeof raw.listeningByDest === 'object') {
+        for (const [key, value] of Object.entries(raw.listeningByDest)) {
+          if (typeof key !== 'string' || !value || typeof value !== 'object') continue
+          const until = Number(value.until)
+          if (!Number.isFinite(until)) continue
+          state.listeningByDest[key] = { until, setAt: Number(value.setAt) || until }
+        }
+      } else if (raw?.listening && typeof raw.listening === 'object' && raw.listening.key) {
+        const until = Number(raw.listening.until)
+        if (Number.isFinite(until)) {
+          state.listeningByDest[String(raw.listening.key)] = {
+            until,
+            setAt: Number(raw.listening.setAt) || until,
+          }
+        }
+      }
       if (raw?.sessionByDest && typeof raw.sessionByDest === 'object') {
         const next = {}
         for (const [key, value] of Object.entries(raw.sessionByDest)) {
@@ -741,7 +837,124 @@ export function apply(ctx, config) {
     }
   }
 
-  function saveState() {
+  function bufferKeyOf(msg) {
+    return destinationKeyOf(msg) || '_unknown'
+  }
+
+  function bufferFor(key) {
+    const k = key || '_unknown'
+    if (!Array.isArray(state.buffers[k])) state.buffers[k] = []
+    return state.buffers[k]
+  }
+
+  function totalBuffered() {
+    let n = 0
+    for (const list of Object.values(state.buffers)) {
+      if (Array.isArray(list)) n += list.length
+    }
+    return n
+  }
+
+  /** 各目的地缓冲按时间拼起来。preferKey 的条目排在前面（同目的地内仍是新的在前）。 */
+  function orderedBufferItems(preferKey) {
+    const preferred = []
+    const rest = []
+    for (const [key, list] of Object.entries(state.buffers)) {
+      if (!Array.isArray(list)) continue
+      const target = preferKey && key === preferKey ? preferred : rest
+      for (const item of list) target.push(item)
+    }
+    const byAtDesc = (a, b) => Number(b?.at ?? 0) - Number(a?.at ?? 0)
+    preferred.sort(byAtDesc)
+    rest.sort(byAtDesc)
+    return [...preferred, ...rest]
+  }
+
+  function recentBufferItems(limit) {
+    const items = []
+    for (const list of Object.values(state.buffers)) {
+      if (Array.isArray(list)) items.push(...list)
+    }
+    items.sort((a, b) => Number(a?.at ?? 0) - Number(b?.at ?? 0))
+    return items.slice(-limit)
+  }
+
+  function createGate() {
+    return {
+      pendingReply: null,
+      pendingFromQQ: false,
+      currentTurnFromQQ: false,
+      turnActive: false,
+      claimedFromQQ: false,
+      /** 忙着排队的下一轮认领。turn/end 不清它，下一轮 turn/start 才消费。 */
+      nextClaimedFromQQ: false,
+      nonQQConfirmPending: false,
+      pendingDestination: null,
+      currentTurnDestination: null,
+      pendingMessageId: null,
+      currentTurnMessageId: null,
+      lastInjectedMessageId: null,
+      lastDropNoticeId: null,
+    }
+  }
+
+  function gateSessionId(sessionId) {
+    const explicit = sessionId === undefined || sessionId === null ? '' : String(sessionId).trim()
+    if (explicit) return explicit
+    const configured = String(readSettings().targetSessionId || '').trim()
+    return configured || '_default'
+  }
+
+  function gateOf(sessionId) {
+    const id = gateSessionId(sessionId)
+    let gate = gates.get(id)
+    if (!gate) {
+      gate = createGate()
+      gates.set(id, gate)
+    }
+    return gate
+  }
+
+  function snapshotGate(gate) {
+    return {
+      pendingFromQQ: gate.pendingFromQQ,
+      currentTurnFromQQ: gate.currentTurnFromQQ,
+      claimedFromQQ: gate.claimedFromQQ,
+      nextClaimedFromQQ: gate.nextClaimedFromQQ,
+      pendingDestination: gate.pendingDestination ? { ...gate.pendingDestination } : null,
+      currentTurnDestination: gate.currentTurnDestination ? { ...gate.currentTurnDestination } : null,
+      pendingMessageId: gate.pendingMessageId,
+      currentTurnMessageId: gate.currentTurnMessageId,
+    }
+  }
+
+  function restoreGate(gate, snap) {
+    if (!gate || !snap) return
+    gate.pendingFromQQ = snap.pendingFromQQ
+    gate.currentTurnFromQQ = snap.currentTurnFromQQ
+    gate.claimedFromQQ = snap.claimedFromQQ
+    gate.nextClaimedFromQQ = snap.nextClaimedFromQQ
+    gate.pendingDestination = snap.pendingDestination
+    gate.currentTurnDestination = snap.currentTurnDestination
+    gate.pendingMessageId = snap.pendingMessageId
+    gate.currentTurnMessageId = snap.currentTurnMessageId
+  }
+
+  function gateSnapshotForStatus(sessionId, gate) {
+    const g = gate || gateOf(sessionId)
+    return {
+      pendingFromQQ: g.pendingFromQQ,
+      currentTurnFromQQ: g.currentTurnFromQQ,
+      turnActive: g.turnActive,
+      claimedFromQQ: g.claimedFromQQ,
+      nonQQConfirmPending: g.nonQQConfirmPending,
+    }
+  }
+
+  /** 同一轮里多次改状态只落一次盘。微任务里写的是当时的最新内容。 */
+  let stateFlushQueued = false
+
+  function writeStateFile() {
     try {
       mkdirSync(dirname(statePath), { recursive: true })
       const tmp = `${statePath}.tmp`
@@ -750,6 +963,18 @@ export function apply(ctx, config) {
     } catch (error) {
       logger.warn(`state save failed: ${error?.message ?? error}`)
     }
+  }
+
+  function saveState() {
+    if (stateFlushQueued) return
+    stateFlushQueued = true
+    queueMicrotask(flushState)
+  }
+
+  function flushState() {
+    if (!stateFlushQueued) return
+    stateFlushQueued = false
+    writeStateFile()
   }
 
   /**
@@ -821,12 +1046,16 @@ export function apply(ctx, config) {
     return null
   }
 
+  function listeningWindow(key) {
+    if (!key) return null
+    const w = state.listeningByDest[key]
+    if (!w?.until) return null
+    if (Date.now() > Number(w.until)) return null
+    return w
+  }
+
   function listeningActive(msg) {
-    const w = state.listening
-    if (!w?.key || !w?.until) return false
-    if (Date.now() > Number(w.until)) return false
-    const key = destinationKeyOf(msg)
-    return key !== null && key === w.key
+    return listeningWindow(destinationKeyOf(msg)) !== null
   }
 
   /**
@@ -867,6 +1096,23 @@ export function apply(ctx, config) {
       return ctx.agents.get(agentId) === agent
     } catch {
       return false
+    }
+  }
+
+  /** 记下句柄并把它当作最近用过的。死句柄丢掉；活的超过上限就放开最久没用的。 */
+  function rememberHandle(id, handle) {
+    if (handles.has(id)) handles.delete(id)
+    handles.set(id, handle)
+    for (const [heldId, held] of [...handles]) {
+      if (heldId === id) continue
+      if (!isAgentAlive(held?.agent)) handles.delete(heldId)
+    }
+    while (handles.size > MAX_SESSION_HANDLES) {
+      const oldest = handles.keys().next().value
+      const held = handles.get(oldest)
+      handles.delete(oldest)
+      logger.info(`会话句柄超过 ${MAX_SESSION_HANDLES} 个，放开最久未用的 ${oldest}。映射还在，下次消息会再恢复。`)
+      Promise.resolve(held?.dispose?.()).catch(() => {})
     }
   }
 
@@ -1066,7 +1312,7 @@ export function apply(ctx, config) {
     })
     state.sessionByDest[key] = sessionId
     saveState()
-    handles.set(sessionId, handle)
+    rememberHandle(sessionId, handle)
     mountUsagePrompt(handle.agent)
     logger.info(`created per-dest session ${sessionId} for ${key} (${label})`)
     return handle.agent
@@ -1096,7 +1342,10 @@ export function apply(ctx, config) {
       // ⚠️ 走到这里时 `ctx.agents.get(id)` 已经是空 —— 死句柄留下来只会让每次唤醒都投给
       // 已销毁的 agent，`resume` 永不再执行，台账逐条记 `wake-failed`，事后查不出句柄已死。
       // 先验活：活着的（句柄记的是别的会话 id 时可能出现）直接用，死的删掉再走 resume。
-      if (isAgentAlive(held.agent)) return held.agent
+      if (isAgentAlive(held.agent)) {
+        rememberHandle(id, held)
+        return held.agent
+      }
       handles.delete(id)
       logger.warn(`目标会话 ${id} 的旧句柄已失效（agent 不在注册表），改走 resume`)
     }
@@ -1110,7 +1359,7 @@ export function apply(ctx, config) {
         ...(agentOptions ? { agentOptions } : {}),
         ...(s.agentPreset ? { setup: mountPreset } : {}),
       })
-      handles.set(id, handle)
+      rememberHandle(id, handle)
       mountUsagePrompt(handle.agent)
       logger.info(`resumed target session ${id}`)
       return handle.agent
@@ -1134,6 +1383,13 @@ export function apply(ctx, config) {
     const compaction = ctx.get('compaction')
     if (!compaction || typeof compaction.compactNow !== 'function') return
     const countTurns = () => {
+      // 投影里的轮次是压缩之后还留着的。历史事件里的 turn/end 压不掉，先数它会一直超限。
+      try {
+        const outline = agent.session?.projection?.turnOutline?.turns
+        if (Array.isArray(outline)) return outline.length
+      } catch {
+        // 没有投影再数事件
+      }
       try {
         const events = typeof agent.session?.events === 'function' ? agent.session.events() : agent.session?.events
         const list = Array.isArray(events) ? events : []
@@ -1141,21 +1397,20 @@ export function apply(ctx, config) {
         for (const event of list) {
           if (event?.type === 'turn/end') turns += 1
         }
-        if (turns > 0) return turns
+        return turns
       } catch {
-        // 读不到事件就试投影
+        return 0
       }
-      try {
-        const outline = agent.session?.projection?.turnOutline?.turns
-        if (Array.isArray(outline)) return outline.length
-      } catch {
-        // 投影也没有时当作不需要压缩
-      }
-      return 0
     }
+    let previous = Infinity
     for (let i = 0; i < 6; i++) {
       const turns = countTurns()
       if (!turns || turns <= max) return
+      if (turns >= previous) {
+        logger.info(`session ${agent.session?.id ?? agent.id} compact 后轮次没有减少（${turns}），停止`)
+        return
+      }
+      previous = turns
       try {
         const result = await compaction.compactNow(agent)
         if (!result) return
@@ -1176,6 +1431,7 @@ export function apply(ctx, config) {
   }
 
   ctx.effect(() => () => {
+    flushState()
     for (const handle of handles.values()) {
       Promise.resolve(handle.dispose()).catch(() => {})
     }
@@ -1199,7 +1455,7 @@ export function apply(ctx, config) {
   }
 
   function renderDigest(s, items) {
-    const list = Array.isArray(items) ? items : state.buffer
+    const list = Array.isArray(items) ? items : []
     if (!s.attachRecentChat || list.length === 0) return { text: '', images: [] }
     const picked = list.slice(-s.recentChatLimit)
     if (picked.length === 0) return { text: '', images: [] }
@@ -1372,7 +1628,7 @@ export function apply(ctx, config) {
           },
           { type: 'image', attachment: ref },
         ],
-        source: { kind: 'plugin', plugin: PLUGIN_TAG },
+        source: injectedMessageSource(legacySettings),
       })
       let lastReason = '未知原因'
       // 多模态调用**有几率失败**（网络/限流/偶发空回复），一次失败就不发描述太亏了 ——
@@ -1461,13 +1717,53 @@ export function apply(ctx, config) {
    * 而且**命中已有文件时照样能拿到 hash**（表情包登记与描述缓存都按 hash 认图）。
    * @returns {{path: string, mediaType: string, bytes: number, hash: string} | null}
    */
+  /** 把响应正文读进内存，超过单张上限就停掉流，不再继续收。 */
+  async function readCappedImageBody(res) {
+    const limit = MAX_IMAGE_DOWNLOAD_BYTES
+    const declared = Number(res.headers?.get?.('content-length'))
+    if (Number.isFinite(declared) && declared > limit) {
+      try {
+        await res.body?.cancel?.()
+      } catch {
+        // 已经决定不要这份正文
+      }
+      throw new Error(`图片超过 ${limit} 字节（声明了 ${declared} 字节）`)
+    }
+    const reader = res.body?.getReader?.()
+    if (typeof reader?.read === 'function') {
+      const chunks = []
+      let size = 0
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          const buf = Buffer.from(value)
+          size += buf.length
+          if (size > limit) throw new Error(`图片超过 ${limit} 字节，已中止下载`)
+          chunks.push(buf)
+        }
+      } catch (error) {
+        try {
+          await reader.cancel()
+        } catch {
+          // 取消失败不影响这次拒绝
+        }
+        throw error
+      }
+      return Buffer.concat(chunks)
+    }
+    const data = Buffer.from(await res.arrayBuffer())
+    if (data.length > limit) throw new Error(`图片超过 ${limit} 字节（实际 ${data.length} 字节）`)
+    return data
+  }
+
   async function cacheImage(item) {
     try {
       if (!item?.url) return null
       mkdirSync(imageCacheDir, { recursive: true })
       const res = await fetch(item.url, { signal: AbortSignal.timeout(20000) })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = Buffer.from(await res.arrayBuffer())
+      const data = await readCappedImageBody(res)
       const mediaType = sniffImageMediaType(data)
       if (!mediaType) throw new Error(`不是可识别的图片（${data.length} 字节）`)
       const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[mediaType]
@@ -1558,7 +1854,9 @@ export function apply(ctx, config) {
     // 唤醒路径后面要下载图片、还要调多模态模型写描述（好几秒），
     // 这期间新到的消息会继续进缓冲 —— 结束时如果一把 `buffer = []`，
     // 就会把它们一起吞掉（真机上出现过“发三张图只处理了一张”）。
-    const bufferSnapshot = state.buffer.slice()
+    // 只快照这个目的地。别的群的未唤醒消息留在它们自己的缓冲里。
+    const bufKey = bufferKeyOf(msg)
+    const bufferSnapshot = bufferFor(bufKey).slice()
 
     // 图片：非丢弃的消息就把图**落盘缓存**（纯 I/O，不调用模型）。
     // 唤醒时直接读文件 —— 既保住缓冲“零模型调用”的性质，也不怕 QQ 的图片 URL 过期。
@@ -1579,7 +1877,8 @@ export function apply(ctx, config) {
     }
 
     if (d.action === 'record') {
-      state.buffer.push({
+      const bucket = bufferFor(bufKey)
+      bucket.push({
         at: Date.now(),
         userId: msg.userId ?? null,
         nickname: msg.nickname ?? null,
@@ -1589,7 +1888,7 @@ export function apply(ctx, config) {
         // 图片在收到时就已落盘，这里只存本地路径（不再是会过期的 URL）。
         images: cachedImages,
       })
-      if (state.buffer.length > MAX_BUFFER) state.buffer = state.buffer.slice(-MAX_BUFFER)
+      if (bucket.length > MAX_BUFFER) state.buffers[bufKey] = bucket.slice(-MAX_BUFFER)
       saveState()
       return { ...d, delivered: false }
     }
@@ -1601,16 +1900,11 @@ export function apply(ctx, config) {
     // `gateBeforeWake` 在置位点紧前面快照，两者之间没有 await。
     // 失败路径在清缓冲之前返回，所以缓冲不丢。
     let gateBeforeWake = null
+    let wakeGate = null
     const failWake = (error) => {
       const reason = error?.message ?? String(error)
       if (gateBeforeWake) {
-        pendingFromQQ = gateBeforeWake.pendingFromQQ
-        currentTurnFromQQ = gateBeforeWake.currentTurnFromQQ
-        claimedFromQQ = gateBeforeWake.claimedFromQQ
-        pendingDestination = gateBeforeWake.pendingDestination
-        currentTurnDestination = gateBeforeWake.currentTurnDestination
-        pendingMessageId = gateBeforeWake.pendingMessageId
-        currentTurnMessageId = gateBeforeWake.currentTurnMessageId
+        restoreGate(wakeGate, gateBeforeWake)
         const sid = gateBeforeWake.wakeSessionId
         if (sid) {
           if (gateBeforeWake.pinHad) sessionPins.set(sid, gateBeforeWake.pinSnap)
@@ -1656,7 +1950,6 @@ export function apply(ctx, config) {
     // 包一层 initiator：WS 回调本身没有发起者，而某些插件会调
     // agents.requireInitiator() 并在无发起者时抛错。
     const injected = makeMessage(text, imageBlocks)
-    lastInjectedMessageId = injected?.id ?? null
 
     // 投递方式（`delivery` 设置）——宿主 loop 的 Agent 有三个现成通道：
     //   followup: 排一轮自己的 turn（旧行为，最durable）
@@ -1675,40 +1968,43 @@ export function apply(ctx, config) {
     const wakeDest = destFromMsg(msg)
     const wakeMessageId = messageIdOf(msg)
     const wakeSessionId = sessionIdOf(agent)
+    const g = gateOf(wakeSessionId)
+    wakeGate = g
+    g.lastInjectedMessageId = injected?.id ?? null
     const pinHad = Boolean(wakeSessionId && sessionPins.has(wakeSessionId))
     const queuedHad = Boolean(wakeSessionId && sessionPinQueued.has(wakeSessionId))
     gateBeforeWake = {
-      pendingFromQQ,
-      currentTurnFromQQ,
-      claimedFromQQ,
-      pendingDestination,
-      currentTurnDestination,
-      pendingMessageId,
-      currentTurnMessageId,
+      ...snapshotGate(g),
       wakeSessionId,
       pinHad,
       pinSnap: pinHad ? cloneDestPin(sessionPins.get(wakeSessionId)) : undefined,
       queuedHad,
       queuedSnap: queuedHad ? cloneDestPin(sessionPinQueued.get(wakeSessionId)) : undefined,
     }
-    pendingFromQQ = true
-    pendingDestination = wakeDest
-    pendingMessageId = wakeMessageId
+    g.pendingFromQQ = true
+    g.pendingDestination = wakeDest
+    g.pendingMessageId = wakeMessageId
     // 没有正在跑的轮就顺手认领这一轮（会观察到 turn/start）；有正在跑的轮则不能改它。
+    // 认领只写这一路会话的闸门。旁边另一个群的轮还在跑，也不该挡住这里。
     // 插话插进的是正在跑的那一轮，目的地也改成这条唤醒的群，避免回错群。
-    const claimCurrent = !turnActive || wantSteer
-    if (!turnActive) {
-      currentTurnFromQQ = true
-      claimedFromQQ = true
-      currentTurnDestination = wakeDest
-      currentTurnMessageId = wakeMessageId
+    const claimCurrent = !g.turnActive || wantSteer
+    if (!g.turnActive) {
+      g.currentTurnFromQQ = true
+      g.claimedFromQQ = true
+      g.currentTurnDestination = wakeDest
+      g.currentTurnMessageId = wakeMessageId
+    } else if (!wantSteer) {
+      // 正忙且这次只是排队：不能改正在跑的那一轮，但下一轮必须仍算 QQ。
+      // turn/end 会清掉 claimedFromQQ；排队期间若再来一条 DSH 消息，pendingFromQQ 也会被改成 false。
+      // nextClaimedFromQQ 跨过这次 turn/end，到下一轮 turn/start 才消费。
+      g.nextClaimedFromQQ = true
     }
     // 插话插进的是**正在跑的那一轮**：从这一刻起这一轮里就有 QQ 消息要回，
     // 所以归属也得跟着算 QQ —— 否则工具会在这一轮里被拒，插话反而变成哑火。
     if (wantSteer) {
-      currentTurnFromQQ = true
-      currentTurnDestination = wakeDest
-      currentTurnMessageId = wakeMessageId
+      g.currentTurnFromQQ = true
+      g.currentTurnDestination = wakeDest
+      g.currentTurnMessageId = wakeMessageId
     }
     // 按会话钉住。perGroup 时两路会话会重叠，进程级的 currentTurnDestination 盖不住。
     // 这一轮还没人占着，或这次是插话：钉在当前轮上。已经有一轮在跑且只是排队：先排到下一轮。
@@ -1760,7 +2056,7 @@ export function apply(ctx, config) {
     // 按快照过滤：快照里的条目**全部**移除（按对象身份比较）。
     // 摘要有条数与字数上限，没进这一次摘要的旧条目也一起删掉，不会留到下一次唤醒。
     // 快照之后才到的消息不在快照里，留在缓冲里等下一次唤醒。
-    state.buffer = state.buffer.filter((m) => !bufferSnapshot.includes(m))
+    state.buffers[bufKey] = bufferFor(bufKey).filter((m) => !bufferSnapshot.includes(m))
     saveState()
     logger.info(`woke target session (${d.reason})`)
     return { ...d, delivered: true, sessionId: agent.session?.id ?? null }
@@ -1819,7 +2115,9 @@ export function apply(ctx, config) {
     if (event.post_type === 'message_sent') return
     if (event.post_type !== 'message') return
 
-    const selfId = readSettings().selfId || transport.status().selfId || ''
+    // get_login_info 连上后才异步返回。这之前若事件自带 self_id，先用它过滤自身、识别 @。
+    // 事件没带 self_id、配置里也没填时，这段空窗仍可能漏过自身消息。
+    const selfId = selfIdForEvent(event)
     const userId = event.user_id === undefined ? null : String(event.user_id)
     if (selfId !== '' && userId === selfId) return
 
@@ -1847,8 +2145,19 @@ export function apply(ctx, config) {
    * 方便照真实 payload 继续补。
    * 与消息走**同一个** `handleInbound`：白名单、唤醒策略、渲染、出站闸门全部复用。
    */
+  /** 配置优先，其次是已经学到的号，再次是本条事件的 self_id。 */
+  function selfIdForEvent(event) {
+    const configured = String(readSettings().selfId ?? '').trim()
+    if (configured) return configured
+    const known = String(transport.status().selfId ?? '').trim()
+    const raw = event?.self_id
+    const fromEvent = raw === undefined || raw === null ? '' : String(raw).trim()
+    if (!known && fromEvent) transport.rememberSelfId(fromEvent)
+    return known || fromEvent
+  }
+
   async function handleNotice(event) {
-    const selfId = readSettings().selfId || transport.status().selfId || ''
+    const selfId = selfIdForEvent(event)
     const inbound = mapOneBotNotice(event, selfId)
     if (!inbound) {
       logger.info(`未适配的 notice：notice_type=${event.notice_type ?? '?'} sub_type=${event.sub_type ?? '?'}`)
@@ -1978,7 +2287,8 @@ export function apply(ctx, config) {
    */
   async function sendToQQ(text, destination, options) {
     const s = readSettings()
-    const dest = destination ?? currentTurnDestination ?? state.lastDestination
+    const fallbackGate = gateOf(null)
+    const dest = destination ?? fallbackGate.currentTurnDestination ?? state.lastDestination
     if (!dest?.kind) {
       logger.warn('outbound dropped: no destination yet (还没有任何非丢弃的入站消息)')
       return { sent: 0, dropped: true, reason: 'no-destination' }
@@ -2001,17 +2311,23 @@ export function apply(ctx, config) {
 
     const quoteId = options && Object.prototype.hasOwnProperty.call(options, 'quoteMessageId')
       ? options.quoteMessageId
-      : (currentTurnMessageId || state.lastMessageId)
+      : (fallbackGate.currentTurnMessageId || state.lastMessageId)
     const segments = []
     if (s.replyWithQuote && quoteId) {
       segments.push({ type: 'reply', data: { id: String(quoteId) } })
     }
     segments.push({ type: 'text', data: { text: body } })
 
-    if (dest.kind === 'group') {
-      await transport.call('send_group_msg', { group_id: dest.groupId, message: segments })
-    } else {
-      await transport.call('send_private_msg', { user_id: dest.userId, message: segments })
+    try {
+      if (dest.kind === 'group') {
+        await transport.call('send_group_msg', { group_id: dest.groupId, message: segments })
+      } else {
+        await transport.call('send_private_msg', { user_id: dest.userId, message: segments })
+      }
+    } catch (error) {
+      const message = error?.message ?? String(error)
+      logger.warn(`outbound dropped: send-failed (${message})`)
+      return { sent: 0, dropped: true, reason: 'send-failed', error: message }
     }
     logger.info(`sent 1 message to ${dest.kind}:${dest.groupId ?? dest.userId}`)
     return { sent: 1, dropped: false, destination: dest }
@@ -2088,42 +2404,19 @@ export function apply(ctx, config) {
 
 
   // ── 出站：目标会话的回复 → QQ ────────────────────────────────────────────────
+  //
+  // 闸门（pendingReply / pendingFromQQ / currentTurnFromQQ / turnActive /
+  // claimedFromQQ / nonQQConfirmPending）在 `gates` 里按会话各记一份。
+  // perGroup 时两路会重叠：乙群的 turn/end 不能清掉甲群正在攒的回复，也不能把甲群的归属改掉。
+  //
+  // 每一份里三个来源标的分工不变：
+  //   - `pendingFromQQ`  最近一条 `user/message` 的来源（随时更新，不影响正在跑的轮）
+  //   - `currentTurnFromQQ`  当前轮的快照 —— `turn/start` 时取，`turn/end` 时消费
+  //   - `turnActive`  这一路有没有一轮正在跑（决定注入时能不能直接认领）
+  // 目的地钉在 sessionPins（按会话）。owned=true 表示钉的是当前这一轮；
+  // 排队等下一轮的先放 sessionPinQueued。别的群只被记录时仍会改 lastDestination，
+  // 但不能把正在回答的这一轮带跑。
 
-  let pendingReply = null
-
-  /**
-   * “这一轮是不是 QQ 唤醒的”——**按轮快照**，三个变量分工。
-   *
-   * **为什么必须有它**：注入的用法说明是**常驻**系统提示 —— 会话发起人在 DSH 界面里
-   * 跟同一个会话聊天时，模型同样看得到“你连着 QQ，回话用标记块”。出站若不看来源，
-   * DSH 那一轮里的标记块也会被发进群（用户 2026-09-30 报的“agent 分不清是在 QQ 还是 DSH 里”）。
-   *
-   * ⚠️ **为什么不是一个标**（复查时发现的两个真口子）：
-   *   - 口子 ①：一轮还在跑时，DSH 里又打了一句 → 单一标被清 → **同一轮里工具被拒（哑火）**；
-   *   - 口子 ②：DSH 那一轮还在跑时，群里来了 QQ 消息 → 单一标被抬 → **DSH 的内容可能发进群**。
-   *   根因：`turn/start` 的事件负载只有 `{turn}`，**没有“这轮是哪条消息触发的”**，
-   *   所以“中途被改”就无从区分。修法：把“最近一条用户消息的来源”和“当前轮的来源”分开存。
-   *
-   * 三个变量：
-   *   - `pendingFromQQ`  最近一条 `user/message` 的来源判断（随时更新，**不影响正在跑的轮**）
-   *   - `currentTurnFromQQ`  当前轮的快照 —— `turn/start` 时从 pending 取，`turn/end` 时消费掉
-   *   - `turnActive`  有没有一轮正在跑（决定注入时能不能直接认领下一轮）
-   */
-  let pendingFromQQ = false
-  let currentTurnFromQQ = false
-  let turnActive = false
-  /** 注入时对“下一轮”的直接认领（只可能由我们自己的注入置位，比 pending 权威）。 */
-  let claimedFromQQ = false
-  /**
-   * 出站目的地钉在“这一轮的唤醒”，不跟全局 lastDestination 走。
-   * 别的群只被记录时仍会改 lastDestination，但不能把正在回答的这一轮带跑。
-   * sessionPins 按会话各记一份：perGroup 时两路会话会重叠，一个全局变量盖不住。
-   * owned=true 表示钉的是当前这一轮；排队等下一轮的先放 sessionPinQueued。
-   */
-  let pendingDestination = null
-  let currentTurnDestination = null
-  let pendingMessageId = null
-  let currentTurnMessageId = null
   const sessionPins = new Map()
   const sessionPinQueued = new Map()
   function cloneDestPin(pin) {
@@ -2134,21 +2427,9 @@ export function apply(ctx, config) {
       owned: pin.owned === true,
     }
   }
-  function sameDest(a, b) {
-    if (!a?.kind || !b?.kind || a.kind !== b.kind) return false
-    if (a.kind === 'group') return String(a.groupId) === String(b.groupId)
-    return String(a.userId) === String(b.userId)
-  }
   /**
-   * “非 QQ 轮二次确认”状态：本轮已经回过一次“确认要发吗”。
-   * `turn/start` 与 `turn/end` 都清零，所以它严格属于**某一轮**，绝不会跨轮生效。
-   * 用户 2026-10-01 提议：工具模式下不是 QQ 发起的，第一次调用只回问一句，
-   * 同一轮里**再调一次**才真的发 —— 能力不丢，误发依然要跨过一道有意识的动作。
-   */
-  let nonQQConfirmPending = false
-
-  /**
-   * 最近一次注入的 QQ 消息 id —— 用来**认出**“这条 user/message 就是我们自己灌进去的”。
+   * 判断一条 user/message 是不是我们自己（qq-bridge）灌进去的 QQ 入站消息。
+   * 注入 id 记在该会话的闸门上，两路同时注入时不会拿错。
    *
    * ⚠️ 为什么不能只看 `source.kind`：真机上出现过哑火 —— 用户明明是用 QQ @ 的，
    * 工具却报“本轮不是 QQ 唤醒的”。也就是说，那条注入消息在事件里**没有被认成我们的**
@@ -2157,21 +2438,9 @@ export function apply(ctx, config) {
    * 放宽带来的唯一风险是“DSH 里有人手打一段以 `[QQ · ` 开头的话”——那也不吃亏：
    * 它本来就长得像 QQ 消息。
    */
-  let lastInjectedMessageId = null
-
-  /**
-   * 最近一条“出站被拒”回注消息的 id。
-   *
-   * 回注用 `agent.inject()`，它同样产生一条 `user/message`。若不单独认出来，
-   * 闸门会把它当成一次 QQ 入站并把 `pendingFromQQ` 抬成 `true`，
-   * 于是**下一轮**可能被误判成“QQ 唤醒的那一轮”。
-   */
-  let lastDropNoticeId = null
-
-  /** 判断一条 user/message 是不是我们自己（qq-bridge）灌进去的 QQ 入站消息。 */
-  function isOurInbound(msg) {
+  function isOurInbound(msg, gate) {
     if (!msg || typeof msg !== 'object') return false
-    if (lastInjectedMessageId && msg.id === lastInjectedMessageId) return true
+    if (gate?.lastInjectedMessageId && msg.id === gate.lastInjectedMessageId) return true
     const text = messageText(msg)
     return text.startsWith('[QQ · ') || text.startsWith('[QQ 未唤醒期间聊天记录')
   }
@@ -2194,43 +2463,46 @@ export function apply(ctx, config) {
   ctx.on('session/event', guarded('session/event', (session, event) => {
     if (!isTrackedSession(session?.id)) return
     const data = event?.data ?? {}
+    const g = gateOf(session?.id)
 
-    // 一轮开始：把“当前轮来源”定下来。
+    // 一轮开始：把“当前轮来源”定下来。只动这一路会话。
     // 之后中途再来什么消息，都不会改这一轮的判定（这就是两个口子的解药）。
     if (event.type === 'turn/start') {
-      turnActive = true
+      g.turnActive = true
       // 注入时的“认领”优先：`claimedFromQQ` **只可能**由我们自己的注入置位，比 pending 更权威。
-      //（早先这里无条件取 pending —— 一旦 pending 被同轮里的别的消息污染（harness 上下文）就哑火。）
-      currentTurnFromQQ = claimedFromQQ || pendingFromQQ
+      // nextClaimedFromQQ 是上一轮还在跑时排进来的下一轮认领，到这里才消费。
+      const claimed = g.claimedFromQQ || g.nextClaimedFromQQ
+      g.currentTurnFromQQ = claimed || g.pendingFromQQ
       const sid = session?.id ?? null
       const pin = sid ? sessionPins.get(sid) : null
-      if (currentTurnFromQQ) {
+      if (g.currentTurnFromQQ) {
         if (pin?.dest) {
           pin.owned = true
           sessionPins.set(sid, pin)
-          currentTurnDestination = pin.dest
-          currentTurnMessageId = pin.messageId ?? null
-        } else if (claimedFromQQ && pendingDestination) {
+          g.currentTurnDestination = pin.dest
+          g.currentTurnMessageId = pin.messageId ?? null
+        } else if (claimed && g.pendingDestination) {
           // 唤醒时还没有会话 id，只能用这次认领带上的目的地。
-          currentTurnDestination = pendingDestination
-          currentTurnMessageId = pendingMessageId ?? null
-        } else if (claimedFromQQ) {
-          currentTurnDestination = currentTurnDestination || state.lastDestination
-          currentTurnMessageId = currentTurnMessageId || state.lastMessageId
+          g.currentTurnDestination = g.pendingDestination
+          g.currentTurnMessageId = g.pendingMessageId ?? null
+        } else if (claimed) {
+          g.currentTurnDestination = g.currentTurnDestination || state.lastDestination
+          g.currentTurnMessageId = g.currentTurnMessageId || state.lastMessageId
         } else {
           // 多轮延续：这一轮没有新的唤醒钉，回落到最后一次非丢弃入站。
-          currentTurnDestination = state.lastDestination
-          currentTurnMessageId = state.lastMessageId
+          g.currentTurnDestination = state.lastDestination
+          g.currentTurnMessageId = state.lastMessageId
         }
       } else if (!pin?.owned) {
-        currentTurnDestination = null
-        currentTurnMessageId = null
+        g.currentTurnDestination = null
+        g.currentTurnMessageId = null
       }
-      claimedFromQQ = false
-      pendingDestination = null
-      pendingMessageId = null
-      // 新一轮：非 QQ 轮的“二次确认”清零（否则上一轮的确认会跨轮生效）。
-      nonQQConfirmPending = false
+      g.claimedFromQQ = false
+      g.nextClaimedFromQQ = false
+      g.pendingDestination = null
+      g.pendingMessageId = null
+      // 新一轮：非 QQ 轮的“二次确认”清零（否则上一轮的确认会跨轮生效）。只清这一路。
+      g.nonQQConfirmPending = false
       return
     }
 
@@ -2240,9 +2512,9 @@ export function apply(ctx, config) {
       const source = msg?.source ?? {}
       const kind = typeof source.kind === 'string' ? source.kind : 'unknown'
       const plugin = typeof source.plugin === 'string' ? source.plugin : ''
-      const mine = isOurInbound(msg)
+      const mine = isOurInbound(msg, g)
       // 出站被拒的回注不是一次 QQ 入站：认出来就完全不碰闸门。
-      if (lastDropNoticeId && msg?.id === lastDropNoticeId) {
+      if (g.lastDropNoticeId && msg?.id === g.lastDropNoticeId) {
         noteInboundProbe(msg, kind, plugin, false, '忽略（出站被拒的回注，不是触发器）')
         return
       }
@@ -2252,10 +2524,10 @@ export function apply(ctx, config) {
       // 是“来源字段还老实”时的兜底。**少任何一个都会哑火** —— 写这段时我先把后者删了，
       // 测试立刻挂了 8 条（真实链路里前缀一定匹配，但别把正确性押在“一定”上）。
       if (mine || (kind === 'plugin' && plugin === PLUGIN_TAG) || kind === `plugin:${PACKAGE}` || kind === `plugin:${PACKAGE_LEGACY}`) {
-        pendingFromQQ = true
+        g.pendingFromQQ = true
         effect = 'pending=true（我们自己注入的 QQ 消息）'
       } else if (kind === 'user') {
-        pendingFromQQ = false
+        g.pendingFromQQ = false
         effect = 'pending=false（人在 DSH 里打字）'
       } else if (kind === 'plugin' && plugin.startsWith('@deepseek-ai/')) {
         // ⚠️ **harness 自己注入的上下文也走 user/message + plugin 来源** —— 每轮开头那段
@@ -2265,7 +2537,7 @@ export function apply(ctx, config) {
         // 判据：harness 自家的插件包名都带 `@deepseek-ai/` 前缀。
         effect = '忽略（harness 注入的上下文，不是触发器）'
       } else if (kind === 'plugin') {
-        pendingFromQQ = false
+        g.pendingFromQQ = false
         effect = 'pending=false（别的插件起的轮）'
       } else {
         effect = `忽略（kind=${kind}，工具结果这类不算触发器）`
@@ -2280,37 +2552,35 @@ export function apply(ctx, config) {
       // 继续累加会重复，所以直接重算为当前这条。
       const text = messageText(data.message)
       if (!text) return
-      pendingReply = event.surfaceOp && event.surfaceOp !== 'append' ? text : pendingReply ? `${pendingReply}\n${text}` : text
+      g.pendingReply = event.surfaceOp && event.surfaceOp !== 'append' ? text : g.pendingReply ? `${g.pendingReply}\n${text}` : text
       return
     }
 
     if (event.type === 'turn/end') {
       const kind = typeof data.reason?.kind === 'string' ? data.reason.kind : 'unknown'
-      const raw = pendingReply
-      pendingReply = null
+      const raw = g.pendingReply
+      g.pendingReply = null
       // 消费：这一轮结束，当前轮判定清空，等下一次 turn/start 重新快照。
       // 目的地先摘下来再清。sendToQQ 是异步的，不能等它去读可能已被别的群改掉的 lastDestination。
-      const fromQQ = currentTurnFromQQ
+      // nextClaimedFromQQ 留给还没开始的下一轮，这里不清。
+      const fromQQ = g.currentTurnFromQQ
       const sid = session?.id ?? null
       const pin = sid ? sessionPins.get(sid) : null
       const ownedPin = pin?.owned ? pin : null
-      const turnDest = ownedPin?.dest || currentTurnDestination
-      const turnMsgId = ownedPin ? ownedPin.messageId : currentTurnMessageId
+      const turnDest = ownedPin?.dest || g.currentTurnDestination
+      const turnMsgId = ownedPin ? ownedPin.messageId : g.currentTurnMessageId
       if (ownedPin && sid) {
         sessionPins.delete(sid)
         const next = sessionPinQueued.get(sid)
         sessionPinQueued.delete(sid)
         if (next?.dest) sessionPins.set(sid, { dest: next.dest, messageId: next.messageId ?? null, owned: false })
       }
-      const clearGlobal = !ownedPin || !currentTurnDestination || sameDest(currentTurnDestination, ownedPin.dest)
-      currentTurnFromQQ = false
-      if (clearGlobal) {
-        currentTurnDestination = null
-        currentTurnMessageId = null
-      }
-      turnActive = false
-      claimedFromQQ = false
-      nonQQConfirmPending = false
+      g.currentTurnFromQQ = false
+      g.currentTurnDestination = null
+      g.currentTurnMessageId = null
+      g.turnActive = false
+      g.claimedFromQQ = false
+      g.nonQQConfirmPending = false
       if (fromQQ) {
         const liveAgent = ctx.agents.get(session.id)
         if (liveAgent) {
@@ -2367,6 +2637,7 @@ export function apply(ctx, config) {
               reason: result.reason,
               limit: result.limit ?? null,
               length: result.length ?? null,
+              error: result.error ?? null,
             })
             return
           }
@@ -2423,11 +2694,16 @@ export function apply(ctx, config) {
   }
 
   /** 出站被拒原因 → 给模型看的中文说明。 */
-  function dropReasonText(reason) {
+  function dropReasonText(reason, error) {
     if (reason === 'too-long') return 'too-long（正文超过出站字数上限，一条都没有发出）'
     if (reason === 'not-connected') return 'not-connected（OneBot 传输未连接）'
     if (reason === 'no-destination') return 'no-destination（没有已知的发送目的地）'
     if (reason === 'empty') return 'empty（去完 Markdown 后正文为空）'
+    if (reason === 'send-failed') {
+      const detail = error ? `：${String(error).slice(0, 180)}` : ''
+      return `send-failed（发到 QQ 时传输失败，一条都没有发出${detail}）`
+    }
+    if (reason === 'not-allowlisted') return 'not-allowlisted（显式指定的群或私聊不在白名单里）'
     return String(reason)
   }
 
@@ -2444,7 +2720,7 @@ export function apply(ctx, config) {
    */
   function notifyDropToSession(sessionId, info) {
     const text =
-      `[QQ 出站被拒] 本条（${info.via}）未发到 QQ。原因：${dropReasonText(info.reason)}。` +
+      `[QQ 出站被拒] 本条（${info.via}）未发到 QQ。原因：${dropReasonText(info.reason, info.error)}。` +
       (info.reason === 'too-long' ? `实际 ${info.length} 字，上限 ${info.limit} 字。缩短后可重发。` : '')
     const agent = sessionId && typeof ctx.agents?.get === 'function' ? ctx.agents.get(sessionId) : undefined
     if (!agent || typeof agent.inject !== 'function') {
@@ -2454,7 +2730,7 @@ export function apply(ctx, config) {
     try {
       const notice = makeMessage(text)
       agent.inject(notice)
-      lastDropNoticeId = notice?.id ?? null
+      gateOf(sessionId).lastDropNoticeId = notice?.id ?? null
       return true
     } catch (error) {
       logger.warn(`丢弃原因回注失败（${error?.message ?? error}）：${text}`)
@@ -2521,9 +2797,9 @@ export function apply(ctx, config) {
           transport: transport.status(),
           visionModel: (await findVisionModel()) ?? '(没找到支持图片输入的模型)',
           lastDestination: state.lastDestination,
-          listening: state.listening,
-          bufferedUnwoken: state.buffer.length,
-          recentBuffer: state.buffer.slice(-3).map((m) => ({
+          listening: state.listeningByDest,
+          bufferedUnwoken: totalBuffered(),
+          recentBuffer: recentBufferItems(3).map((m) => ({
             who: m.nickname || m.userId || null,
             len: String(m.text ?? '').length,
             text: String(m.text ?? '').slice(0, 80),
@@ -2535,8 +2811,11 @@ export function apply(ctx, config) {
           recentDropped: state.dropped.slice(-3),
           // 排障用：最近观测到的 user/message 长什么样（哑火时看这里 —— ours=false 就说明没认出来）
           recentInboundSources: inboundProbe.slice(-5),
-          // 出站闸门的实时状态：currentTurnFromQQ 才是决定“这一轮发不发”的那个
-          gate: { pendingFromQQ, currentTurnFromQQ, turnActive, claimedFromQQ },
+          // 出站闸门的实时状态。single 时是目标会话那一份；perGroup 看 sessionGates。
+          gate: gateSnapshotForStatus(readSettings().targetSessionId),
+          sessionGates: Object.fromEntries(
+            [...gates.entries()].map(([id, gate]) => [id, gateSnapshotForStatus(id, gate)]),
+          ),
           // M3：浏览器半有没有被 web 宿主组合进 boot graph。
           // 界面里看不到卡片时先看这里 —— 最常见的原因是改了 package.json 没重启。
           clientHalf: clientHalfStatus(),
@@ -2616,6 +2895,39 @@ export function apply(ctx, config) {
   //      同一轮里再调一次才真的发。`nonQQConfirmPending` 按轮清零，不跨轮泄漏。
   // 返回**字符串**时调用方必须原样 return 它；返回 null = 放行。
   /**
+   * 显式 groupId / userId 必须落在对应白名单里。留空等于不允许。
+   * 没写这两个参数时不查：钉住的目的地在入站时已经通过白名单。
+   * 不允许时返回给工具的结果；允许时返回 null。
+   */
+  function explicitOutboundBlock(args) {
+    const s = readSettings()
+    if (args?.groupId) {
+      const id = String(args.groupId)
+      const list = (s.groupWhitelist ?? []).map(String)
+      if (!list.includes(id)) {
+        return {
+          sent: 0,
+          dropped: true,
+          reason: 'not-allowlisted',
+          error: `群 ${id} 不在 groupWhitelist 里，没有发出去。白名单留空等于全部不允许。`,
+        }
+      }
+    } else if (args?.userId) {
+      const id = String(args.userId)
+      const list = (s.whitelist ?? []).map(String)
+      if (!list.includes(id)) {
+        return {
+          sent: 0,
+          dropped: true,
+          reason: 'not-allowlisted',
+          error: `私聊 ${id} 不在 whitelist 里，没有发出去。白名单留空等于全部不允许。`,
+        }
+      }
+    }
+    return null
+  }
+
+  /**
    * 工具出站的目的地：显式 groupId / userId 优先，且不引用别的群的消息。
    * 否则用这个会话钉住的目的地，再没有用当前轮，最后才是 lastDestination。
    */
@@ -2629,16 +2941,18 @@ export function apply(ctx, config) {
     const sid = exec?.agent?.session?.id || exec?.agent?.id || null
     const pin = sid ? sessionPins.get(sid) : null
     if (pin?.dest) return { dest: pin.dest, quoteMessageId: pin.messageId ?? null }
-    if (currentTurnDestination) {
-      return { dest: currentTurnDestination, quoteMessageId: currentTurnMessageId ?? null }
+    const g = gateOf(sid)
+    if (g.currentTurnDestination) {
+      return { dest: g.currentTurnDestination, quoteMessageId: g.currentTurnMessageId ?? null }
     }
     return { dest: state.lastDestination, quoteMessageId: state.lastMessageId ?? null }
   }
 
-  function outboundGate(action) {
-    if (currentTurnFromQQ) return null
-    if (!nonQQConfirmPending) {
-      nonQQConfirmPending = true
+  function outboundGate(action, sessionId) {
+    const g = gateOf(sessionId)
+    if (g.currentTurnFromQQ) return null
+    if (!g.nonQQConfirmPending) {
+      g.nonQQConfirmPending = true
       return JSON.stringify({
         sent: 0,
         needsConfirm: true,
@@ -2659,6 +2973,7 @@ export function apply(ctx, config) {
       '"本轮不是 QQ 发起的，确认要发吗"，同一轮里再调一次才真的发出去。' +
       'replyMode=tool 时这是唯一的出站方式；marker 模式下它是「直接发这一条」的旁路。' +
       '文本超过出站字数上限时**一条都不发**，返回 `reason: "too-long"` 与 `limit`、`length` —— 请缩短后重发。' +
+      '显式 groupId / userId 必须在对应白名单里，否则 `reason: "not-allowlisted"`，一条都不发。' +
       '发出去的内容会记进 outbox（via: tool）。',
     parameters: {
       text: { type: 'string', required: true, description: '要发送的文本；超过出站字数上限时不会发出。' },
@@ -2671,7 +2986,19 @@ export function apply(ctx, config) {
       // 不是 QQ 唤醒的那一轮，第一次调用只回一句“确认要发吗”、**一个字都不发**；
       // 同一轮里再调一次才真的发出去。DSH 侧依然不会误发（多跨一道有意识的动作），
       // 但同时保住了“我确实想让你发到 QQ”这条能力 —— 以前是彻底发不出去。
-      const blocked = outboundGate('qq_bridge_send')
+      const denied = explicitOutboundBlock(args)
+      if (denied) {
+        recordDropped({
+          via: 'tool',
+          reason: denied.reason,
+          destination: args.groupId
+            ? { kind: 'group', groupId: String(args.groupId) }
+            : { kind: 'private', userId: String(args.userId) },
+          sessionId: 'tool:qq_bridge_send',
+        })
+        return JSON.stringify(denied, null, 2)
+      }
+      const blocked = outboundGate('qq_bridge_send', sessionIdOf(exec?.agent))
       if (blocked !== null) return blocked
       const resolved = resolveOutboundDest(args, exec)
       const dest = resolved.dest
@@ -2683,7 +3010,7 @@ export function apply(ctx, config) {
             sessionId: 'tool:qq_bridge_send',
             via: 'tool',
             // 非 QQ 轮的“确认后发送”要在台账里留痕，事后一眼看出这不是 QQ 唤醒的那一轮发的。
-            nonQQTurn: !currentTurnFromQQ,
+            nonQQTurn: !gateOf(sessionIdOf(exec?.agent)).currentTurnFromQQ,
             to: result?.destination ?? dest ?? state.lastDestination,
             text: args.text,
           })
@@ -2721,10 +3048,9 @@ export function apply(ctx, config) {
     }
   }
 
-  /** 缓冲区里最近一张图。返回 { image, item }；没有就是 null。 */
-  function lastBufferedImage() {
-    for (let i = state.buffer.length - 1; i >= 0; i--) {
-      const item = state.buffer[i]
+  /** 缓冲区里最近一张图。preferKey 的目的地优先。返回 { image, item }；没有就是 null。 */
+  function lastBufferedImage(preferKey) {
+    for (const item of orderedBufferItems(preferKey)) {
       const list = Array.isArray(item?.images) ? item.images : []
       const image = list[list.length - 1]
       if (image?.path) return { image, item }
@@ -2742,8 +3068,7 @@ export function apply(ctx, config) {
       .trim()
       .toLowerCase()
     if (want === '') return null
-    for (let i = state.buffer.length - 1; i >= 0; i--) {
-      const item = state.buffer[i]
+    for (const item of orderedBufferItems()) {
       for (const image of Array.isArray(item?.images) ? item.images : []) {
         if (String(image?.hash ?? '').toLowerCase().startsWith(want)) return { image, item }
       }
@@ -2777,7 +3102,8 @@ export function apply(ctx, config) {
       'action:"save" 把某张图存成表情包（给 hash，或 fromLast:true 取缓冲区里最近一张；mood 与 description 必填）；' +
       'action:"send" 发一张（给 hash 精确发，或只给 mood 在该情绪里随机挑一张）。' +
       '图片本体以 base64 发送，不依赖本地路径。' +
-      '发送与 qq_bridge_send 共用同一道来源闸门：不是 QQ 唤醒的那一轮，第一次调用只会回一句确认。',
+      '发送与 qq_bridge_send 共用同一道来源闸门：不是 QQ 唤醒的那一轮，第一次调用只会回一句确认。' +
+      '显式 groupId / userId 还必须在对应白名单里，否则不会发出去。',
     parameters: {
       action: { type: 'string', required: true, description: 'list / save / send。' },
       hash: { type: 'string', description: '短哈希或完整哈希；入站正文里的 [图片#xxxxxx] 就是它。' },
@@ -2823,7 +3149,10 @@ export function apply(ctx, config) {
             return JSON.stringify({ ok: false, error: 'save 需要 mood 与 description（这张图属于什么情绪、画的是什么）。' }, null, 2)
           }
           let src = null
-          if (args.fromLast === true) src = lastBufferedImage()
+          if (args.fromLast === true) {
+            const prefer = destinationKeyOf(resolveOutboundDest({}, exec).dest)
+            src = lastBufferedImage(prefer)
+          }
           else if (String(args.hash ?? '').trim() !== '') src = findSourceByHash(args.hash)
           else {
             return JSON.stringify({ ok: false, error: 'save 需要 hash（正文里 [图片#xxxxxx] 那个短哈希）或 fromLast: true。' }, null, 2)
@@ -2857,8 +3186,21 @@ export function apply(ctx, config) {
         }
 
         if (action === 'send') {
-          // 与 qq_bridge_send 同一道闸门：非 QQ 轮第一次调用只回确认、一个字都不发。
-          const blocked = outboundGate('qq_bridge_sticker')
+          // 显式目的地先过白名单，再走与 qq_bridge_send 同一道来源闸门。
+          const denied = explicitOutboundBlock(args)
+          if (denied) {
+            recordDropped({
+              via: 'tool',
+              reason: denied.reason,
+              destination: args.groupId
+                ? { kind: 'group', groupId: String(args.groupId) }
+                : { kind: 'private', userId: String(args.userId) },
+              sessionId: 'tool:qq_bridge_sticker',
+            })
+            return JSON.stringify(denied, null, 2)
+          }
+          // 非 QQ 轮第一次调用只回确认、一个字都不发。
+          const blocked = outboundGate('qq_bridge_sticker', sessionIdOf(exec?.agent))
           if (blocked !== null) return blocked
 
           let entry = null
@@ -2907,7 +3249,7 @@ export function apply(ctx, config) {
             sessionId: 'tool:qq_bridge_sticker',
             via: 'tool',
             action: 'sticker',
-            nonQQTurn: !currentTurnFromQQ,
+            nonQQTurn: !gateOf(sessionIdOf(exec?.agent)).currentTurnFromQQ,
             to: dest,
             text: `[表情包#${shortHash(entry.hash)}]`,
           })
@@ -3381,13 +3723,16 @@ export function apply(ctx, config) {
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
     async execute(args, exec) {
       if (args.off === true) {
-        state.listening = null
+        const dest = resolveOutboundDest({}, exec).dest
+        const key = destinationKeyOf(dest)
+        if (key) delete state.listeningByDest[key]
+        else state.listeningByDest = {}
         saveState()
-        pushLog({ kind: 'listen', action: 'off' })
-        return JSON.stringify({ listening: null, note: '会话跟随已关闭' }, null, 2)
+        pushLog({ kind: 'listen', action: 'off', key })
+        return JSON.stringify({ listening: key ? state.listeningByDest[key] ?? null : null, key, note: '会话跟随已关闭' }, null, 2)
       }
       if (args.minutes === undefined || args.minutes === null) {
-        return JSON.stringify({ listening: state.listening, now: Date.now() }, null, 2)
+        return JSON.stringify({ listening: state.listeningByDest, now: Date.now() }, null, 2)
       }
       const dest = resolveOutboundDest({}, exec).dest
       if (!dest?.kind) {
@@ -3395,11 +3740,12 @@ export function apply(ctx, config) {
       }
       const key = dest.kind === 'group' ? `group:${dest.groupId}` : `private:${dest.userId}`
       const minutes = Math.max(1, Math.min(MAX_LISTEN_MINUTES, Number(args.minutes) || DEFAULT_LISTEN_MINUTES))
-      state.listening = { key, until: Date.now() + minutes * 60000, setAt: Date.now() }
+      const window = { until: Date.now() + minutes * 60000, setAt: Date.now() }
+      state.listeningByDest[key] = window
       saveState()
       pushLog({ kind: 'listen', action: 'on', key, minutes })
       return JSON.stringify(
-        { listening: state.listening, minutes, key, note: `接下来 ${minutes} 分钟，${key} 里的普通消息也会唤醒你` },
+        { listening: window, minutes, key, note: `接下来 ${minutes} 分钟，${key} 里的普通消息也会唤醒你` },
         null,
         2,
       )

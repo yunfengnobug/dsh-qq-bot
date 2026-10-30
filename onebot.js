@@ -52,6 +52,8 @@ export function createOneBotTransport(options) {
 
   let socket = null
   let stopped = true
+  /** 每次 connect() 加一。先发出、后返回的那次看到编号变了就退出，不再动新连接。 */
+  let connectGen = 0
   let reconnectDelay = reconnectMinMs
   let reconnectTimer = null
   let watchdogTimer = null
@@ -68,6 +70,18 @@ export function createOneBotTransport(options) {
     reconnects: 0,
     received: 0,
     sent: 0,
+  }
+
+  /**
+   * 事件里先带了 self_id、get_login_info 还没回来时，先记住。
+   * 已经有值就不覆盖：配置或登录信息优先。
+   */
+  function rememberSelfId(id) {
+    const next = String(id ?? '').trim()
+    if (next === '' || status.selfId) return
+    status.selfId = next
+    notify()
+    logger.info(`self_id = ${status.selfId}（来自事件，get_login_info 尚未返回）`)
   }
 
   function snapshot() {
@@ -161,8 +175,16 @@ export function createOneBotTransport(options) {
     pending.clear()
   }
 
+  function isCurrent(gen) {
+    return gen === connectGen && !stopped
+  }
+
   async function connect() {
     if (stopped) return
+    const gen = ++connectGen
+    // 只拆这一次调用开始时还留着的连接。过期的调用不能在返回时再拆一次。
+    teardownSocket()
+    rejectPending('reconnect')
 
     let url
     try {
@@ -171,6 +193,7 @@ export function createOneBotTransport(options) {
       logger.warn(`getUrl failed: ${error?.message ?? error}`)
       url = ''
     }
+    if (!isCurrent(gen)) return
     if (url === '') {
       setState('disabled', { url: '' })
       return
@@ -182,6 +205,7 @@ export function createOneBotTransport(options) {
     } catch (error) {
       logger.warn(`resolve access token failed: ${error?.message ?? error}`)
     }
+    if (!isCurrent(gen)) return
 
     // 内置 WebSocket 无法自定义请求头 → token 走查询串（OneBot 服务端支持）。
     let target
@@ -200,13 +224,24 @@ export function createOneBotTransport(options) {
     const safeUrl = url.replace(/access_token=[^&]*/i, 'access_token=***')
     setState('connecting', { url: safeUrl })
 
+    if (!isCurrent(gen)) return
     let ws
     try {
       ws = new WebSocket(target)
     } catch (error) {
+      if (!isCurrent(gen)) return
       status.lastError = `WebSocket ctor failed: ${error?.message ?? error}`
       setState('closed', { lastError: status.lastError })
       scheduleReconnect()
+      return
+    }
+    if (!isCurrent(gen)) {
+      try {
+        ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
+        ws.close()
+      } catch {
+        // 这次建连已经过期，关掉即可
+      }
       return
     }
     socket = ws
@@ -349,5 +384,5 @@ export function createOneBotTransport(options) {
     status.connectedAt = null
   }
 
-  return { start, dispose, reconnectNow, isOpen, call, status: snapshot }
+  return { start, dispose, reconnectNow, isOpen, call, rememberSelfId, status: snapshot }
 }

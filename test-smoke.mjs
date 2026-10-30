@@ -47,7 +47,7 @@ writeFileSync(
         at: 1,
         userId: 'test-user',
         nickname: '群友',
-        groupId: '12345678',
+        groupId: null,
         groupName: null,
         text: '看这个 [图片]',
         images: [{ path: cachedImagePath, mediaType: 'image/png', bytes: CACHED_PNG.length, hash: CACHED_HASH }],
@@ -859,6 +859,38 @@ function sawSentText(s) {
   fire('turn/start', { turn: 1 })
   await sim.execute({ text: '244 排队', userId: 'test-user' })
   check("delivery='followup'：正忙也排队", followed === 1 && steered === 0, JSON.stringify({ steered, followed }))
+  fire('turn/end', { reason: { kind: 'completed' } })
+
+  // 正忙 + followup，且 followup 不在当场开轮（真机排队就是这样）。
+  // 当前轮结束前若再来一条 DSH 消息，pending 会被改成 false；下一轮仍必须算 QQ。
+  steered = followed = 0
+  fire('user/message', { id: 'dsh-typing', source: { kind: 'user' }, content: [{ type: 'text', text: '我在 DSH 里说话' }] })
+  fire('turn/start', { turn: 9 })
+  check('铺垫：DSH 自己的一轮不算 QQ', (await gate()).currentTurnFromQQ === false, JSON.stringify(await gate()))
+  fakeAgent = {
+    id: 'session-smoke',
+    status: 'running',
+    ctx: { get: () => undefined, effect: () => () => {} },
+    steer: () => {
+      steered++
+    },
+    followup: (msg) => {
+      followed++
+      injected = msg
+    },
+  }
+  await sim.execute({ text: '244 等下一轮', userId: 'test-user' })
+  check('忙时 followup 没有当场开新轮', followed === 1 && steered === 0, JSON.stringify({ steered, followed }))
+  fire('user/message', { id: 'dsh-between', source: { kind: 'user' }, content: [{ type: 'text', text: '排队期间又打了一句' }] })
+  check('排队期间的 DSH 消息把 pending 改成了非 QQ', (await gate()).pendingFromQQ === false, JSON.stringify(await gate()))
+  fire('turn/end', { reason: { kind: 'completed' } })
+  fire('turn/start', { turn: 10 })
+  check(
+    '忙时排队的下一轮仍算 QQ 唤醒',
+    (await gate()).currentTurnFromQQ === true,
+    JSON.stringify(await gate()),
+  )
+  fire('turn/end', { reason: { kind: 'completed' } })
 
   fakeAgent = null
   resolvedSettings.replyMode = 'marker'
@@ -1356,6 +1388,19 @@ function sawSentText(s) {
     // ★ 卡片必须覆盖**每一个** settings 键 —— 用户报的“设置里配不了 visionModel”就是这个：
     // 它在 Schema 里有、卡片 FIELDS 里却没做输入框 → 用户根本改不到。这条断言专防它。
     {
+      const parseField = mod.__test?.parse
+      const wakeField = (mod.__test?.fields ?? []).find((x) => x.key === 'wakeProbability')
+      const turnsField = (mod.__test?.fields ?? []).find((x) => x.key === 'maxRecentTurns')
+      check(
+        '数字框留空不是 0',
+        wakeField && parseField(wakeField, '') === undefined && parseField(wakeField, '  ') === undefined,
+        String(parseField?.(wakeField, '')),
+      )
+      check(
+        '数字框显式 0 仍是 0，非法数字不通过',
+        parseField(turnsField, '0') === 0 && parseField(turnsField, 'abc') === undefined && parseField(wakeField, '0.25') === 0.25,
+      )
+      check('留空数字的保存文案指向撤销覆盖', src.includes('留空不会当成 0') && src.includes('撤销覆盖'))
       const cardKeys = (mod.__test?.fields ?? []).map((x) => x.key)
       const schemaKeys = Object.keys(registeredSettings[0]?.schema?.dict ?? {})
       const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k))
@@ -1788,23 +1833,61 @@ function sawSentText(s) {
         errOf(resRemote),
       )
 
-      // ⑨ 反向代理：宿主已经认出面板会话时放行；认不出就仍然拒绝。本机上的站外 Origin 不能靠会话翻案。
+      // ⑨ 反向代理与明确登录：空的 requestRejection 不算已登录。
+      //    本机上的公网 Origin 只有在已登录、且来源主机名等于 Host 时才放行。
       const baseGet = apiCtx.get.bind(apiCtx)
       let panelConnection = null
       apiCtx.get = (name) => (name === 'connection' ? panelConnection : baseGet(name))
       try {
         const beforePanel = fileValues()
         panelConnection = { requestRejection() { return undefined } }
+        const resEmpty = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.41 } } }), resEmpty)
+        check('S1：非本机 + requestRejection 为 undefined → 403', resEmpty.out.status === 403, `${resEmpty.out.status} ${errOf(resEmpty)}`)
+        check('S1：空的 requestRejection 不改设置', JSON.stringify(fileValues()) === JSON.stringify(beforePanel), JSON.stringify(fileValues()))
+        for (const empty of [null, false, 0, '']) {
+          panelConnection = { requestRejection() { return empty } }
+          const resBlank = makeRes()
+          await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.41 } } }), resBlank)
+          check(
+            `S1：非本机 + requestRejection 为 ${JSON.stringify(empty)} → 403`,
+            resBlank.out.status === 403,
+            `${resBlank.out.status} ${errOf(resBlank)}`,
+          )
+        }
+        check('S1：空返回值都没有改设置', JSON.stringify(fileValues()) === JSON.stringify(beforePanel), JSON.stringify(fileValues()))
+
+        panelConnection = {
+          requestRejection() { return undefined },
+          isAuthenticated() { return true },
+        }
         const resOk = makeRes()
         await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.41 } } }), resOk)
-        check('S1：非本机 + 面板会话已通过 → 200', resOk.out.status === 200, `${resOk.out.status} ${errOf(resOk)}`)
-        check('S1：非本机 + 面板会话已通过 → 设置写进去了', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+        check('S1：非本机 + 明确 isAuthenticated → 200', resOk.out.status === 200, `${resOk.out.status} ${errOf(resOk)}`)
+        check('S1：明确登录后设置写进去了', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+
+        panelConnection = {
+          requestRejection() { return undefined },
+          admit() { return { peer: { id: 'panel-peer' } } },
+        }
+        const resAdmit = makeRes()
+        await route.handler(req('GET', { addr: '10.0.0.7' }), resAdmit)
+        check('S1：非本机 + admit 交回 peer → 200', resAdmit.out.status === 200, errOf(resAdmit))
 
         panelConnection = { requestRejection() { return 401 } }
         const res401 = makeRes()
         await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.77 } } }), res401)
         check('S1：非本机 + 未登录（401）→ 403', res401.out.status === 403 && errOf(res401).includes('本机'), errOf(res401))
         check('S1：未登录的非本机 POST 不改设置', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+
+        panelConnection = {
+          requestRejection() { return 401 },
+          isAuthenticated() { return true },
+        }
+        const res401Override = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.76 } } }), res401Override)
+        check('S1：401 不能被 isAuthenticated 翻案', res401Override.out.status === 403, errOf(res401Override))
+        check('S1：401 翻案失败时设置不变', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
 
         panelConnection = { requestRejection() { return 403 } }
         const res403 = makeRes()
@@ -1829,22 +1912,62 @@ function sawSentText(s) {
         await route.handler(req('GET', { addr: '10.0.0.8' }), resBrowser)
         check('S1：非本机 GET + browserAuth.isAuthenticated → 200', resBrowser.out.status === 200, errOf(resBrowser))
 
-        panelConnection = { requestRejection() { return undefined } }
+        panelConnection = {
+          requestRejection() { return undefined },
+          isAuthenticated() { return true },
+        }
+        const resProxy = makeRes()
+        await route.handler(
+          req('POST', {
+            headers: { origin: 'https://panel.example', host: 'panel.example' },
+            body: { set: { wakeProbability: 0.43 } },
+          }),
+          resProxy,
+        )
+        check(
+          'S1：本机反向代理 + 公网 Origin 与 Host 一致且已登录 → 200',
+          resProxy.out.status === 200,
+          `${resProxy.out.status} ${errOf(resProxy)}`,
+        )
+        check('S1：反向代理的已登录请求写进了设置', fileValues().wakeProbability === 0.43, JSON.stringify(fileValues()))
+
         const resEvilSession = makeRes()
         await route.handler(
-          req('POST', { headers: { origin: 'https://evil.example' }, body: { set: { wakeProbability: 0.99 } } }),
+          req('POST', {
+            headers: { origin: 'https://evil.example', host: 'panel.example' },
+            body: { set: { wakeProbability: 0.99 } },
+          }),
           resEvilSession,
         )
         check(
-          'S1：本机上的站外 Origin 不能靠面板会话翻案',
+          'S1：本机上的站外 Origin 不能靠已登录翻案',
           resEvilSession.out.status === 403 && errOf(resEvilSession).includes('evil.example'),
           errOf(resEvilSession),
         )
         check(
           'S1：站外 Origin 翻案失败时设置不变',
-          fileValues().wakeProbability === 0.42 && JSON.stringify(fileValues()) !== JSON.stringify(beforePanel),
+          fileValues().wakeProbability === 0.43,
           JSON.stringify(fileValues()),
         )
+
+        panelConnection = {
+          requestRejection() { return 403 },
+          browserAuth: { isAuthenticated() { return true } },
+        }
+        const resCross = makeRes()
+        await route.handler(
+          req('POST', {
+            headers: {
+              origin: 'https://panel.example',
+              host: 'panel.example',
+              'sec-fetch-site': 'cross-site',
+            },
+            body: { set: { wakeProbability: 0.11 } },
+          }),
+          resCross,
+        )
+        check('S1：已登录但浏览器标成跨站 → 403', resCross.out.status === 403, errOf(resCross))
+        check('S1：跨站请求不改设置', fileValues().wakeProbability === 0.43, JSON.stringify(fileValues()))
       } finally {
         panelConnection = null
         apiCtx.get = baseGet
@@ -2287,8 +2410,8 @@ function sawSentText(s) {
     onebotUrl: 'ws://127.0.0.1:9/', // 假 WebSocket 会立刻把它当连上
     wakeProbability: 0, // 只记录：save 要从缓冲里取图
     nicknames: ['244'],
-    whitelist: ['test-user'],
-    groupWhitelist: [],
+    whitelist: ['test-user', '1001'],
+    groupWhitelist: ['12345678'],
     napcatInstallDir: join(dir, 'no-napcat'),
   })
   await new Promise((r) => setTimeout(r, 20))
@@ -2359,6 +2482,18 @@ function sawSentText(s) {
 
     const sent = JSON.parse(await stickerTool.execute({ action: 'send', hash, groupId: '12345678' }))
     check('send：按 hash 发送成功', sent.ok === true && sent.hash === shortHash(hash), JSON.stringify(sent))
+    const offGroup = JSON.parse(await stickerTool.execute({ action: 'send', hash, groupId: '999' }))
+    check(
+      'send：显式群号不在 groupWhitelist 里不发送',
+      offGroup.sent === 0 && offGroup.reason === 'not-allowlisted',
+      JSON.stringify(offGroup),
+    )
+    const offUser = JSON.parse(await stickerTool.execute({ action: 'send', hash, userId: '888' }))
+    check(
+      'send：显式 QQ 号不在 whitelist 里不发送',
+      offUser.sent === 0 && offUser.reason === 'not-allowlisted',
+      JSON.stringify(offUser),
+    )
 
     const socket = sockets.find((s) => s.readyState === 1)
     const call = socket?.sent.find((m) => m.action === 'send_group_msg')
@@ -2492,8 +2627,43 @@ function sawSentText(s) {
       }
       // 摘要不掺进来：断言只看本条消息那一段。
       resolved2.attachRecentChat = false
+      let streamCancelled = false
       globalThis.fetch = async (url) => {
-        if (String(url).includes('bad')) throw new Error('fetch failed')
+        const href = String(url)
+        if (href.includes('bad')) throw new Error('fetch failed')
+        if (href.includes('huge-header')) {
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: (name) => (name === 'content-length' ? String(9 * 1024 * 1024) : null) },
+            body: { cancel: async () => {} },
+            arrayBuffer: async () => {
+              throw new Error('不该读取超限正文')
+            },
+          }
+        }
+        if (href.includes('huge-stream')) {
+          streamCancelled = false
+          const chunk = new Uint8Array(1024 * 1024)
+          let sent = 0
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            body: {
+              getReader: () => ({
+                read: async () => {
+                  sent += chunk.byteLength
+                  if (sent > 9 * 1024 * 1024) return { done: true, value: undefined }
+                  return { done: false, value: chunk }
+                },
+                cancel: async () => {
+                  streamCancelled = true
+                },
+              }),
+            },
+          }
+        }
         return {
           ok: true,
           status: 200,
@@ -2516,6 +2686,17 @@ function sawSentText(s) {
         goodFirst === `[图片#${short}]：一只无语的猫[图片]（未描述）`,
         goodFirst,
       )
+
+      const warnedHuge = warnings.length
+      const hugeHeader = await fireImages(['https://huge-header.invalid/1.png'])
+      check('单张图 content-length 超过 8MB → 不落盘', hugeHeader === '[图片]（未描述）', hugeHeader)
+      check(
+        '超限的 content-length 写进日志',
+        warnings.slice(warnedHuge).some((w) => String(w).includes('声明了')),
+        JSON.stringify(warnings.slice(warnedHuge)),
+      )
+      const hugeStream = await fireImages(['https://huge-stream.invalid/1.png'])
+      check('单张图读流超过 8MB → 中止且不落盘', hugeStream === '[图片]（未描述）' && streamCancelled === true, hugeStream)
 
       // 唤醒认领了“下一轮”，走一遍 turn/start + turn/end 把闸门还原。
       stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'turn/start', data: { turn: 9 } })
@@ -2593,6 +2774,41 @@ function sawSentText(s) {
         notice.includes('too-long') && notice.includes(String(long.length)) && notice.includes('1500'),
         notice,
       )
+
+      const live = sockets.find((s) => s.readyState === 1)
+      const originalSend = live.send.bind(live)
+      live.send = (text) => {
+        const msg = JSON.parse(String(text))
+        if (msg.action === 'send_private_msg' || msg.action === 'send_group_msg') {
+          live.sent.push(msg)
+          setTimeout(() => {
+            live.onmessage?.({
+              data: JSON.stringify({ status: 'failed', retcode: 1400, message: 'mock send failed', echo: msg.echo }),
+            })
+          }, 0)
+          return
+        }
+        return originalSend(text)
+      }
+      injectedDrop = null
+      const beforeFail = (await statusOf()).recentDropped.length
+      qqTurn(13, '[QQ]发送失败这一条[/QQ]')
+      await waitForDrop(beforeFail)
+      const failedDrop = (await statusOf()).recentDropped.at(-1)
+      const failedNotice = String(injectedDrop?.content?.[0]?.text ?? '')
+      check(
+        '标记块传输失败 → 丢弃台账记 send-failed，并回注会话',
+        failedDrop?.reason === 'send-failed' &&
+          failedDrop?.via === 'marker' &&
+          failedNotice.includes('send-failed') &&
+          failedNotice.includes('mock send failed'),
+        JSON.stringify({ failedDrop, failedNotice }),
+      )
+      check(
+        '标记块传输失败不写 outbox',
+        !(await statusOf()).recentOutbox.some((e) => String(e.text).includes('发送失败这一条')),
+      )
+      live.send = originalSend
 
       // not-connected 同样进丢弃台账（关掉假 WebSocket 即造出未连接）。
       const socket = sockets.find((s) => s.readyState === 1)
@@ -2691,6 +2907,7 @@ function sawSentText(s) {
   // M4：`boom: true` 的 provider 列举时抛错 —— 用来盯“失败被静默吞掉”。
   let providersV = [{ id: 'prov-a' }]
   const streamedV = []
+  const visionSources = []
   const llmV = {
     listProviders: () => providersV,
     listModels: async (providerId) => {
@@ -2702,6 +2919,7 @@ function sawSentText(s) {
     },
     stream: async function* (opts) {
       streamedV.push(`${opts.provider}/${opts.model}`)
+      visionSources.push(opts.messages?.[0]?.source ?? null)
       yield { type: 'text-delta', text: '图里写着“测试”' }
       yield { type: 'finish', reason: { kind: 'stop' } }
     },
@@ -2841,6 +3059,11 @@ function sawSentText(s) {
       '视觉模型：描述路径用的是新模型（多模态调用的 provider/model 可观测）',
       streamedV[streamedV.length - 1] === 'prov-b/smoke-vision-b',
       JSON.stringify(streamedV),
+    )
+    check(
+      '视觉模型：0.2.0 的描述请求用 producer-owned source',
+      visionSources.at(-1)?.kind === 'plugin:dsh-qq-bot',
+      JSON.stringify(visionSources.at(-1)),
     )
     const textV = String(injectedV?.content?.[0]?.text ?? '')
     check(
@@ -3433,6 +3656,7 @@ function sawSentText(s) {
   const agents = new Map()
   const localHandlers = {}
   let compacts = 0
+  let outlineLen = null
   const scopeSettings = {
     targetSessionId: '',
     sessionScope: 'perGroup',
@@ -3477,7 +3701,13 @@ function sawSentText(s) {
       return () => {}
     },
     effect: () => {},
-    get: (name) => (name === 'compaction' ? { compactNow: async () => { compacts += 1; return { ok: true } } } : undefined),
+    get: (name) => (name === 'compaction' ? {
+      compactNow: async () => {
+        compacts += 1
+        if (outlineLen != null) outlineLen = Math.max(0, outlineLen - 4)
+        return { ok: true }
+      },
+    } : undefined),
     inject: () => {},
   }
   const tools = []
@@ -3525,7 +3755,327 @@ function sawSentText(s) {
     { type: 'turn/end', data: { reason: { kind: 'completed' } } },
   )
   await new Promise((resolve) => setTimeout(resolve, 20))
-  check('maxRecentTurns：超限时调用宿主 compactNow', compacts >= 1, String(compacts))
+  check('maxRecentTurns：超限时调用宿主 compactNow', compacts === 1, String(compacts))
+  const trimmed = agents.get(first.decision.sessionId)
+  outlineLen = 6
+  trimmed.session.projection = {
+    turnOutline: { get turns() { return Array.from({ length: outlineLen }, () => ({})) } },
+  }
+  localHandlers['session/event'](
+    { id: first.decision.sessionId },
+    { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'qq-bridge' }, content: [{ type: 'text', text: '[QQ · 群] 甲：又来' }] } },
+  )
+  localHandlers['session/event']({ id: first.decision.sessionId }, { type: 'turn/start', data: { turn: 2 } })
+  localHandlers['session/event']({ id: first.decision.sessionId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('maxRecentTurns：投影降到上限以内就停', compacts === 2 && outlineLen === 2, JSON.stringify({ compacts, outlineLen }))
+  outlineLen = 8
+  localHandlers['session/event']({ id: first.decision.sessionId }, { type: 'turn/start', data: { turn: 3 } })
+  localHandlers['session/event']({ id: first.decision.sessionId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('maxRecentTurns：投影还超限就再压一次，降下来就停', compacts === 4 && outlineLen === 0, JSON.stringify({ compacts, outlineLen }))
+  rmSync(dir, { recursive: true, force: true })
+}
+
+// 会话句柄：死的丢掉；同时握着超过 48 个时放开最久没用的，映射还在，下次再恢复。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-handles-'))
+  const stateFile = join(dir, 'state.json')
+  const agents = new Map()
+  const created = []
+  const resumed = []
+  const disposed = []
+  const groupIds = Array.from({ length: 49 }, (_, i) => `g${i}`)
+  const iso = {
+    logger: { info() {}, warn() {} },
+    settings: {
+      register: () => {},
+      get: () => ({
+        targetSessionId: '',
+        sessionScope: 'perGroup',
+        maxRecentTurns: 0,
+        nicknames: ['小助手'],
+        wakeProbability: 0,
+        whitelist: [],
+        groupWhitelist: groupIds,
+        replyMode: 'marker',
+        delivery: 'followup',
+      }),
+    },
+    agents: {
+      get: (id) => agents.get(id),
+      resume: async ({ resumeSessionId }) => {
+        resumed.push(resumeSessionId)
+        const agent = {
+          id: resumeSessionId,
+          session: { id: resumeSessionId },
+          status: 'idle',
+          followup() {},
+          ctx: { get: () => undefined, effect: () => () => {} },
+        }
+        agents.set(resumeSessionId, agent)
+        return {
+          agent,
+          dispose: async () => {
+            disposed.push(resumeSessionId)
+            agents.delete(resumeSessionId)
+          },
+        }
+      },
+      create: async ({ sessionId }) => {
+        const agent = {
+          id: sessionId,
+          session: { id: sessionId },
+          status: 'idle',
+          followup() {},
+          ctx: { get: () => undefined, effect: () => () => {} },
+        }
+        agents.set(sessionId, agent)
+        created.push(sessionId)
+        return {
+          agent,
+          dispose: async () => {
+            disposed.push(sessionId)
+            agents.delete(sessionId)
+          },
+        }
+      },
+      withInitiator: (_agent, fn) => fn(),
+    },
+    tools: { register: () => {} },
+    on: () => () => {},
+    effect: () => {},
+    get: () => undefined,
+    inject: () => {},
+  }
+  const tools = []
+  iso.tools = { register: (def) => tools.push(def) }
+  apply(iso, {
+    statePath: stateFile,
+    debugTools: true,
+    onebotUrl: '',
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 0,
+    nicknames: ['小助手'],
+    whitelist: [],
+    groupWhitelist: groupIds,
+    napcatInstallDir: join(dir, 'no-napcat'),
+  })
+  const sim = tools.find((t) => t.name === 'qq_bridge_simulate')
+  const statusTool = tools.find((t) => t.name === 'qq_bridge_status')
+  for (const groupId of groupIds) {
+    await sim.execute({ text: '小助手在吗', userId: '1', groupId, nickname: '甲' })
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const held = JSON.parse(await statusTool.execute({})).resumedHandles
+  const saved = JSON.parse(readFileSync(stateFile, 'utf8'))
+  const firstId = created[0]
+  check('句柄上限：建满 49 个群后只握着 48 个', created.length === 49 && held.length === 48, JSON.stringify({ created: created.length, held: held.length }))
+  check('句柄上限：最久未用的已被放开', disposed.includes(firstId) && !held.includes(firstId), JSON.stringify({ disposed, held }))
+  check('句柄上限：被放开的群映射还在', saved.sessionByDest?.['group:g0'] === firstId, JSON.stringify(saved.sessionByDest?.['group:g0']))
+  const again = JSON.parse(await sim.execute({ text: '小助手在吗', userId: '1', groupId: 'g0', nickname: '甲' }))
+  check(
+    '句柄上限：旧群再来消息走恢复，不另开',
+    resumed.includes(firstId) && again?.decision?.sessionId === firstId && created.length === 49,
+    JSON.stringify({ resumed, sessionId: again?.decision?.sessionId, created: created.length }),
+  )
+  rmSync(dir, { recursive: true, force: true })
+}
+
+// 两路会话同时在跑：缓冲、闸门、标记块、跟随窗口都不能串。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-overlap-'))
+  const stateFile = join(dir, 'state.json')
+  const agents = new Map()
+  const injectedBySession = new Map()
+  const localHandlers = {}
+  const scopeSettings = {
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 0,
+    nicknames: ['小助手'],
+    wakeProbability: 0,
+    whitelist: [],
+    groupWhitelist: ['111', '222'],
+    replyMode: 'marker',
+    delivery: 'followup',
+    onebotUrl: 'ws://127.0.0.1:3001/',
+  }
+  const tools = []
+  let stopTransport = () => {}
+  const iso = {
+    logger: { info() {}, warn() {} },
+    settings: { register: () => {}, get: () => scopeSettings },
+    agents: {
+      get: (id) => agents.get(id),
+      resume: async () => {
+        throw new Error('should create')
+      },
+      create: async ({ sessionId }) => {
+        const agent = {
+          id: sessionId,
+          session: { id: sessionId, events: () => [] },
+          status: 'idle',
+          followup(message) {
+            injectedBySession.set(sessionId, String(message?.content?.[0]?.text ?? ''))
+            return message
+          },
+          ctx: { get: () => undefined, effect: (fn) => fn() },
+        }
+        agents.set(sessionId, agent)
+        return { agent, dispose: async () => {} }
+      },
+      withInitiator: (_agent, fn) => fn(),
+    },
+    tools: { register: (def) => tools.push(def) },
+    on: (name, fn) => {
+      localHandlers[name] = fn
+      return () => {}
+    },
+    effect: (fn) => {
+      const stop = fn()
+      stopTransport = typeof stop === 'function' ? stop : () => {}
+      return stopTransport
+    },
+    get: () => undefined,
+    inject: () => {},
+  }
+  const socketMark = qqSockets.length
+  apply(iso, {
+    statePath: stateFile,
+    debugTools: true,
+    onebotUrl: 'ws://127.0.0.1:3001/',
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 0,
+    nicknames: ['小助手'],
+    wakeProbability: 0,
+    whitelist: [],
+    groupWhitelist: ['111', '222'],
+    replyMode: 'marker',
+    napcatInstallDir: join(dir, 'no-napcat'),
+  })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const sim = tools.find((t) => t.name === 'qq_bridge_simulate')
+  const listen = tools.find((t) => t.name === 'qq_bridge_listen')
+  const sendTool = tools.find((t) => t.name === 'qq_bridge_send')
+  const statusTool = tools.find((t) => t.name === 'qq_bridge_status')
+  const readState = () => JSON.parse(readFileSync(stateFile, 'utf8'))
+  const gateOfSession = async (id) => (JSON.parse(await statusTool.execute({}))).sessionGates?.[id]
+  const frameText = (frame) => {
+    const segs = Array.isArray(frame?.params?.message) ? frame.params.message : []
+    return segs.filter((part) => part?.type === 'text').map((part) => String(part.data?.text ?? '')).join('')
+  }
+  const sentFrames = () => {
+    const hits = []
+    for (const socket of qqSockets.slice(socketMark)) {
+      for (const frame of socket.sent ?? []) {
+        if (frame.action === 'send_group_msg' || frame.action === 'send_private_msg') hits.push(frame)
+      }
+    }
+    return hits
+  }
+  const fire = (id, type, data) => localHandlers['session/event']({ id }, { type, data })
+
+  await sim.execute({ text: '甲群闲聊', userId: '9', groupId: '111' })
+  await sim.execute({ text: '乙群闲聊', userId: '9', groupId: '222' })
+  const buffered = readState().buffers
+  check(
+    '重叠：两个群的未唤醒缓冲分开',
+    buffered?.['group:111']?.some((m) => String(m.text).includes('甲群闲聊')) &&
+      !buffered?.['group:111']?.some((m) => String(m.text).includes('乙群闲聊')) &&
+      buffered?.['group:222']?.some((m) => String(m.text).includes('乙群闲聊')),
+    JSON.stringify(buffered),
+  )
+
+  const wokeA = JSON.parse(await sim.execute({ text: '小助手看甲', userId: '9', groupId: '111', messageId: 'ma' }))
+  const idA = wokeA?.decision?.sessionId
+  const textA = injectedBySession.get(idA) ?? ''
+  check(
+    '重叠：唤醒甲群只带甲群的闲聊',
+    wokeA?.decision?.delivered === true && textA.includes('甲群闲聊') && !textA.includes('乙群闲聊'),
+    textA.slice(0, 180),
+  )
+  check(
+    '重叠：甲群唤醒后乙群缓冲还在',
+    readState().buffers?.['group:222']?.some((m) => String(m.text).includes('乙群闲聊')) === true,
+    JSON.stringify(readState().buffers),
+  )
+
+  const wokeB = JSON.parse(await sim.execute({ text: '小助手看乙', userId: '9', groupId: '222', messageId: 'mb' }))
+  const idB = wokeB?.decision?.sessionId
+  check('重叠：乙群是另一条会话', idA && idB && idA !== idB, JSON.stringify({ idA, idB }))
+
+  const openedA = JSON.parse(await listen.execute({ minutes: 5 }, { agent: agents.get(idA) }))
+  const openedB = JSON.parse(await listen.execute({ minutes: 4 }, { agent: agents.get(idB) }))
+  check('重叠：甲群跟随窗口开在甲群', openedA.key === 'group:111', JSON.stringify(openedA))
+  check('重叠：乙群跟随窗口开在乙群，且没有关掉甲群', openedB.key === 'group:222', JSON.stringify(openedB))
+  const duringA = JSON.parse(await sim.execute({ text: '甲群普通', userId: '9', groupId: '111', dryRun: true }))
+  const duringB = JSON.parse(await sim.execute({ text: '乙群普通', userId: '9', groupId: '222', dryRun: true }))
+  check(
+    '重叠：两个目的地的跟随窗口同时有效',
+    duringA.preview?.reason === 'listening' && duringB.preview?.reason === 'listening',
+    JSON.stringify({ a: duringA.preview, b: duringB.preview }),
+  )
+  await listen.execute({ off: true }, { agent: agents.get(idA) })
+  const afterOffA = JSON.parse(await sim.execute({ text: '甲群普通', userId: '9', groupId: '111', dryRun: true }))
+  const stillB = JSON.parse(await sim.execute({ text: '乙群普通', userId: '9', groupId: '222', dryRun: true }))
+  check(
+    '重叠：关掉甲群窗口不影响乙群',
+    afterOffA.preview?.reason !== 'listening' && stillB.preview?.reason === 'listening',
+    JSON.stringify({ a: afterOffA.preview, b: stillB.preview }),
+  )
+  await listen.execute({ off: true }, { agent: agents.get(idB) })
+
+  // 乙群这次 QQ 唤醒先收掉（没有回复），再开一轮 DSH 对话。甲群的 QQ 轮一直留着。
+  fire(idB, 'turn/end', { reason: { kind: 'completed' } })
+  fire(idB, 'user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: '在 DSH 里说话' }] })
+  fire(idB, 'turn/start', { turn: 2 })
+  fire(idB, 'assistant/message', { message: { content: [{ type: 'text', text: '[QQ]乙群不该出现[/QQ]' }] } })
+  fire(idA, 'assistant/message', { message: { content: [{ type: 'text', text: '[QQ]只给甲群[/QQ]' }] } })
+  const midA = await gateOfSession(idA)
+  const midB = await gateOfSession(idB)
+  check(
+    '重叠：乙群的 DSH 轮不算 QQ，甲群的归属还在',
+    midB?.currentTurnFromQQ === false && midA?.currentTurnFromQQ === true,
+    JSON.stringify({ midA, midB }),
+  )
+  const toolA = JSON.parse(await sendTool.execute({ text: '工具甲' }, { agent: agents.get(idA) }))
+  const toolB = JSON.parse(await sendTool.execute({ text: '工具乙' }, { agent: agents.get(idB) }))
+  check('重叠：甲群的工具直接放行', toolA.needsConfirm !== true && toolA.sent === 1, JSON.stringify(toolA))
+  check('重叠：乙群的工具先要确认，且确认状态不落到甲群', toolB.needsConfirm === true && toolB.sent === 0, JSON.stringify(toolB))
+  check(
+    '重叠：乙群的二次确认没有改掉甲群',
+    (await gateOfSession(idA))?.currentTurnFromQQ === true && (await gateOfSession(idA))?.nonQQConfirmPending !== true,
+    JSON.stringify(await gateOfSession(idA)),
+  )
+
+  fire(idB, 'turn/end', { reason: { kind: 'completed' } })
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  check(
+    '重叠：乙群结束时没有把标记块发出去',
+    !sentFrames().some((frame) => frameText(frame).includes('乙群不该出现')),
+    JSON.stringify(sentFrames().map(frameText)),
+  )
+  check('重叠：乙群结束后甲群闸门还在', (await gateOfSession(idA))?.currentTurnFromQQ === true, JSON.stringify(await gateOfSession(idA)))
+
+  fire(idA, 'turn/end', { reason: { kind: 'completed' } })
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  const marker = sentFrames().filter((frame) => frameText(frame).includes('只给甲群'))
+  check(
+    '重叠：甲群的标记块发到甲群，正文里没有乙群那句',
+    marker.length === 1 &&
+      String(marker[0].params?.group_id) === '111' &&
+      !sentFrames().some((frame) => frameText(frame).includes('乙群不该出现')),
+    JSON.stringify(sentFrames().map((frame) => ({ group: frame.params?.group_id, text: frameText(frame) }))),
+  )
+  try {
+    stopTransport()
+  } catch {
+    // 测试结束，连接关掉即可
+  }
+  qqSockets.splice(socketMark)
   rmSync(dir, { recursive: true, force: true })
 }
 
@@ -3607,6 +4157,32 @@ function sawSentText(s) {
         explicitFrame.params.message?.[0]?.type === 'text',
       JSON.stringify(explicitFrame?.params),
     )
+    const offList = JSON.parse(await sendTool.execute({ text: '不该去丙群', groupId: '333' }))
+    check(
+      '显式群号不在 groupWhitelist 里不发送',
+      offList.sent === 0 && offList.dropped === true && offList.reason === 'not-allowlisted' && framesWith('不该去丙群').length === 0,
+      JSON.stringify(offList),
+    )
+    const offUser = JSON.parse(await sendTool.execute({ text: '不该去这个私聊', userId: '999000' }))
+    check(
+      '显式 QQ 号不在 whitelist 里不发送',
+      offUser.sent === 0 && offUser.reason === 'not-allowlisted' && framesWith('不该去这个私聊').length === 0,
+      JSON.stringify(offUser),
+    )
+    resolvedSettings.groupWhitelist = []
+    const pinnedStill = JSON.parse(await sendTool.execute({ text: '钉住的仍可发' }))
+    check(
+      '钉住的目的地不因事后清空白名单被拦',
+      pinnedStill.sent === 1 && String(framesWith('钉住的仍可发').at(-1)?.params?.group_id) === '111',
+      JSON.stringify(pinnedStill),
+    )
+    const emptyList = JSON.parse(await sendTool.execute({ text: '空白名单显式', groupId: '111' }))
+    check(
+      '空白名单下显式群号不发送',
+      emptyList.sent === 0 && emptyList.reason === 'not-allowlisted' && framesWith('空白名单显式').length === 0,
+      JSON.stringify(emptyList),
+    )
+    resolvedSettings.groupWhitelist = ['111', '222']
     mainSessionHandler(
       { id: 'session-smoke' },
       { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '[QQ]标记块回甲群[/QQ]' }] } } },

@@ -192,7 +192,10 @@ window.__ModuleLoader__.load({
       }
       if (field.kind === 'boolean') return raw === true
       if (field.kind === 'number') {
-        const n = Number(raw)
+        const text = String(raw ?? '').trim()
+        // 清空输入框时浏览器给的是空串，Number('') === 0。不能把「留空」存成 0。
+        if (text === '') return undefined
+        const n = Number(text)
         return Number.isFinite(n) ? n : undefined
       }
       return String(raw == null ? '' : raw).trim()
@@ -471,7 +474,14 @@ window.__ModuleLoader__.load({
           for (const f of FIELDS) {
             if (same(current[f.key], shown[f.key])) continue
             const next = parse(f, shown[f.key])
-            if (next === undefined) throw new Error(`「${f.label}」不是合法数字`)
+            if (next === undefined) {
+              const blank = f.kind === 'number' && String(shown[f.key] ?? '').trim() === ''
+              throw new Error(
+                blank
+                  ? `「${f.label}」留空不会当成 0。想恢复默认请点撤销覆盖。`
+                  : `「${f.label}」不是合法数字`,
+              )
+            }
             writes.push([f.key, next])
           }
           for (const [key, value] of writes) await scope.set(key, value)
