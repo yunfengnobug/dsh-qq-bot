@@ -1,13 +1,31 @@
-// 检查更新的版本比较。不连网：fetch 由用例自己提供。
+// 检查更新和一键安装。不连真 GitHub、不调真 dsh：fetch 和命令都由用例自己提供。
 // 运行：node test-updates.mjs
+import { existsSync, readFileSync } from 'node:fs'
+import { gunzipSync } from 'node:zlib'
 import {
+  applyPluginUpdate,
   assessUpdate,
   checkPluginUpdate,
+  chooseApplyTarget,
+  codeloadTarballUrl,
+  githubArchiveUrl,
   compareSemver,
+  dshPluginAddSpec,
   failureMessage,
+  fixtureTarball,
   installCommand,
+  npmInstallCommand,
+  npmInstallSpec,
+  NPM_REGISTRY,
+  normalizeRegistry,
   parseSemver,
+  queryNpmVersions,
+  planPanelRestart,
+  RESTART_HELPER,
+  repackReleaseTarball,
+  schedulePanelRestart,
   summarizeReleaseNotes,
+  systemdUnitFromCgroup,
 } from './updates.js'
 
 let failed = 0
@@ -58,6 +76,7 @@ check(
     newer.message.includes('你现在是 0.2.3') &&
     newer.message.includes('设置页可以检查更新') &&
     newer.message.includes('装完请重启 dsh-web') &&
+    newer.message.includes('更新到 v0.2.4') &&
     newer.command === installCommand('0.2.4') &&
     newer.install === 'github:yunfengnobug/dsh-qq-bot#v0.2.4',
   newer.message,
@@ -126,6 +145,731 @@ check('JSON 读不懂：白话', garbled.ok === false && /读不懂/.test(garble
 
 const notAFunction = await checkPluginUpdate({ current: '0.2.4', fetchImpl: /** @type {any} */ (null) })
 check('没有 fetch：不抛、白话失败', notAFunction.ok === false && /连不上 GitHub/.test(notAFunction.error), String(notAFunction.error))
+
+check(
+  '给人看的安装命令仍是 github 标签',
+  installCommand('v0.2.5') === 'dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.5',
+)
+check(
+  '先下载 GitHub 官方源码包，codeload 只是同一标签的备用地址',
+  githubArchiveUrl('v0.2.5') === 'https://github.com/yunfengnobug/dsh-qq-bot/archive/refs/tags/v0.2.5.tar.gz' &&
+    codeloadTarballUrl('v0.2.5') === 'https://codeload.github.com/yunfengnobug/dsh-qq-bot/tar.gz/refs/tags/v0.2.5' &&
+    !githubArchiveUrl('v0.2.5').includes('codeload') &&
+    !/ghproxy|fastgit|gitclone|kgithub/i.test(`${githubArchiveUrl('0.2.5')} ${codeloadTarballUrl('0.2.5')}`),
+)
+check('仓库名不合法时不拼下载地址', githubArchiveUrl('0.2.5', 'evil/../other') === '' && codeloadTarballUrl('0.2.5-rc.1') === '')
+
+const unflaggedRc = assessUpdate({
+  current: '0.2.3',
+  releases: [release('v0.2.4-rc.1', { prerelease: false, body: '漏标的预发布' })],
+})
+check('标签里带预发布、即使没标 prerelease，也不当正式版', unflaggedRc.kind === 'no-release' && unflaggedRc.updateAvailable === false)
+
+function packageJson(version, name = 'dsh-qq-bot') {
+  return JSON.stringify({ name, version })
+}
+
+const packed = repackReleaseTarball(
+  fixtureTarball([
+    { name: 'package.json', data: packageJson('9.9.9') },
+    { name: 'index.js', data: 'export const name = "qq-bridge"\n' },
+    { name: `nested/${'long-'.repeat(30)}file.js`, data: 'x' },
+  ]),
+  { version: '9.9.9' },
+)
+const packedRaw = gunzipSync(packed)
+check(
+  '重打包后是 package/ 开头，长文件名还在',
+  packedRaw.includes(Buffer.from('package/package.json')) && packedRaw.includes(Buffer.from('package/index.js')) && packedRaw.includes(Buffer.from('long-long-')),
+)
+
+let rejectedName = false
+try {
+  repackReleaseTarball(fixtureTarball([{ name: 'package.json', data: packageJson('9.9.9', 'other-plugin') }]), { version: '9.9.9' })
+} catch (error) {
+  rejectedName = error?.code === 'wrong-name'
+}
+check('包名不是这个插件就拒绝', rejectedName)
+
+let rejectedVersion = false
+try {
+  repackReleaseTarball(fixtureTarball([{ name: 'package.json', data: packageJson('0.0.1') }]), { version: '9.9.9' })
+} catch (error) {
+  rejectedVersion = error?.code === 'wrong-version'
+}
+check('压缩包里的版本和标签对不上就拒绝', rejectedVersion)
+
+let rejectedPath = false
+try {
+  repackReleaseTarball(
+    fixtureTarball([
+      { name: 'package.json', data: packageJson('9.9.9') },
+      { name: '../../outside.txt', data: 'nope' },
+    ]),
+    { version: '9.9.9' },
+  )
+} catch (error) {
+  rejectedPath = error?.code === 'bad-package'
+}
+check('压缩包里的路径跳出目录就拒绝', rejectedPath)
+
+const linuxAdd = dshPluginAddSpec({ tarballPath: '/tmp/dsh-qq-bot-9.9.9.tgz', platform: 'linux' })
+check(
+  'Linux 上就是 dsh plugin add 这个压缩包',
+  linuxAdd.command === 'dsh' && linuxAdd.shell === false && linuxAdd.args.join(' ') === 'plugin --profile web add /tmp/dsh-qq-bot-9.9.9.tgz',
+)
+const windowsAdd = dshPluginAddSpec({
+  tarballPath: 'C:\\Temp\\dsh qq bot\\dsh-qq-bot-9.9.9.tgz',
+  platform: 'win32',
+  comSpec: 'cmd.exe',
+})
+check(
+  'Windows 用 dsh.cmd，路径里的空格被引号包住',
+  windowsAdd.command === 'cmd.exe' &&
+    windowsAdd.args[0] === '/d' &&
+    windowsAdd.args[3].includes('dsh.cmd plugin --profile web add "C:\\Temp\\dsh qq bot\\dsh-qq-bot-9.9.9.tgz"'),
+  windowsAdd.args[3],
+)
+let rejectedMeta = false
+try {
+  dshPluginAddSpec({ tarballPath: '/tmp/a&b.tgz', platform: 'win32' })
+} catch {
+  rejectedMeta = true
+}
+check('路径里有命令分隔符时不交给 cmd', rejectedMeta)
+
+check(
+  'cgroup 里取具体服务，不取 user@',
+  systemdUnitFromCgroup('0::/user.slice/user-1000.slice/user@1000.service/app.slice/dsh-web.service\n') === 'dsh-web.service',
+)
+check('只有用户会话时不猜服务名', systemdUnitFromCgroup('0::/user.slice/user-1000.slice/user@1000.service\n') === null)
+
+const systemdPlan = planPanelRestart({
+  platform: 'linux',
+  env: { INVOCATION_ID: 'abc' },
+  cgroup: '0::/system.slice/dsh-web.service\n',
+  execPath: '/usr/bin/node',
+  argv: ['/usr/bin/dsh', 'web'],
+  pid: 4242,
+  cwd: '/tmp',
+})
+check(
+  'systemd 下预约重启那个服务，而不是再拉起一份',
+  systemdPlan.mode === 'systemd' &&
+    systemdPlan.command === 'systemd-run' &&
+    systemdPlan.args.includes('restart') &&
+    systemdPlan.args.includes('dsh-web.service') &&
+    !systemdPlan.args.includes('4242'),
+  JSON.stringify(systemdPlan.args),
+)
+check(
+  '认不出单独服务时不重启整个登录',
+  planPanelRestart({ platform: 'linux', env: { NOTIFY_SOCKET: '/run/systemd/notify' }, cgroup: '0::/user.slice/user@1000.service' }).mode === 'manual',
+)
+check(
+  '没被 systemd 拉起时，即使 cgroup 里有服务名，也按当前命令行重启',
+  planPanelRestart({
+    platform: 'linux',
+    env: {},
+    cgroup: '0::/system.slice/dsh-web.service',
+    execPath: '/usr/bin/node',
+    argv: ['bin.js', 'web'],
+    pid: 7,
+    cwd: '/work',
+  }).mode === 'reexec',
+)
+check(
+  '重启脚本只杀给定进程并按原命令拉起，不提 NapCat 或设置文件',
+  RESTART_HELPER.includes('SIGTERM') &&
+    RESTART_HELPER.includes('DSH_QQ_BOT_RESTART') &&
+    !/napcat|qq-bridge-settings|shell\s*:/i.test(RESTART_HELPER),
+)
+
+function laterClose(code) {
+  return (command, args, options) => {
+    const handlers = {}
+    const child = {
+      stdout: { on() {} },
+      stderr: { on() {} },
+      on(name, fn) {
+        handlers[name] = fn
+        return child
+      },
+      kill() {},
+      unref() {},
+    }
+    queueMicrotask(() => handlers.close?.(code))
+    child.command = command
+    child.args = args
+    child.options = options
+    return child
+  }
+}
+
+const systemdSpawned = []
+const systemdOk = await schedulePanelRestart({
+  plan: systemdPlan,
+  spawnImpl: (command, args, options) => {
+    systemdSpawned.push({ command, args, options })
+    return laterClose(0)(command, args, options)
+  },
+})
+check('systemd-run 成功就认为重启已安排', systemdOk.ok === true && systemdOk.mode === 'systemd' && systemdSpawned[0]?.command === 'systemd-run')
+const systemdFail = await schedulePanelRestart({
+  plan: systemdPlan,
+  spawnImpl: (command, args, options) => laterClose(1)(command, args, options),
+})
+check(
+  'systemd-run 失败是白话，不带堆栈',
+  systemdFail.ok === false && /已经装上/.test(systemdFail.error) && /登录口令/.test(systemdFail.error) && !/Error|ENOENT/.test(systemdFail.error),
+  String(systemdFail.error),
+)
+
+const reexecCalls = []
+const reexecOk = await schedulePanelRestart({
+  plan: {
+    mode: 'reexec',
+    execPath: '/usr/bin/node',
+    argv: ['bin.js', 'web'],
+    pid: 4242,
+    cwd: '/work',
+    delayMs: 2500,
+  },
+  env: { PATH: '/usr/bin', TOKEN: 'panel-secret' },
+  spawnImpl: (command, args, options) => {
+    reexecCalls.push({ command, args, options })
+    return { on() {}, unref() {} }
+  },
+})
+const reexecPayload = JSON.parse(reexecCalls[0]?.options?.env?.DSH_QQ_BOT_RESTART || '{}')
+check(
+  '脱离的重启进程带着原命令行，并且是 detached',
+  reexecOk.ok === true &&
+    reexecOk.mode === 'reexec' &&
+    reexecCalls[0]?.options?.detached === true &&
+    reexecCalls[0]?.options?.stdio === 'ignore' &&
+    reexecPayload.pid === 4242 &&
+    reexecPayload.argv?.[1] === 'web' &&
+    !/panel-secret/.test(reexecCalls[0]?.args?.join(' ') || ''),
+  JSON.stringify(reexecPayload),
+)
+
+function releasesOf(...tags) {
+  return tags.map((tag) => release(tag, { body: `${tag} 的说明`, html_url: 'https://evil.example/nope' }))
+}
+
+function tarballFor(version) {
+  return fixtureTarball([{ name: 'package.json', data: packageJson(version) }, { name: 'index.js', data: 'ok' }], `dsh-qq-bot-${version}`)
+}
+
+function fakeFetch(handler) {
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    const href = String(url)
+    calls.push({ url: href, redirect: init?.redirect })
+    return handler(href, calls)
+  }
+  return { fetchImpl, calls }
+}
+
+const checkOnly = fakeFetch(() => ({
+  ok: true,
+  status: 200,
+  json: async () => releasesOf('v9.9.9'),
+  text: async () => '',
+}))
+await checkPluginUpdate({ current: '0.2.3', fetchImpl: checkOnly.fetchImpl })
+check(
+  '只检查时不会去下压缩包',
+  checkOnly.calls.length === 2 &&
+    checkOnly.calls[0].url === 'https://registry.npmjs.org/dsh-qq-bot' &&
+    checkOnly.calls[1].url.includes('api.github.com') &&
+    checkOnly.calls.every((call) => !call.url.includes('codeload') && !call.url.includes('/archive/')),
+)
+
+async function applyWith(options) {
+  const seen = []
+  const fetchBox = fakeFetch(options.onFetch)
+  const result = await applyPluginUpdate({
+    current: options.current,
+    version: options.version,
+    force: options.force,
+    platform: 'linux',
+    fetchImpl: fetchBox.fetchImpl,
+    proxy: options.proxy,
+    spawnImpl: options.spawnImpl,
+    runCommand: async (spec) => {
+      seen.push(spec)
+      if (options.runCommand) return options.runCommand(spec)
+      return { ok: true, code: 0 }
+    },
+    scheduleRestart: options.scheduleRestart || (async () => ({ ok: true, mode: 'reexec' })),
+  })
+  return { result, calls: fetchBox.calls, seen }
+}
+
+const installed = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url.includes('api.github.com')) {
+      return { ok: true, status: 200, json: async () => releasesOf('v9.9.9', 'v0.2.4'), text: async () => '' }
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => '' },
+      arrayBuffer: async () => tarballFor('9.9.9'),
+    }
+  },
+  runCommand: async (spec) => {
+    const raw = gunzipSync(readFileSync(spec.tarballPath))
+    return {
+      ok: existsSync(spec.tarballPath) && raw.includes(Buffer.from('package/package.json')),
+      code: 0,
+      spec,
+    }
+  },
+})
+check(
+  '有新版：先下 GitHub 官方源码包，装进 web，并安排重启',
+  installed.result.ok === true &&
+    installed.result.applied === true &&
+    installed.result.restarting === true &&
+    installed.result.tag === 'v9.9.9' &&
+    installed.result.install === 'github:yunfengnobug/dsh-qq-bot#v9.9.9' &&
+    installed.result.command === installCommand('9.9.9') &&
+    /已经装上 v9.9.9/.test(installed.result.message) &&
+    /登录口令可能会变/.test(installed.result.message) &&
+    /没有改动 NapCat/.test(installed.result.message) &&
+    !installed.result.message.includes('codeload') &&
+    !installed.result.message.includes('evil.example') &&
+    !/TypeError|fetch failed|\n\s+at /.test(installed.result.message) &&
+    installed.calls.some((call) => call.url === githubArchiveUrl('9.9.9') && call.redirect === 'manual') &&
+    !installed.calls.some((call) => call.url.includes('codeload')),
+  JSON.stringify({ message: installed.result.message, urls: installed.calls.map((call) => call.url) }).slice(0, 500),
+)
+check(
+  '安装参数只有 web profile 和压缩包，不碰设置或 NapCat',
+  installed.seen.length === 1 &&
+    installed.seen[0].profile === 'web' &&
+    String(installed.seen[0].tarballPath).endsWith('dsh-qq-bot-9.9.9.tgz') &&
+    !JSON.stringify(installed.seen[0]).includes('qq-bridge-settings') &&
+    !JSON.stringify(installed.seen[0]).includes('napcat') &&
+    !existsSync(installed.seen[0].tarballPath),
+)
+
+const already = await applyWith({
+  current: '0.2.4',
+  onFetch: () => ({ ok: true, status: 200, json: async () => releasesOf('v0.2.4'), text: async () => '' }),
+})
+check(
+  '已经是最新：不下载、不安装',
+  already.result.ok === false &&
+    already.result.stage === 'refused' &&
+    /已经是最新正式版/.test(already.result.error) &&
+    already.seen.length === 0 &&
+    already.calls.length === 2 &&
+    already.calls[0].url === 'https://registry.npmjs.org/dsh-qq-bot' &&
+    already.calls.every((call) => !call.url.includes('/archive/') && !call.url.includes('codeload')),
+  String(already.result.error),
+)
+
+const explicitSame = await applyWith({
+  current: '0.2.4',
+  version: 'v0.2.4',
+  onFetch: () => ({ ok: true, status: 200, json: async () => releasesOf('v0.2.4'), text: async () => '' }),
+})
+check('点了当前版本：不重装', explicitSame.result.ok === false && /没有重装/.test(explicitSame.result.error) && explicitSame.seen.length === 0)
+
+const forced = await applyWith({
+  current: '0.2.4',
+  version: '0.2.4',
+  force: true,
+  onFetch: (url) => {
+    if (url.includes('api.github.com')) return { ok: true, status: 200, json: async () => releasesOf('v0.2.4'), text: async () => '' }
+    return { ok: true, status: 200, headers: { get: () => '' }, arrayBuffer: async () => tarballFor('0.2.4') }
+  },
+})
+check('force 才重装同一个正式版', forced.result.ok === true && forced.result.tag === 'v0.2.4' && forced.seen.length === 1 && forced.seen[0].profile === 'web')
+
+const forceText = await applyWith({
+  current: '0.2.4',
+  version: '0.2.4',
+  force: 'true',
+  onFetch: () => ({ ok: true, status: 200, json: async () => releasesOf('v0.2.4'), text: async () => '' }),
+})
+check('force 必须是布尔真，字符串不算', forceText.result.ok === false && forceText.seen.length === 0)
+
+const older = await applyWith({
+  current: '0.2.4',
+  version: 'v0.2.3',
+  force: true,
+  onFetch: () => ({ ok: true, status: 200, json: async () => releasesOf('v0.2.4', 'v0.2.3'), text: async () => '' }),
+})
+check('更旧的标签即使 force 也不装', older.result.ok === false && /更旧/.test(older.result.error) && older.seen.length === 0 && !older.calls.some((call) => call.url.includes('codeload')))
+
+const missingTag = await applyWith({
+  current: '0.2.3',
+  version: 'v8.8.8',
+  onFetch: () => ({ ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }),
+})
+check('没在这次检查里出现的版本不装', missingTag.result.ok === false && /没有这个版本/.test(missingTag.result.error) && missingTag.seen.length === 0)
+
+const invented = await applyWith({
+  current: '0.2.3',
+  version: '9.9.9; rm -rf /',
+  onFetch: () => ({ ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }),
+})
+check('版本号里夹命令就不装', invented.result.ok === false && /格式不对/.test(invented.result.error) && invented.seen.length === 0)
+
+const middle = await applyWith({
+  current: '0.2.3',
+  version: 'v0.2.4',
+  onFetch: (url) => {
+    if (url.includes('api.github.com')) return { ok: true, status: 200, json: async () => releasesOf('v9.9.9', 'v0.2.4'), text: async () => '' }
+    return { ok: true, status: 200, headers: { get: () => '' }, arrayBuffer: async () => tarballFor('0.2.4') }
+  },
+})
+check(
+  '可以装检查结果里比当前新、但不是最高的那个标签',
+  middle.result.ok === true &&
+    middle.result.tag === 'v0.2.4' &&
+    middle.calls.some((call) => call.url === githubArchiveUrl('0.2.4')) &&
+    !middle.calls.some((call) => call.url.includes('v9.9.9')),
+)
+
+const prerelease = chooseApplyTarget({ current: '0.2.3', releases: releasesOf('v0.2.4'), version: 'v0.2.4-rc.1' })
+check('预发布标签直接拒绝', prerelease.ok === false && /格式不对|没有这个版本/.test(prerelease.error))
+
+const offlineApply = await applyWith({
+  current: '0.2.3',
+  onFetch: () => {
+    throw new TypeError('fetch failed')
+  },
+})
+check(
+  '安装前连不上 GitHub：白话，且不会去执行 dsh',
+  offlineApply.result.ok === false &&
+    offlineApply.result.stage === 'github' &&
+    /连不上 GitHub/.test(offlineApply.result.error) &&
+    !/fetch failed|TypeError/.test(offlineApply.result.error) &&
+    offlineApply.seen.length === 0,
+  String(offlineApply.result.error),
+)
+
+const redirected = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url.includes('api.github.com')) return { ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }
+    if (url.includes('evil.example')) return { ok: true, status: 200, headers: { get: () => '' }, arrayBuffer: async () => tarballFor('9.9.9') }
+    return { ok: false, status: 302, headers: { get: (name) => (String(name).toLowerCase() === 'location' ? 'https://evil.example/pkg.tgz' : '') } }
+  },
+})
+check(
+  '压缩包跳到别的网站就不下，文案里也不出现那个地址',
+  redirected.result.ok === false &&
+    redirected.result.stage === 'github' &&
+    !/evil\.example/.test(redirected.result.error) &&
+    redirected.seen.length === 0 &&
+    !redirected.calls.some((call) => call.url.includes('evil.example')),
+  String(redirected.result.error),
+)
+
+let hugeRead = false
+const huge = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url.includes('api.github.com')) return { ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => (String(name).toLowerCase() === 'content-length' ? String(50 * 1024 * 1024) : '') },
+      arrayBuffer: async () => {
+        hugeRead = true
+        return tarballFor('9.9.9')
+      },
+    }
+  },
+})
+check('声明过大的包不读正文', huge.result.ok === false && /太大/.test(huge.result.error) && hugeRead === false && huge.seen.length === 0, String(huge.result.error))
+
+const wrongPackage = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url.includes('api.github.com')) return { ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => '' },
+      arrayBuffer: async () => fixtureTarball([{ name: 'package.json', data: packageJson('9.9.9', 'other-plugin') }]),
+    }
+  },
+})
+check(
+  '包名不对：不调用 dsh，也不把包名里的字当堆栈',
+  wrongPackage.result.stage === 'install' && /不是这个插件/.test(wrongPackage.result.error) && wrongPackage.seen.length === 0 && !/other-plugin/.test(wrongPackage.result.error),
+  String(wrongPackage.result.error),
+)
+
+const proxyCalls = []
+const proxied = await applyWith({
+  current: '0.2.3',
+  proxy: 'http://proxy.invalid:9',
+  spawnImpl: (_command, args) => {
+    proxyCalls.push(args)
+    throw new Error('curl failed s3cret-token http://proxy.invalid:9')
+  },
+  onFetch: (url) => {
+    if (url.includes('codeload') || url.includes('/archive/')) {
+      return { ok: true, status: 200, headers: { get: () => '' }, arrayBuffer: async () => tarballFor('9.9.9') }
+    }
+    return { ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }
+  },
+})
+check(
+  '走代理时先请求 GitHub 官方地址，失败再试 codeload；口令和代理不回出去',
+  proxied.result.stage === 'github' &&
+    /连不上 GitHub/.test(proxied.result.error) &&
+    !/s3cret-token|proxy\.invalid|ghproxy/.test(proxied.result.error) &&
+    !proxied.calls.some((call) => call.url.includes('codeload') || call.url.includes('/archive/')) &&
+    String(proxyCalls[0]).includes(githubArchiveUrl('9.9.9')) &&
+    String(proxyCalls[1]).includes(codeloadTarballUrl('9.9.9')) &&
+    proxyCalls.length === 2 &&
+    proxied.seen.length === 0,
+  `${proxied.result.error} calls=${proxyCalls.length}`,
+)
+
+const fellBack = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url.includes('api.github.com')) return { ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }
+    if (url === githubArchiveUrl('9.9.9')) throw new TypeError('fetch failed')
+    if (url === codeloadTarballUrl('9.9.9')) {
+      return { ok: true, status: 200, headers: { get: () => '' }, arrayBuffer: async () => tarballFor('9.9.9') }
+    }
+    return { ok: false, status: 404, headers: { get: () => '' } }
+  },
+})
+check(
+  'github.com 连不上时改下 codeload，仍然不碰第三方镜像',
+  fellBack.result.ok === true &&
+    fellBack.result.tag === 'v9.9.9' &&
+    fellBack.calls.some((call) => call.url === githubArchiveUrl('9.9.9')) &&
+    fellBack.calls.some((call) => call.url === codeloadTarballUrl('9.9.9')) &&
+    !fellBack.calls.some((call) => /ghproxy|fastgit|gitclone|kgithub|mirror\./i.test(call.url)),
+  fellBack.calls.map((call) => call.url).join(' | '),
+)
+
+const mirrored = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url.includes('api.github.com')) return { ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }
+    if (url.includes('ghproxy.example') || url.includes('evil.example')) {
+      return { ok: true, status: 200, headers: { get: () => '' }, arrayBuffer: async () => tarballFor('9.9.9') }
+    }
+    return {
+      ok: false,
+      status: 302,
+      headers: { get: (name) => (String(name).toLowerCase() === 'location' ? 'https://ghproxy.example/github.com/yunfengnobug/dsh-qq-bot/archive/refs/tags/v9.9.9.tar.gz' : '') },
+    }
+  },
+})
+check(
+  '官方地址若跳到第三方镜像，不跟随，文案里也不出现那个地址',
+  mirrored.result.ok === false &&
+    mirrored.seen.length === 0 &&
+    !/ghproxy\.example/.test(mirrored.result.error) &&
+    !mirrored.calls.some((call) => call.url.includes('ghproxy.example')),
+  `${mirrored.result.error} ${mirrored.calls.map((call) => call.url).join(' | ')}`,
+)
+
+let leakedPath = ''
+const thrownInstall = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url.includes('api.github.com')) return { ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }
+    return { ok: true, status: 200, headers: { get: () => '' }, arrayBuffer: async () => tarballFor('9.9.9') }
+  },
+  runCommand: async (spec) => {
+    leakedPath = spec.tarballPath
+    throw new Error(`EPERM ${spec.tarballPath} qq-bridge-settings.json`)
+  },
+  scheduleRestart: async () => {
+    throw new Error('should not restart')
+  },
+})
+check(
+  '安装抛错：白话，临时文件删掉，不重启',
+  thrownInstall.result.stage === 'install' &&
+    /安装没有成功/.test(thrownInstall.result.error) &&
+    thrownInstall.result.command === installCommand('9.9.9') &&
+    !thrownInstall.result.error.includes(leakedPath) &&
+    !/qq-bridge-settings|EPERM/.test(thrownInstall.result.error) &&
+    leakedPath !== '' &&
+    !existsSync(leakedPath),
+  String(thrownInstall.result.error),
+)
+
+const missingDsh = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url.includes('api.github.com')) return { ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }
+    return { ok: true, status: 200, headers: { get: () => '' }, arrayBuffer: async () => tarballFor('9.9.9') }
+  },
+  runCommand: async () => ({ ok: false, code: 'ENOENT' }),
+})
+check('找不到 dsh：告诉人自己执行 github 那条命令', missingDsh.result.stage === 'install' && /没找到 dsh/.test(missingDsh.result.error) && missingDsh.result.error.includes('github:yunfengnobug/dsh-qq-bot#v9.9.9'))
+
+const restartFailed = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url.includes('api.github.com')) return { ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }
+    return { ok: true, status: 200, headers: { get: () => '' }, arrayBuffer: async () => tarballFor('9.9.9') }
+  },
+  scheduleRestart: async () => ({ ok: false, error: undefined }),
+})
+check(
+  '装上了但没重启：说清楚已经装上，并提醒登录口令',
+  restartFailed.result.ok === false &&
+    restartFailed.result.stage === 'restart' &&
+    restartFailed.result.installed === true &&
+    /已经装上/.test(restartFailed.result.error) &&
+    /登录口令/.test(restartFailed.result.error) &&
+    !/TypeError|\n\s+at /.test(restartFailed.result.error),
+  String(restartFailed.result.error),
+)
+
+const target = chooseApplyTarget({ current: '0.2.3', releases: releasesOf('v9.9.9'), version: '9.9.9' })
+check(
+  '选定的标签在 GitHub 这条路上给人看 github:，下载先用 github.com，备用才是 codeload',
+  target.ok === true &&
+    target.channel === 'github' &&
+    target.install.startsWith('github:') &&
+    target.tarballUrl === githubArchiveUrl('9.9.9') &&
+    target.fallbackUrl === codeloadTarballUrl('9.9.9') &&
+    !target.url.includes('evil.example'),
+)
+
+check('官方 registry 是默认值，不把镜像写进默认地址', NPM_REGISTRY === 'https://registry.npmjs.org/' && !String(NPM_REGISTRY).includes('npmmirror') && !String(NPM_REGISTRY).includes('ghproxy'))
+check(
+  'registry 只接受没有路径的 https',
+  normalizeRegistry('https://registry.npmjs.org') === 'https://registry.npmjs.org/' &&
+    normalizeRegistry('https://registry.npmmirror.com/') === 'https://registry.npmmirror.com/' &&
+    normalizeRegistry('http://registry.npmjs.org/') === '' &&
+    normalizeRegistry('https://user:s3cret@registry.npmjs.org/') === '' &&
+    normalizeRegistry('https://ghproxy.example/github.com/') === '',
+)
+check(
+  'npm 安装命令是包名加版本',
+  npmInstallSpec('v9.9.9') === 'dsh-qq-bot@9.9.9' &&
+    npmInstallCommand('9.9.9') === 'dsh plugin --profile web add dsh-qq-bot@9.9.9' &&
+    npmInstallSpec('9.9.9-rc.1') === '' &&
+    npmInstallSpec('9.9.9;rm') === '',
+)
+const npmAdd = dshPluginAddSpec({ packageSpec: 'dsh-qq-bot@9.9.9', platform: 'linux' })
+check(
+  'Linux 上优先 dsh plugin add 这个 npm 包',
+  npmAdd.command === 'dsh' && npmAdd.shell === false && npmAdd.args.join(' ') === 'plugin --profile web add dsh-qq-bot@9.9.9',
+)
+let badSpec = false
+try {
+  dshPluginAddSpec({ packageSpec: 'dsh-qq-bot@9.9.9 && echo', platform: 'linux' })
+} catch (error) {
+  badSpec = error?.code === 'bad-package'
+}
+check('npm 包说明里夹命令就不交给 dsh', badSpec)
+
+const npmPack = fakeFetch((url) => {
+  if (url === 'https://registry.npmjs.org/dsh-qq-bot') {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ versions: { '0.2.4': { version: '0.2.4' }, '9.9.9': { version: '9.9.9' }, '9.9.9-rc.1': { version: '9.9.9-rc.1' } } }),
+    }
+  }
+  throw new Error(`不该访问 ${url}`)
+})
+const npmChecked = await checkPluginUpdate({ current: '0.2.3', fetchImpl: npmPack.fetchImpl })
+check(
+  'npm 上有新版时不再问 GitHub',
+  npmChecked.ok === true &&
+    npmChecked.updateAvailable === true &&
+    npmChecked.latest === '9.9.9' &&
+    npmChecked.install === 'dsh-qq-bot@9.9.9' &&
+    npmChecked.command === npmInstallCommand('9.9.9') &&
+    npmChecked.message.includes('从 npm 装上') &&
+    !npmChecked.message.includes('github:') &&
+    npmPack.calls.length === 1,
+  npmChecked.message,
+)
+
+const viaNpm = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url === 'https://registry.npmjs.org/dsh-qq-bot') {
+      return { ok: true, status: 200, json: async () => ({ versions: { '9.9.9': { version: '9.9.9' } } }) }
+    }
+    throw new Error(`不该访问 ${url}`)
+  },
+  runCommand: async (spec) => ({ ok: spec.packageSpec === 'dsh-qq-bot@9.9.9' && spec.tarballPath == null, code: 0 }),
+})
+check(
+  '有新版：先装 npm 上的包，不下载 GitHub',
+  viaNpm.result.ok === true &&
+    viaNpm.result.channel === 'npm' &&
+    viaNpm.result.install === 'dsh-qq-bot@9.9.9' &&
+    viaNpm.result.command === npmInstallCommand('9.9.9') &&
+    /已经装上 v9.9.9/.test(viaNpm.result.message) &&
+    /从 npm 装的/.test(viaNpm.result.message) &&
+    /没有改动 NapCat/.test(viaNpm.result.message) &&
+    viaNpm.seen.length === 1 &&
+    viaNpm.seen[0].packageSpec === 'dsh-qq-bot@9.9.9' &&
+    viaNpm.seen[0].profile === 'web' &&
+    !viaNpm.calls.some((call) => /github\.com|codeload|ghproxy|npmmirror/.test(call.url)),
+  JSON.stringify({ message: viaNpm.result.message, urls: viaNpm.calls.map((call) => call.url) }),
+)
+
+const npmMissThenGithub = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url === 'https://registry.npmjs.org/dsh-qq-bot') {
+      return { ok: true, status: 200, json: async () => ({ versions: { '9.9.9': { version: '9.9.9' } } }) }
+    }
+    if (url === githubArchiveUrl('9.9.9')) {
+      return { ok: true, status: 200, headers: { get: () => '' }, arrayBuffer: async () => tarballFor('9.9.9') }
+    }
+    throw new Error(`不该访问 ${url}`)
+  },
+  runCommand: async (spec) => {
+    if (spec.packageSpec) return { ok: false, code: 'unpublished' }
+    return { ok: Boolean(spec.tarballPath), code: 0 }
+  },
+})
+check(
+  'registry 里临时没有这个版本时改从 GitHub 官方源码包装',
+  npmMissThenGithub.result.ok === true &&
+    npmMissThenGithub.result.channel === 'github' &&
+    npmMissThenGithub.result.install === 'github:yunfengnobug/dsh-qq-bot#v9.9.9' &&
+    /从 GitHub 装上/.test(npmMissThenGithub.result.message) &&
+    npmMissThenGithub.seen.length === 2 &&
+    npmMissThenGithub.seen[0].packageSpec === 'dsh-qq-bot@9.9.9' &&
+    String(npmMissThenGithub.seen[1].tarballPath).endsWith('dsh-qq-bot-9.9.9.tgz') &&
+    npmMissThenGithub.calls.some((call) => call.url === githubArchiveUrl('9.9.9')) &&
+    !npmMissThenGithub.calls.some((call) => /ghproxy|npmmirror|codeload/.test(call.url)),
+)
+
+const unpublished = await queryNpmVersions({
+  fetchImpl: async () => ({ ok: false, status: 404, json: async () => ({ error: 'Not found' }) }),
+})
+check('npm 404 表示包还没发布', unpublished.ok === false && unpublished.code === 'unpublished')
+
+const redirectedRegistry = await queryNpmVersions({
+  fetchImpl: async (url) => {
+    if (String(url).includes('ghproxy.example')) throw new Error('跟着跳走了')
+    return { ok: false, status: 302, headers: { get: () => 'https://ghproxy.example/dsh-qq-bot' } }
+  },
+})
+check('registry 跳到别的网站就不跟', redirectedRegistry.ok === false && redirectedRegistry.code === 'network')
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)
