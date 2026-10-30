@@ -158,6 +158,12 @@ window.__ModuleLoader__.load({
         kind: 'text',
         hint: '留空 = $DSH_HOME/napcat。自己装的或 Docker 里的 NapCat 不在这个默认位置，请填实际目录。',
       },
+      {
+        key: 'napcatWebuiUrl',
+        label: 'NapCat 网页管理地址',
+        kind: 'text',
+        hint: '可选。留空就读安装目录里的 webui.json。那边通常是 127.0.0.1，只有跑着 NapCat 的那台机器能打开。远程使用时填一个外面打得开的地址。',
+      },
       { key: 'napcatVersion', label: '要下载的 NapCat 版本', kind: 'text', hint: '例如 v4.18.28。留空 = 下载最新版。' },
       { key: 'downloadProxy', label: '下载时走的代理', kind: 'text', hint: '例如 http://127.0.0.1:7890。留空 = 先看环境变量，没有就直接下载。' },
       {
@@ -615,47 +621,58 @@ window.__ModuleLoader__.load({
         )
       }
 
-      // “打开 WebUI”只在真读到 webui.json 时可点 —— 地址里带着 token，不给猜的余地。
+      // 地址由宿主拼好：填了「NapCat 网页管理地址」就用它，否则用 webui.json。
+      // 回环地址按钮保持可点（本机用户需要），旁边说明只有跑着 NapCat 的机器打得开。
       const webuiUrl = napcat && typeof napcat.webuiUrl === 'string' ? napcat.webuiUrl : ''
+      const webuiHint = napcat && typeof napcat.webuiHint === 'string' ? napcat.webuiHint : ''
+      const dirHint = napcat && typeof napcat.installDirMissingHint === 'string' ? napcat.installDirMissingHint : ''
       // 宿主报的 running 是权威判据（含外部启动的 NapCat）。拿不到状态时按未运行处理。
       const napcatRunning = napcat !== null && napcat.running === true
       const napcatOps = h(
         'div',
-        { style: S.ops },
+        { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
         h(
-          'button',
-          {
-            type: 'button',
-            style: disabled(S.btn, webuiUrl === '' || napcatBusy !== ''),
-            disabled: webuiUrl === '' || napcatBusy !== '',
-            onClick: () => {
-              if (webuiUrl !== '') window.open(webuiUrl, '_blank', 'noopener')
+          'div',
+          { style: S.ops },
+          h(
+            'button',
+            {
+              type: 'button',
+              style: disabled(S.btn, webuiUrl === '' || napcatBusy !== ''),
+              disabled: webuiUrl === '' || napcatBusy !== '',
+              onClick: () => {
+                if (webuiUrl !== '') window.open(webuiUrl, '_blank', 'noopener')
+              },
             },
-          },
-          '打开 WebUI',
+            '打开 WebUI',
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              style: disabled(S.btn, napcatRunning || napcatBusy !== ''),
+              disabled: napcatRunning || napcatBusy !== '',
+              onClick: () => postNapcat('launch', '已启动 NapCat'),
+            },
+            napcatRunning ? '已在运行' : napcatBusy === 'launch' ? '启动中…' : '启动 NapCat',
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              style: disabled(S.btn, napcatBusy !== ''),
+              disabled: napcatBusy !== '',
+              onClick: () =>
+                postNapcat('reveal', napcat && napcat.installDir ? `已打开文件夹：${napcat.installDir}` : '已打开文件夹'),
+            },
+            napcatBusy === 'reveal' ? '打开中…' : '打开文件夹',
+          ),
         ),
-        h(
-          'button',
-          {
-            type: 'button',
-            style: disabled(S.btn, napcatRunning || napcatBusy !== ''),
-            disabled: napcatRunning || napcatBusy !== '',
-            onClick: () => postNapcat('launch', '已启动 NapCat'),
-          },
-          napcatRunning ? '已在运行' : napcatBusy === 'launch' ? '启动中…' : '启动 NapCat',
-        ),
-        h(
-          'button',
-          {
-            type: 'button',
-            style: disabled(S.btn, napcatBusy !== ''),
-            disabled: napcatBusy !== '',
-            onClick: () =>
-              postNapcat('reveal', napcat && napcat.installDir ? `已打开文件夹：${napcat.installDir}` : '已打开文件夹'),
-          },
-          napcatBusy === 'reveal' ? '打开中…' : '打开文件夹',
-        ),
-        webuiUrl === '' ? h('span', { style: S.hint }, '没读到 webui.json') : null,
+        webuiUrl === ''
+          ? h('div', { style: S.hint }, '没读到 webui.json。远程或自己部署时，请填写上面的「NapCat 网页管理地址」。')
+          : null,
+        webuiUrl !== '' && webuiHint !== '' ? h('div', { style: S.hint }, webuiHint) : null,
+        dirHint !== '' ? h('div', { style: S.hint }, dirHint) : null,
       )
 
       const header = h(

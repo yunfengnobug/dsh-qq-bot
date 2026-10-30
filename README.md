@@ -152,6 +152,8 @@ QQ 消息 ─┬─ 不在白名单 ──────────────�
 
 插件可以按需从官方 GitHub Releases 下载、校验、解包、写配置、启停 NapCat，不预先打包 NapCat。
 
+**NapCat 已经自己部署好**（包括 Docker、另一台机器上的实例）时，下面的下载、解包和安装器可以整段跳过。仍要让 `onebotUrl` 和 `onebotPort` 跟那边的 OneBot 正向 WebSocket 一致，并在「NapCat 安装目录」里填实际路径。默认的 `$DSH_HOME/napcat` 在这种装法里往往不存在；目录不存在时「打开文件夹」不会去猜路径，只提示你改设置。
+
 在会话里调用 `qq_bridge_napcat` 工具，按以下顺序执行：
 
 | 步骤 | 调用 | 说明 |
@@ -335,14 +337,13 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 卡片展开后还有 3 个操作按钮（0.1.5 与 0.2.0 上都有）：
 
-- **打开 WebUI**：用系统默认浏览器打开 NapCat 的 WebUI。地址由 `<安装目录>/config/webui.json` 里的
-  host / port / token 拼成；没读到该文件时按钮禁用，旁边显示“没读到 webui.json”。
+- **打开 WebUI**：用浏览器打开 NapCat 的 WebUI。填了 `napcatWebuiUrl` 就打开那个地址（地址本身没带 token 时，会补上 `webui.json` 里的 token）。没填则用 `<安装目录>/config/webui.json` 里的 host / port / token；文件不存在时仍按 `127.0.0.1:6099` 打开，按钮保持可点。地址是 `127.0.0.1` 或 `localhost` 时，旁边会写明只有跑着 NapCat 的那台机器能打开。
 - **启动 NapCat**：与工具 `qq_bridge_napcat` 的 `launch` 是同一个动作。目录里有官方
   `launcher-win10.bat` 时优先调用该脚本，脚本会自我提权，**可能弹出 UAC 窗口**。
   NapCat 运行中时，按钮显示“已在运行”并禁用；外部手动启动的 NapCat 也算运行中。
   卡片展开期间每 5 秒轮询一次状态，所以外部启动后按钮会自己变化。
 - **打开文件夹**：用系统文件管理器打开 NapCat 安装目录（Windows 用 `explorer.exe`，macOS 用 `open`，
-  Linux 用 `xdg-open`）。
+  Linux 用 `xdg-open`）。目录不存在时不打开，卡片上会提示：自己部署或 Docker 里的路径通常不是默认值，请填写「NapCat 安装目录」。
 
 这 3 个按钮走 `GET /api/qq-bridge/napcat`、`POST /api/qq-bridge/napcat/launch`、
 `POST /api/qq-bridge/napcat/reveal`，准入与设置接口相同：本机可以直接用，反向代理要带已登录的面板会话。没有会话的外网请求 403。请求进行中按钮禁用，token 只拼进 URL 不写日志。
@@ -378,6 +379,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `selfId` | `''` | 机器人自己的 QQ 号；空 = 连上后自动读取 |
 | `heartbeatTimeoutMs` | `90000` | 多久没收到连接数据就判定断线并重连 |
 | `napcatInstallDir` | `''` | NapCat 安装目录；空 = `$DSH_HOME/napcat`。自己装的或 Docker 里的请填实际目录 |
+| `napcatWebuiUrl` | `''` | NapCat 网页管理地址。空 = 读 `webui.json`（通常是 `127.0.0.1`，只有跑着 NapCat 的机器能打开）。远程使用时填外面打得开的地址 |
 | `napcatVersion` | `''` | 要下载的 NapCat 版本；空 = 最新 |
 | `downloadProxy` | `''` | 下载时走的代理；空 = 读环境变量 |
 | `onebotPort` | `3001` | OneBot 端口。自己另外部署的 NapCat 要和这边一致 |
@@ -479,7 +481,7 @@ QQ 侧没有人能点击“同意”，因此：
 
 改用法、设置或运行行为时，同一次提交里更新本文件。约定见 [`AGENTS.md`](./AGENTS.md)。
 
-4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **518 条断言**：
+4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **525 条断言**：
 
 ```powershell
 node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具 + 设置卡片字段（假 ctx，纯离线）

@@ -40,6 +40,8 @@
         # 一切动作都要靠显式调用 qq_bridge_napcat 工具触发。
         # NapCat 安装目录；留空 = $DSH_HOME/napcat
         napcatInstallDir: ''
+        # 对外可打开的 NapCat WebUI。留空 = 读 webui.json（通常是 127.0.0.1，只在跑 NapCat 的机器上打得开）。
+        napcatWebuiUrl: ''
         # 要装的版本 tag（如 v4.18.28）；留空 = 最新
         napcatVersion: ''
         # 下载用的 HTTP 代理。**本机直连 GitHub 不通**，走代理才行，例如

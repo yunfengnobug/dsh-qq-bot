@@ -1009,7 +1009,7 @@ function sawSentText(s) {
   check('注册了 settings 命名空间 qq-bridge', registeredSettings.length === 1 && reg?.ns === 'qq-bridge', String(reg?.ns))
   const dict = reg?.schema?.dict ?? {}
   const keys = Object.keys(dict)
-  check('settings 键数量符合预期（25）', keys.length === 25, `实际 ${keys.length}`)
+  check('settings 键数量符合预期（26）', keys.length === 26, `实际 ${keys.length}`)
   const missing = keys.filter((k) => String(dict[k]?.meta?.description ?? '').trim() === '')
   check('每个 settings 键都有说明（设置界面里能看懂）', missing.length === 0, missing.join(', '))
   // readSettings() 会读到的键必须都在 Schema 里，否则用户在界面上改不到它
@@ -1296,6 +1296,12 @@ function sawSentText(s) {
       const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k))
       const replyModeField = (mod.__test?.fields ?? []).find((x) => x.key === 'replyMode')
       const deliveryField = (mod.__test?.fields ?? []).find((x) => x.key === 'delivery')
+      const webuiField = (mod.__test?.fields ?? []).find((x) => x.key === 'napcatWebuiUrl')
+      check(
+        'NapCat 网页管理地址：白话说明，键仍是英文',
+        webuiField?.label === 'NapCat 网页管理地址' && /127\.0\.0\.1/.test(String(webuiField?.hint ?? '')),
+        JSON.stringify(webuiField),
+      )
       check(
         '群里发出去的是哪一段：三个选项是白话',
         replyModeField?.label === '群里发出去的是哪一段' &&
@@ -1896,6 +1902,16 @@ function sawSentText(s) {
     String(got.installed),
   )
   check(
+    'GET /napcat：回环地址仍可打开，并标明只有本机能用',
+    got.webuiLoopbackOnly === true && String(got.webuiHint).includes('127.0.0.1') && String(got.webuiUrl).includes('127.0.0.1'),
+    JSON.stringify({ webuiLoopbackOnly: got.webuiLoopbackOnly, hint: got.webuiHint, url: got.webuiUrl }),
+  )
+  check(
+    'GET /napcat：安装目录存在时不提示缺失',
+    got.installDirExists === true && got.installDirMissingHint === undefined,
+    JSON.stringify({ installDirExists: got.installDirExists, hint: got.installDirMissingHint }),
+  )
+  check(
     'GET /napcat：running / startedByPlugin 都是布尔量',
     typeof got.running === 'boolean' && typeof got.startedByPlugin === 'boolean',
     JSON.stringify({ running: got.running, startedByPlugin: got.startedByPlugin }),
@@ -2021,6 +2037,47 @@ function sawSentText(s) {
     `${resMethodMiss.out.status} ${errOf(resMethodMiss)}`,
   )
 
+  // 填了对外地址就用它。webui.json 里的 token 只在地址自己没带 token 时补上。不使用真实域名。
+  const mountNapcat = (extra) => {
+    const localRoutes = []
+    const localCtx = {
+      ...ctx,
+      settings: { describe: () => [], update: async () => {}, configure: () => () => {} },
+      webServer: { register: (route) => { localRoutes.push(route); return () => {} } },
+    }
+    localCtx.inject = (_deps, cb) => cb(localCtx)
+    apply(localCtx, {
+      ...config,
+      statePath: process.env.TEMP + `/qq-bridge-smoke-webui-${extra.napcatWebuiUrl.length}.json`,
+      napcatInstallDir: installDir,
+      napcatWebuiUrl: extra.napcatWebuiUrl,
+    })
+    return localRoutes.find((r) => r.path === '/api/qq-bridge/napcat')?.handler
+  }
+  const resPublic = makeRes()
+  await mountNapcat({ napcatWebuiUrl: 'https://example.invalid/webui' })(req('GET', { url: '/api/qq-bridge/napcat' }), resPublic)
+  const pub = JSON.parse(resPublic.out.body)
+  check(
+    'GET /napcat：填写了网页管理地址就用它，并补上 webui.json 里的 token',
+    resPublic.out.status === 200 &&
+      String(pub.webuiUrl).startsWith('https://example.invalid/webui') &&
+      String(pub.webuiUrl).includes('token=tok123') &&
+      pub.webuiLoopbackOnly === false &&
+      pub.webuiHint === '',
+    String(pub.webuiUrl),
+  )
+  const resKept = makeRes()
+  await mountNapcat({ napcatWebuiUrl: 'https://example.invalid/webui?token=keep-me' })(
+    req('GET', { url: '/api/qq-bridge/napcat' }),
+    resKept,
+  )
+  const kept = JSON.parse(resKept.out.body)
+  check(
+    'GET /napcat：地址里已有 token 时不换成 webui.json 的 token',
+    String(kept.webuiUrl).includes('token=keep-me') && !String(kept.webuiUrl).includes('tok123'),
+    String(kept.webuiUrl),
+  )
+
   // launch / reveal 在测试机上必然失败（没有 NapCat，也不该真去开文件管理器），
   // 但必须**回 JSON 而不是抛** —— 抛出去会让宿主那条请求挂死。
   // 这里用 legacy 那份路由：它的 installDir 是不存在的目录，所以 reveal 不会真的启动进程。
@@ -2041,6 +2098,29 @@ function sawSentText(s) {
       `${res.out.status} ${String(res.out.body).slice(0, 120)}`,
     )
   }
+
+  const legacyGet = capturedRoutes.find((r) => r.path === '/api/qq-bridge/napcat')?.handler
+  const resMissing = makeRes()
+  await legacyGet(req('GET', { url: '/api/qq-bridge/napcat' }), resMissing)
+  const missing = JSON.parse(resMissing.out.body)
+  check(
+    'GET /napcat：安装目录不存在时说明自己部署要另填路径',
+    missing.installDirExists === false &&
+      /自己部署或 Docker/.test(String(missing.installDirMissingHint)) &&
+      /不会猜/.test(String(missing.installDirMissingHint)),
+    String(missing.installDirMissingHint),
+  )
+  const resRevealMissing = makeRes()
+  await legacyReveal(req('POST', { url: '/api/qq-bridge/napcat/reveal' }), resRevealMissing)
+  const revealMissing = JSON.parse(resRevealMissing.out.body)
+  check(
+    'POST /napcat/reveal：目录不存在时说明原因，且不打开文件管理器',
+    resRevealMissing.out.status === 200 &&
+      revealMissing.ok === false &&
+      /自己部署或 Docker/.test(String(revealMissing.error)) &&
+      /不会猜/.test(String(revealMissing.error)),
+    String(revealMissing.error),
+  )
 
   rmSync(installDir, { recursive: true, force: true })
 }

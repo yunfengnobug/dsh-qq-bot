@@ -135,6 +135,7 @@ export const Config = Schema.object({
   // 注意：这些只是**参数**；插件加载时绝不下载或执行任何东西，
   // 一切都要靠显式调用 qq_bridge_napcat 工具。
   napcatInstallDir: Schema.string().default('').description('NapCat 安装目录。留空 = $DSH_HOME/napcat。自己装的或 Docker 里的不在这个位置时，填实际目录。'),
+  napcatWebuiUrl: Schema.string().default('').description('NapCat 网页管理地址。留空 = 读安装目录里的 webui.json。那边通常是 127.0.0.1，只有跑着 NapCat 的那台机器能打开。远程使用时填一个外面打得开的地址。'),
   napcatVersion: Schema.string().default('').description('要下载的 NapCat 版本，例如 v4.18.28。留空 = 最新。'),
   napcatAsset: Schema.string().default(DEFAULT_ASSET).description('要下载的安装包文件名。'),
   downloadProxy: Schema.string().default('').description('下载时走的代理，例如 http://127.0.0.1:7890。留空 = 先看环境变量，没有就直接下载。'),
@@ -180,6 +181,7 @@ const BridgeSettings = Schema.object({
   agentPreset: Schema.string().default('').description('人设预设。留空 = 沿用会话自己记着的。'),
   // M5
   napcatInstallDir: Schema.string().default('').description('NapCat 安装目录。留空 = $DSH_HOME/napcat。自己装的或 Docker 里的不在这个位置时，填实际目录。'),
+  napcatWebuiUrl: Schema.string().default('').description('NapCat 网页管理地址。留空 = 读安装目录里的 webui.json。那边通常是 127.0.0.1，只有跑着 NapCat 的那台机器能打开。远程使用时填一个外面打得开的地址。'),
   napcatVersion: Schema.string().default('').description('要下载的 NapCat 版本，例如 v4.18.28。留空 = 最新。'),
   downloadProxy: Schema.string().default('').description('下载时走的代理。留空 = 先看环境变量，没有就直接下载。'),
   onebotPort: Schema.number().default(3001).description('OneBot 端口。自己另外部署的 NapCat，这里要和那边的端口一致。'),
@@ -373,6 +375,7 @@ export function apply(ctx, config) {
         replyMode: normalizeReplyMode(config.replyMode),
         delivery: normalizeDelivery(config.delivery),
         napcatInstallDir: config.napcatInstallDir ?? '',
+        napcatWebuiUrl: config.napcatWebuiUrl ?? '',
         napcatVersion: config.napcatVersion ?? '',
         downloadProxy: config.downloadProxy ?? '',
         onebotPort: config.onebotPort ?? 3001,
@@ -426,6 +429,7 @@ export function apply(ctx, config) {
       agentPreset: String(s.agentPreset ?? config.agentPreset ?? '').trim(),
       heartbeatTimeoutMs: Math.max(10000, Number(config.heartbeatTimeoutMs ?? 90000)),
       napcatInstallDir: String(s.napcatInstallDir ?? config.napcatInstallDir ?? '').trim(),
+      napcatWebuiUrl: String(s.napcatWebuiUrl ?? config.napcatWebuiUrl ?? '').trim(),
       napcatVersion: String(s.napcatVersion ?? config.napcatVersion ?? '').trim(),
       downloadProxy: String(s.downloadProxy ?? config.downloadProxy ?? '').trim(),
       onebotPort: Math.max(1, Math.min(65535, Number(s.onebotPort ?? config.onebotPort ?? 3001))),
@@ -3147,9 +3151,44 @@ export function apply(ctx, config) {
   // ⚠️ 这三条路由**不受 legacySettings 门控**：它们只管启动与打开，跟“设置值存在哪”无关，
   //    两代宿主都要挂。准入与设置接口相同：本机可以直接用，反向代理要带已登录的面板会话。
 
+  /** 回环 WebUI 打不开时给卡片的说明。不含 token。 */
+  const WEBUI_LOOPBACK_HINT =
+    '这个地址是 127.0.0.1 或 localhost，只有跑着 NapCat 的那台机器能打开。远程使用请填写「NapCat 网页管理地址」。'
+
+  /** 安装目录不存在。把用户填过的路径说出来，但不另猜一个目录。 */
+  function napcatDirMissingMessage(installDir) {
+    return `目录不存在：${installDir}。自己部署或 Docker 里的 NapCat 通常不在默认位置，请把「NapCat 安装目录」改成实际路径。插件不会猜一个路径。`
+  }
+
+  /** 公开地址没带 token 时，补上 webui.json 里的那个。已有 token 则保持原样。解析失败就原样返回。 */
+  function appendWebuiToken(url, token) {
+    if (token === '') return url
+    let parsed
+    try {
+      parsed = new URL(url)
+    } catch {
+      return url
+    }
+    const existing = parsed.searchParams.get('token')
+    if (existing !== null && existing !== '') return url
+    parsed.searchParams.set('token', token)
+    return parsed.toString()
+  }
+
+  function webuiUrlIsLoopback(url) {
+    try {
+      return isLoopbackHost(new URL(url).hostname)
+    } catch {
+      return false
+    }
+  }
+
   /**
-   * 读 NapCat 的 WebUI 地址（`<configDir>/webui.json`）。
+   * 读 NapCat 的 WebUI 地址。
    *
+   * 设置里填了 `napcatWebuiUrl` 就用它（没带 token 时才从 webui.json 补上）。
+   * 没填则读 `<configDir>/webui.json`；文件没有时仍按 127.0.0.1:6099 给出地址，按钮保持可点，
+   * 并用 webuiLoopbackOnly / webuiHint 说明只有本机打得开。
    * configDir 的取法与 napcatConfigure 一致：安装目录里没有 `config/` 时，用 QQ 那边已有的那个。
    * 返回值里**只有布尔量**说明 token 有没有；token 本身只拼进 webuiUrl，绝不写日志。
    */
@@ -3163,12 +3202,23 @@ export function apply(ctx, config) {
       const parsed = JSON.parse(readFileSync(join(configDir, 'webui.json'), 'utf8'))
       cfg = parsed && typeof parsed === 'object' ? parsed : undefined
     } catch {
-      // 文件不存在或不是 JSON 都当“没读到” —— 卡片上会显示“没读到 webui.json”。
       cfg = undefined
     }
     const host = String(cfg?.host || '127.0.0.1')
     const port = Number(cfg?.port ?? 6099) || 6099
     const token = typeof cfg?.token === 'string' ? cfg.token : ''
+    const fromFile = `http://${host}:${port}/webui${token === '' ? '' : `?token=${encodeURIComponent(token)}`}`
+    const override = String(s.napcatWebuiUrl || '').trim()
+    const webuiUrl = override === '' ? fromFile : appendWebuiToken(override, token)
+    const loopback = webuiUrlIsLoopback(webuiUrl)
+    const installDirExists = existsSync(installDir)
+    let webuiHint = ''
+    if (loopback) {
+      webuiHint =
+        cfg === undefined && override === ''
+          ? '没读到 webui.json，先按本机 127.0.0.1:6099 打开。这个地址只有跑着 NapCat 的那台机器能用。远程使用请填写「NapCat 网页管理地址」。'
+          : WEBUI_LOOPBACK_HINT
+    }
     return {
       ok: true,
       installDir,
@@ -3176,7 +3226,11 @@ export function apply(ctx, config) {
       configFound: cfg !== undefined,
       port,
       hasToken: token !== '',
-      webuiUrl: `http://${host}:${port}/webui${token === '' ? '' : `?token=${encodeURIComponent(token)}`}`,
+      webuiUrl,
+      webuiLoopbackOnly: loopback,
+      webuiHint,
+      installDirExists,
+      ...(installDirExists ? {} : { installDirMissingHint: napcatDirMissingMessage(installDir) }),
     }
   }
 
@@ -3184,7 +3238,7 @@ export function apply(ctx, config) {
   function revealNapcatDir() {
     const s = readSettings()
     const installDir = s.napcatInstallDir || defaultInstallDir(home)
-    if (!existsSync(installDir)) throw new Error(`目录不存在：${installDir}`)
+    if (!existsSync(installDir)) throw new Error(napcatDirMissingMessage(installDir))
     const command =
       process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open'
     const child = spawn(command, [installDir], { detached: true, stdio: 'ignore' })
