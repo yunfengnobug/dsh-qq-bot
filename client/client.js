@@ -35,6 +35,12 @@ window.__ModuleLoader__.load({
     // 加一个设置项 = 在这里加一行。kind: text | list | number | boolean | select
     const FIELDS = [
       {
+        key: 'checkUpdateOnStart',
+        label: '启动时检查一次',
+        kind: 'boolean',
+        hint: '默认关。打开并保存后，下次启动 dsh-web 会向 GitHub 问一次有没有新版本，只写在日志里，不会自动安装。平时用上面的「检查更新」就够了。',
+      },
+      {
         key: 'sessionScope',
         label: '会话怎么分',
         kind: 'select',
@@ -349,6 +355,11 @@ window.__ModuleLoader__.load({
       // NapCat 的三个操作按钮：展开时拉一次接口；拿不到就保持 null（按钮禁用）。
       const [napcat, setNapcat] = react.useState(null)
       const [napcatBusy, setNapcatBusy] = react.useState('')
+      const [pluginVersion, setPluginVersion] = react.useState('')
+      const [versionState, setVersionState] = react.useState('loading')
+      const [updateBusy, setUpdateBusy] = react.useState(false)
+      const [updateNote, setUpdateNote] = react.useState('')
+      const [updateIsError, setUpdateIsError] = react.useState(false)
 
       const current = react.useMemo(() => draftFrom(snap.value), [snap.value])
       const shown = draft ?? current
@@ -403,6 +414,74 @@ window.__ModuleLoader__.load({
       // 展开卡片时读一次 NapCat 状态，之后每 5 秒轮询一次。
       // 轮询用于识别外部启动：用户在别处手动跑了 bat 时，只有重新拉取才能把按钮改成“已在运行”。
       // 卡片收起或组件卸载时清掉定时器，不让它在后台一直跑。
+      react.useEffect(() => {
+        if (!open) return undefined
+        let alive = true
+        if (typeof fetch !== 'function') return undefined
+        fetch(UPDATE_API, { credentials: 'include', headers: { accept: 'application/json' } })
+          .then((res) => res.json().catch(() => null))
+          .then((body) => {
+            if (!alive) return
+            if (body && body.ok === true && body.current) {
+              setPluginVersion(String(body.current))
+              setVersionState('ready')
+              return
+            }
+            setVersionState('missing')
+          })
+          .catch(() => {
+            // 读不到版本就留一句白话，不把异常原文摆出来。
+            if (alive) setVersionState('missing')
+          })
+        return () => {
+          alive = false
+        }
+      }, [open])
+
+      function plainUpdateText(value, ok) {
+        const text = String(value ?? '').trim()
+        if (text === '') return ok ? '检查完成。' : '检查更新失败，稍后再试。'
+        if (!ok && (/TypeError|fetch failed|ECONN|ENOTFOUND|API rate limit/i.test(text) || /\n\s+at /.test(text))) {
+          if (/rate limit/i.test(text)) return 'GitHub 限流了，等一会儿再点「检查更新」。'
+          return '连不上 GitHub，这次没有检查到更新。稍后再试。'
+        }
+        return text
+      }
+
+      async function checkForUpdate() {
+        setUpdateBusy(true)
+        setUpdateNote('')
+        setUpdateIsError(false)
+        try {
+          if (typeof fetch !== 'function') {
+            setUpdateIsError(true)
+            setUpdateNote('这个页面没有网络接口，检查不了更新。')
+            return
+          }
+          const res = await fetch(UPDATE_API, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { accept: 'application/json', 'content-type': 'application/json' },
+            body: '{}',
+          })
+          const body = await res.json().catch(() => null)
+          if (!body || typeof body !== 'object') {
+            setUpdateIsError(true)
+            setUpdateNote('检查更新没有返回能看懂的结果。稍后再试。')
+            return
+          }
+          if (body.current) setPluginVersion(String(body.current))
+          const ok = body.ok === true
+          setUpdateIsError(!ok)
+          setUpdateNote(plainUpdateText(ok ? body.message : body.error, ok))
+        } catch {
+          setUpdateIsError(true)
+          setUpdateNote('连不上本机的检查更新接口。确认 dsh-web 在跑，稍后再试。')
+        } finally {
+          setUpdateBusy(false)
+        }
+      }
+
       react.useEffect(() => {
         if (!open) return undefined
         let alive = true
@@ -690,14 +769,46 @@ window.__ModuleLoader__.load({
         'button',
         { type: 'button', onClick: () => setOpen(!open), 'aria-expanded': open, style: S.header },
         h('span', { style: S.title }, 'QQ 桥接'),
-        h('span', { style: S.sub }, dirty ? '有未保存的改动' : '把固定的 DSH 会话接到 QQ'),
+        h('span', { style: S.sub }, dirty ? '有未保存的改动' : pluginVersion ? `当前版本 ${pluginVersion}` : '把固定的 DSH 会话接到 QQ'),
         h('span', { style: S.chevron }, open ? '▴' : '▾'),
       )
+      const versionLine = pluginVersion
+        ? `当前版本 ${pluginVersion}`
+        : versionState === 'loading'
+          ? '正在读取当前版本…'
+          : '当前版本暂时读不到。确认 dsh-web 已重启后再打开这张卡片。'
+      const updateBox = h(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+        h('div', { style: S.sub }, versionLine),
+        h(
+          'div',
+          { style: S.ops },
+          h(
+            'button',
+            {
+              type: 'button',
+              style: disabled(S.btn, updateBusy),
+              disabled: updateBusy,
+              onClick: () => {
+                checkForUpdate()
+              },
+            },
+            updateBusy ? '检查中…' : '检查更新',
+          ),
+        ),
+        h('div', { style: S.hint }, '向 GitHub 问一次有没有新版本。不会自动下载，也不会自动安装。'),
+        updateNote
+          ? h('div', { style: { ...(updateIsError ? S.err : S.note), whiteSpace: 'pre-wrap' } }, updateNote)
+          : null,
+      )
+
       if (!open) return h('div', { style: S.wrap }, header)
       return h(
         'div',
         { style: S.wrap },
         header,
+        updateBox,
         h('div', { style: S.grid }, rows),
         napcatOps,
         h(
@@ -755,6 +866,8 @@ window.__ModuleLoader__.load({
     const API_PATH = '/api/qq-bridge/settings'
     /** NapCat 操作接口（宿主半不受 legacy 门控，两代宿主都挂）。 */
     const NAPCAT_API = '/api/qq-bridge/napcat'
+    /** 检查更新。GET 只读当前版本，POST 才访问 GitHub。 */
+    const UPDATE_API = '/api/qq-bridge/update'
     /** 稳定引用：useSyncExternalStore 的 getSnapshot 每次返回新对象会死循环。 */
     const LOADING_SNAPSHOT = { status: 'loading' }
     const UNAVAILABLE_SNAPSHOT = { status: 'unavailable' }

@@ -10,25 +10,21 @@
 
 **Cordis 插件 id 仍是 `qq-bridge`**（`cordis.patch.yml` 里的 `id`）。包名和界面显示名是 **dsh-qq-bot**。已有 profile 里按 `id: qq-bridge` 写的覆盖继续生效。设置命名空间、状态文件和 `/api/qq-bridge/...` 也沿用这个 id，避免升级时对不上。
 
-```sh
-dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
-```
-
-指定某次提交时：
+**想装：** 用已经发布的 tag，不要盯着 main。
 
 ```sh
-dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
 ```
 
-> 上游由 DSH 写成。本 fork 的改动见 [`CHANGELOG.md`](./CHANGELOG.md)。
+在 GitHub 上 Watch → Custom → **Releases**，比盯 main 稳。环境、第一次怎么开白名单、怎么升级、和官方插件为什么不能一起挂，写在[安装](#安装)。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
-- 当前版本 **v0.2.3**（商城表情按 QQ 原生表情包发送，普通图片仍是图片。见 [`CHANGELOG.md`](./CHANGELOG.md)）
+- 源码版本 **0.2.4**（设置页可以检查更新）。GitHub 上已发布的稳定版仍是 **v0.2.3**，日常安装用上面的 `#v0.2.3`。打出新的 Release 之后，把命令里的 tag 换成那一版；卡片上的「检查更新」也会给出当时的安装命令。见 [`CHANGELOG.md`](./CHANGELOG.md)。
 - **M1–M8 全部完成**，已在**真实 NapCat + 真实 QQ** 上端到端跑通（Windows 真机）
 
 ## 目录
 
-[功能](#功能) ｜ [安装](#安装) ｜ [唤醒策略](#唤醒策略) ｜ [接入 QQ](#接入-qqonebot--napcat)
+[功能](#功能) ｜ [安装](#安装) ｜ [npm](#用-npm-安装) ｜ [插件市场](#插件市场) ｜ [唤醒策略](#唤醒策略) ｜ [接入 QQ](#接入-qqonebot--napcat)
 ｜ [NapCat 一键托管](#napcat-一键托管) ｜ [出站](#出站三种模式--来源闸门) ｜ [消息与图片](#消息占位符戳一戳图片)
 ｜ [表情包](#表情包) ｜ [设置界面](#设置界面与全部设置项) ｜ [注入的系统提示](#注入给目标会话的系统提示) ｜ [无人值守边界](#无人值守的安全边界不提供审批桥接)
 ｜ [上下文上限](#上下文上限) ｜ [工具一览](#工具一览) ｜ [已知限制](#已知限制与环境要求) ｜ [测试](#测试) ｜ [路线](#路线)
@@ -59,29 +55,123 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
 
 ## 安装
 
-**正式安装**（从 GitHub）：
+稳定版看 [Releases](https://github.com/yunfengnobug/dsh-qq-bot/releases)。已经发出的是 **v0.2.3**。仓库源码如果已经是 0.2.4，那是 main 上还没打 tag 的版本，日常不要装 main。
+
+```sh
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
+```
+
+不写 tag 会装 main 上最新一次提交。主分支随时在改，日常别用这条：
 
 ```sh
 dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
 ```
 
-**开发期**（修改本仓库代码时用 link 安装）：
+装完要重启 `dsh web`（面板里就是重启 dsh-web），插件才会加载。
+
+### 环境
+
+和[已知限制](#已知限制与环境要求)同一套，没有另写一份要求：
+
+- **DSH**：0.1.5-rc.3 能用；0.2.0 及以后也能用。0.2.0 起宿主不给第三方插件可写设置域，本插件自己挂设置接口，卡片照常能改。
+- **NapCat**：OneBot v11 的正向 WebSocket。真机结论来自 **Windows 10 + NapCat Shell**（记录过 4.18.28）。仓库没有承诺更低的 NapCat 版本。NapCat 发行说明里的最低 QQ NT 构建号是 **40768**。主动戳人还要落在官方说的 **40768–44343**；真机上的 QQ 9.9.36-53644 发不出主动戳，别人戳我仍然会叫醒。
+- **Node ≥ 22**。插件用 Node 自带的 WebSocket，测试套件同样要求。
+
+### 第一次用
+
+白名单默认全关。私聊和群都是空的，这时候 @ 也不会醒。
+
+打开 **设置 → 插件 → 插件配置 → QQ 桥接**，先填「哪些群可以叫醒」或「哪些私聊可以叫醒」，保存，再去 @。例子里只用占位号，比如群 `123456789`。不要把真实群号、QQ 号写进仓库、Issue 或截图说明。
+
+### 升级
+
+三条路。装完都要重启 dsh-web：
+
+1. 面板的插件管理里升级（有这个入口再用）。
+2. 指定新 tag：`dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#vX.Y.Z`
+3. 卸掉再装同一条命令，然后重启。
+
+### 不要和官方插件一起挂
+
+官方仓库是 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge)。两边的 Cordis id 都是 `qq-bridge`，连的是同一个 OneBot。一起装会抢这条连接，消息对不上。只用其中一个。
+
+从官方换成这个 fork 时，包名一般是 `dsh-qq-bridge`。下面没有真实路径，profile 用你自己的：
+
+```sh
+dsh plugin --profile web remove dsh-qq-bridge
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
+```
+
+然后重启 dsh-web。profile 里原来按 `id: qq-bridge` 写的覆盖可以留着。`list` 里如果包名不是 `dsh-qq-bridge`，卸你看到的那一个官方包，不要卸别的插件。
+
+### 开发期
+
+改本仓库代码时用本地目录：
 
 ```powershell
 dsh plugin --profile web add "<REPO>"   # <REPO> = 本仓库在你机器上的绝对路径
 ```
 
-> 注意：`link:` 安装的依赖解析可能失败。`dsh plugin add <本地目录>` 安装的是**符号链接**，
-> Node 按真实路径解析依赖，而 DSH 的包位于 `~/.dsh/profiles/node_modules/@deepseek-ai`，
-> 从工作区向上找不到该目录，插件 `import` 因此失败。解决办法是在插件目录里挂一个 junction：
->
-> ```powershell
-> New-Item -ItemType Junction `
->   -Path "<REPO>\node_modules\@deepseek-ai" `
->   -Target "$env:USERPROFILE\.dsh\profiles\node_modules\@deepseek-ai"
-> ```
+`dsh plugin add <本地目录>` 装的是符号链接。Node 按真实路径找依赖，DSH 的包在 `~/.dsh/profiles/node_modules/@deepseek-ai`，从工作区向上找不到，插件 `import` 会失败。在插件目录挂一个 junction：
 
-装完、以及每次修改插件代码之后，都要重启 `dsh web` 才会加载。
+```powershell
+New-Item -ItemType Junction `
+  -Path "<REPO>\node_modules\@deepseek-ai" `
+  -Target "$env:USERPROFILE\.dsh\profiles\node_modules\@deepseek-ai"
+```
+
+每次改完插件代码，重启 `dsh web` 再刷新页面。
+
+### 以后怎么发版
+
+维护者按这个顺序，不要跳：
+
+1. 改 `package.json` 的 `version`。
+2. 在 [`CHANGELOG.md`](./CHANGELOG.md) 顶部写这一版做了什么。
+3. 提交并合进 main。
+4. 在含这个版本号的提交上打 annotated tag：`vX.Y.Z`。
+5. 用 CHANGELOG 里对应那一节的中文摘要发 GitHub Release。
+
+Release 不附带密钥、日志或本机文件。源码压缩包让 GitHub 自己生成即可，不必另外上传。用户侧安装始终用 `#vX.Y.Z`，不要把 main 当稳定版。npm 不是这条流程的必经步骤，见[用 npm 安装](#用-npm-安装)。
+
+## 用 npm 安装
+
+日常请用上面的 GitHub Release。`dsh plugin` 是 pnpm 的包装；维护者把包发到 npm 之后，也可以按包名装：
+
+```sh
+dsh plugin --profile web add dsh-qq-bot@0.2.4
+```
+
+包还没发布时这条会失败，改回 GitHub：
+
+```sh
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.3
+```
+
+某台机器上的 `dsh plugin --help` 如果只认 `github:`，就继续用 Release tag。GitHub 是主路径，npm 是辅路径。
+
+维护者自己发布（仓库里没有 npm token，也不会在 CI 里代发）：
+
+1. `npm login`
+2. 确认 `package.json` 的 `version` 和要发的 tag 一致。
+3. `npm pack --dry-run`，看清单里没有测试、密钥、本机路径。
+4. `npm publish`
+
+`files` 是白名单。Node 要求 `>=22`（`engines`）。`@deepseek-ai/*` 仍是 `peerDependencies`，由 DSH 的 profile 提供，不要改成普通 dependencies。
+
+## 插件市场
+
+[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 里已经有上游 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge)。本 fork 还没进索引，所以现在用 GitHub Release 安装。
+
+要申请收录，按[贡献说明](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/main/contributing.md)做：
+
+1. 在 GitHub 仓库页面加上 topic `dsh-plugin`。这个 topic 不会跟着 git 走，要在网页上加。
+2. 把本仓库的 [`docs/awesome-dsh-plugin-entry.yml`](./docs/awesome-dsh-plugin-entry.yml) 复制成对方仓库的 `data/plugins/yunfengnobug__dsh-qq-bot.yml`，提一个 PR。不要改上游那条。一个 PR 最多 3 条。对方的 README 由脚本生成，不要手改。
+3. 描述只写插件实际做的事。`repository` 必须指回本仓库（`package.json` 里已经是了）。yml 里不要手写 `npm:`，市场自己从 registry 认。
+
+npm 发布是可选的。发了，市场才能显示下载量；不发也能收录，安装仍走 GitHub。
+
+用着有问题，到 [Issues](https://github.com/yunfengnobug/dsh-qq-bot/issues/new/choose) 选模板：**连不上**、**不回**、**发不出**。不要在 Issue 里贴真实 QQ 号、群号、token 或服务器地址。
 
 ## 唤醒策略
 
@@ -357,6 +447,10 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 > 宿主 `requestRejection()` 返回空、`undefined` 或 `0` **不算**已登录。已登录只认宿主明确给出的结果：`isAuthenticated`、浏览器会话，或 `admit()` 交回的身份。没有这个结果的外网请求是 403。来源是别的网站、和 `Host` 对不上的请求也是 403，就算带着 cookie 也不行。接口只写 schema 白名单里的键。
 > 判断面板监听器是不是 HTTPS 时，只通过 `ctx.get('webServer')` 读协议，不读 `ctx.webServer`。插件没有把 `webServer` 放进 inject。直接读这个属性会抛错，宿主会把这次请求收成**没有正文的 HTTP 400**，卡片诊断就显示本机接口不可用，即使浏览器里已经登录。读不到这项服务、或读取失败时，按 HTTP 继续做登录判定。
 
+卡片上方显示**当前版本**，并有一个 **检查更新** 按钮。它向本仓库的 GitHub Releases 问一次（`GET/POST /api/qq-bridge/update`，准入和设置接口相同）。GET 只读当前版本，不去 GitHub；只有点按钮的 POST 才去对比。有新版时写出最新版本号、Release 说明摘要，以及 `github:yunfengnobug/dsh-qq-bot#vX.Y.Z` 的安装命令。没有新版、连不上、被 GitHub 限流，都用白话说明。不会自动下载或安装。
+
+「启动时检查一次」默认关。打开并保存后，下次启动 dsh-web 才问一次，结果只写在日志里。
+
 卡片展开后还有 3 个操作按钮（0.1.5 与 0.2.0 上都有）：
 
 - **打开 WebUI**：用浏览器打开 NapCat 的 WebUI。填了 `napcatWebuiUrl` 就打开那个地址（地址本身没带 token 时，会补上 `webui.json` 里的 token）。没填则用 `<安装目录>/config/webui.json` 里的 host / port / token；文件不存在时仍按 `127.0.0.1:6099` 打开，按钮保持可点。地址是 `127.0.0.1` 或 `localhost` 时，旁边会写明只有跑着 NapCat 的那台机器能打开。
@@ -406,6 +500,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `downloadProxy` | `''` | 下载时走的代理；空 = 读环境变量 |
 | `onebotPort` | `3001` | OneBot 端口。自己另外部署的 NapCat 要和这边一致 |
 | `qqNumber` | `''` | 快速登录用的 QQ 号（需先手动登录过一次） |
+| `checkUpdateOnStart` | `false` | 启动时检查一次。默认关。打开后，下次启动 dsh-web 向 GitHub 问一次有没有新版本，只写日志，不自动安装。平时用卡片上的「检查更新」 |
 
 这些值优先从设置界面 / `settings.yaml` 取，未设置时回落到 `cordis.patch.yml` 里的安装配置（composition base）。
 
@@ -503,13 +598,14 @@ QQ 侧没有人能点击“同意”，因此：
 
 改用法、设置或运行行为时，同一次提交里更新本文件。约定见 [`AGENTS.md`](./AGENTS.md)。
 
-4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **679 条断言**：
+5 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器；检查更新不连真 GitHub），共 **718 条断言**：
 
 ```powershell
-node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具（含 mface）+ 系统表情分段 + 设置卡片字段（假 ctx，纯离线）
+node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具（含 mface）+ 系统表情分段 + 设置卡片字段 + 检查更新接口（假 ctx，纯离线）
 node test-onebot.mjs    # M2 端到端：内置最小 OneBot WS 服务器，验证收发全链路
 node test-napcat.mjs    # M5：ZIP 解包 / sha256 校验 / 发行包选择 / 配置写入
 node test-stickers.mjs  # 表情包登记表：哈希 / 读写 / 查找 / 原子写 / importSticker / mface 字段
+node test-updates.mjs   # 检查更新：semver 比较、Release 摘要、限流和断网的白话
 ```
 
 ## 路线

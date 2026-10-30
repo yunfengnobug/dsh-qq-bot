@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, FACE_NAME_TO_ID, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotMessage, mapOneBotNotice, normalizeDelivery, normalizeMaxRecentTurns, normalizeReplyMode, normalizeSessionScope, NS, textToOneBotSegments, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, FACE_NAME_TO_ID, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotMessage, mapOneBotNotice, normalizeDelivery, normalizeMaxRecentTurns, normalizeReplyMode, normalizeSessionScope, NS, PLUGIN_VERSION, textToOneBotSegments, truncateText } from './index.js'
 import { hashOfBuffer, isCompleteMface, loadStickers, mfaceSendData, normalizeMface, saveStickers, shortHash, upsertSticker } from './stickers.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
@@ -151,6 +151,10 @@ check(
     capturedRoutes.some((r) => r.path === p && r.kind === 'exact' && typeof r.handler === 'function'),
   ),
   JSON.stringify(capturedRoutes.map((r) => r.path)),
+)
+check(
+  'legacy 宿主也挂检查更新路由',
+  capturedRoutes.some((r) => r.path === '/api/qq-bridge/update' && r.kind === 'exact' && typeof r.handler === 'function'),
 )
 console.log('registered tools:', registered.map((t) => t.name).join(', '))
 check('apply 未抛错且注册了 7 个工具', registered.length === 7)
@@ -1136,7 +1140,14 @@ function sawSentText(s) {
   check('注册了 settings 命名空间 qq-bridge', registeredSettings.length === 1 && reg?.ns === 'qq-bridge', String(reg?.ns))
   const dict = reg?.schema?.dict ?? {}
   const keys = Object.keys(dict)
-  check('settings 键数量符合预期（26）', keys.length === 26, `实际 ${keys.length}`)
+  check('settings 键数量符合预期（27）', keys.length === 27, `实际 ${keys.length}`)
+  let settingDefaults = null
+  try {
+    settingDefaults = reg.schema({})
+  } catch {
+    settingDefaults = null
+  }
+  check('启动时检查一次默认关', settingDefaults?.checkUpdateOnStart === false, JSON.stringify(settingDefaults?.checkUpdateOnStart))
   const missing = keys.filter((k) => String(dict[k]?.meta?.description ?? '').trim() === '')
   check('每个 settings 键都有说明（设置界面里能看懂）', missing.length === 0, missing.join(', '))
   // readSettings() 会读到的键必须都在 Schema 里，否则用户在界面上改不到它
@@ -1496,6 +1507,13 @@ function sawSentText(s) {
         parseField(turnsField, '0') === 0 && parseField(turnsField, 'abc') === undefined && parseField(wakeField, '0.25') === 0.25,
       )
       check('留空数字的保存文案指向撤销覆盖', src.includes('留空不会当成 0') && src.includes('撤销覆盖'))
+      const updateField = (mod.__test?.fields ?? []).find((x) => x.key === 'checkUpdateOnStart')
+      check(
+        '启动时检查一次：白话名称，并写明不会自动安装',
+        updateField?.label === '启动时检查一次' && /不会自动安装/.test(String(updateField?.hint ?? '')),
+        JSON.stringify(updateField),
+      )
+      check('检查更新按钮不在浏览器里直接打 GitHub', src.includes('检查更新') && src.includes('/api/qq-bridge/update') && !src.includes('api.github.com'))
       const cardKeys = (mod.__test?.fields ?? []).map((x) => x.key)
       const schemaKeys = Object.keys(registeredSettings[0]?.schema?.dict ?? {})
       const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k))
@@ -4839,6 +4857,166 @@ function sawSentText(s) {
     fakeAgent = prevAgent
     mainSessionHandler({ id: 'session-smoke' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
   }
+}
+
+// 检查更新：比较逻辑在 test-updates.mjs。这里只钉住设置页那条路由（准入、白话、不把英文堆栈回出去）。
+{
+  const handler = capturedRoutes.find((r) => r.path === '/api/qq-bridge/update')?.handler
+  const makeRes = () => {
+    const out = { status: 0, body: '' }
+    return { out, writeHead: (status) => { out.status = status }, end: (body) => { out.body = String(body ?? '') } }
+  }
+  const req = (method, { addr = '127.0.0.1', headers = {} } = {}) => ({
+    method,
+    url: '/api/qq-bridge/update',
+    socket: { remoteAddress: addr },
+    headers: {
+      ...(method === 'POST' ? { 'content-type': 'application/json', 'content-length': '2' } : {}),
+      ...headers,
+    },
+    async *[Symbol.asyncIterator]() {
+      if (method === 'POST') yield Buffer.from('{}')
+    },
+  })
+  check('检查更新路由已挂上', typeof handler === 'function')
+  if (typeof handler === 'function') {
+    const savedFetch = globalThis.fetch
+    let fetches = 0
+    globalThis.fetch = async () => {
+      fetches += 1
+      throw new Error('GET 不应该访问 GitHub')
+    }
+    const resGet = makeRes()
+    await handler(req('GET'), resGet)
+    const got = JSON.parse(resGet.out.body)
+    check(
+      'GET /update：只返回当前版本，不访问 GitHub',
+      resGet.out.status === 200 && got.ok === true && got.current === PLUGIN_VERSION && got.checkOnStart === false && fetches === 0,
+      `${resGet.out.status} ${resGet.out.body.slice(0, 160)} fetches=${fetches}`,
+    )
+    globalThis.fetch = savedFetch
+
+    const resFar = makeRes()
+    await handler(req('GET', { addr: '10.0.0.9' }), resFar)
+    check(
+      'GET /update：外网且没有登录会话 → 403，文案是中文',
+      resFar.out.status === 403 && /[\u4e00-\u9fa5]/.test(resFar.out.body) && !/TypeError|fetch failed/.test(resFar.out.body),
+      resFar.out.body.slice(0, 160),
+    )
+
+    const resMethod = makeRes()
+    await handler(req('PUT'), resMethod)
+    check(
+      'PUT /update → 405，并说明 GET 与 POST 的差别',
+      resMethod.out.status === 405 && /GET/.test(resMethod.out.body) && /POST/.test(resMethod.out.body) && /[\u4e00-\u9fa5]/.test(resMethod.out.body),
+      resMethod.out.body.slice(0, 160),
+    )
+
+    globalThis.fetch = async () => {
+      throw new TypeError('fetch failed')
+    }
+    const resDown = makeRes()
+    await handler(req('POST'), resDown)
+    const down = JSON.parse(resDown.out.body)
+    check(
+      'POST /update：网络失败是白话，不带 fetch failed',
+      resDown.out.status === 200 && down.ok === false && /连不上 GitHub/.test(String(down.error)) && !/fetch failed|TypeError/.test(String(down.error)),
+      String(down.error),
+    )
+
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 403,
+      text: async () => 'API rate limit exceeded for 203.0.113.10',
+    })
+    const resLimit = makeRes()
+    await handler(req('POST'), resLimit)
+    const limited = JSON.parse(resLimit.out.body)
+    check(
+      'POST /update：限流是白话，不把地址回给界面',
+      limited.ok === false && /限流/.test(String(limited.error)) && !/203\.0\.113\.10|rate limit/i.test(String(limited.error)),
+      String(limited.error),
+    )
+
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => [
+        {
+          tag_name: 'v9.9.9',
+          draft: false,
+          prerelease: false,
+          body: '商城表情可以再发一次',
+          html_url: 'https://github.com/yunfengnobug/dsh-qq-bot/releases/tag/v9.9.9',
+        },
+      ],
+    })
+    const resNew = makeRes()
+    await handler(req('POST'), resNew)
+    const newer = JSON.parse(resNew.out.body)
+    check(
+      'POST /update：有新版时给出版本号、摘要和 tag 安装命令',
+      newer.ok === true &&
+        newer.updateAvailable === true &&
+        newer.latest === '9.9.9' &&
+        String(newer.message).includes('有新版本 9.9.9') &&
+        String(newer.message).includes('商城表情可以再发一次') &&
+        newer.install === 'github:yunfengnobug/dsh-qq-bot#v9.9.9' &&
+        String(newer.command).includes('dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v9.9.9'),
+      JSON.stringify(newer).slice(0, 240),
+    )
+    globalThis.fetch = savedFetch
+  }
+}
+
+{
+  const logs = []
+  let fetches = 0
+  const savedFetch = globalThis.fetch
+  globalThis.fetch = async () => {
+    fetches += 1
+    return {
+      ok: true,
+      status: 200,
+      json: async () => [
+        {
+          tag_name: 'v9.9.9',
+          draft: false,
+          prerelease: false,
+          body: '启动时能看见的说明',
+          html_url: 'https://evil.example/not-github',
+        },
+      ],
+    }
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-update-start-'))
+  const localCtx = {
+    ...ctx,
+    logger: { info: (m) => logs.push(String(m)), warn: () => {} },
+    settings: {
+      register: () => ({}),
+      get: () => ({ checkUpdateOnStart: true }),
+    },
+    tools: { register: () => {} },
+    on: () => () => {},
+    webServer: { register: () => () => {} },
+  }
+  localCtx.inject = (_deps, cb) => cb(localCtx)
+  apply(localCtx, {
+    ...config,
+    statePath: join(dir, 'state.json'),
+    checkUpdateOnStart: true,
+    onebotUrl: '',
+  })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  check('启动时检查一次：开关打开才会问 GitHub', fetches === 1, String(fetches))
+  check(
+    '启动时检查一次：日志是白话，链接不跟到别的网站',
+    logs.some((line) => line.includes('启动时检查更新：') && line.includes('9.9.9') && line.includes('github.com/yunfengnobug/dsh-qq-bot') && !line.includes('evil.example') && !/TypeError|fetch failed/.test(line)),
+    logs.join(' | ').slice(0, 240),
+  )
+  globalThis.fetch = savedFetch
+  rmSync(dir, { recursive: true, force: true })
 }
 
 // 用例用过的临时图片：留着只会在 %TEMP% 里积垃圾

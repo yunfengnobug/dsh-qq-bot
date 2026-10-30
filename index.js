@@ -16,6 +16,7 @@
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 
@@ -40,6 +41,11 @@ import {
   upsertSticker,
 } from './stickers.js'
 import { FACE_NAME_TO_ID, textToOneBotSegments } from './faces.js'
+import { checkPluginUpdate } from './updates.js'
+
+const require = createRequire(import.meta.url)
+/** 当前安装的包版本。设置页和检查更新都读这一处，避免卡片里手写一份。 */
+export const PLUGIN_VERSION = String(require('./package.json').version || '')
 import {
   configDirCandidates,
   createFetcher,
@@ -163,6 +169,7 @@ export const Config = Schema.object({
   wakeProbability: Schema.number().default(0.05).description('没点名时的回应概率（0 到 1）。'),
   whitelist: Schema.array(Schema.string()).default([]).description('哪些私聊可以叫醒。留空 = 任何私聊都不叫醒。'),
   groupWhitelist: Schema.array(Schema.string()).default([]).description('哪些群可以叫醒。留空 = 任何群都不叫醒。'),
+  checkUpdateOnStart: Schema.boolean().default(false).description('启动时向 GitHub 检查一次有没有新版本。默认关。只在日志里提示，不会自动安装。'),
 })
 
 // 用户可编辑设置：注册成 settings 命名空间后，会持久化到 settings.yaml，
@@ -176,6 +183,7 @@ const BridgeSettings = Schema.object({
   wakeProbability: Schema.number().default(0.05).description('没点名时的回应概率（0 到 1）。默认 0.05。'),
   whitelist: Schema.array(Schema.string()).default([]).description('哪些私聊可以叫醒。留空 = 任何私聊都不叫醒。'),
   groupWhitelist: Schema.array(Schema.string()).default([]).description('哪些群可以叫醒。留空 = 任何群都不叫醒。'),
+  checkUpdateOnStart: Schema.boolean().default(false).description('启动时向 GitHub 检查一次有没有新版本。默认关。只在日志里提示，不会自动安装。'),
   attachRecentChat: Schema.boolean().default(true).description('把没叫醒时的聊天一并带上。'),
   recentChatLimit: Schema.number().default(DEFAULT_RECENT_CHAT_LIMIT).description('附带最近几条（0–200）。'),
   replyMaxChars: Schema.number().default(1500).description('一条最多多少字。超过就不发送。'),
@@ -544,6 +552,7 @@ export function apply(ctx, config) {
         wakeProbability: config.wakeProbability ?? 0.05,
         whitelist: config.whitelist ?? [],
         groupWhitelist: config.groupWhitelist ?? [],
+        checkUpdateOnStart: config.checkUpdateOnStart === true,
         onebotUrl: config.onebotUrl ?? '',
         accessTokenEnv: config.accessTokenEnv ?? '',
         selfId: config.selfId ?? '',
@@ -589,6 +598,7 @@ export function apply(ctx, config) {
       wakeProbability: clamp01(Number(s.wakeProbability ?? config.wakeProbability ?? 0.05)),
       whitelist: (s.whitelist ?? config.whitelist ?? []).map(String),
       groupWhitelist: (s.groupWhitelist ?? config.groupWhitelist ?? []).map(String),
+      checkUpdateOnStart: (s.checkUpdateOnStart ?? config.checkUpdateOnStart) === true,
       attachRecentChat: (s.attachRecentChat ?? config.attachRecentChat) !== false,
       recentChatLimit: Math.max(
         0,
@@ -3875,6 +3885,49 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * 检查更新。GET 只报当前版本，不去 GitHub。POST 才问 Releases。
+   * 有新版只返回说明和安装命令，不下载、不安装。
+   * 两代宿主都挂：按钮跟“设置存在哪”无关。
+   */
+  async function handleUpdateRequest(req, res) {
+    if (rejectLocalRequest(req, res)) return
+    const method = String(req.method ?? '').toUpperCase()
+    const current = PLUGIN_VERSION
+    if (method === 'GET') {
+      return sendJson(res, 200, {
+        ok: true,
+        current,
+        checkOnStart: readSettings().checkUpdateOnStart === true,
+      })
+    }
+    if (method !== 'POST') {
+      return sendJson(res, 405, {
+        ok: false,
+        error: '这个接口只接受 GET 与 POST。GET 看当前版本，POST 才去 GitHub 检查更新。',
+      })
+    }
+    const result = await checkPluginUpdate({ current })
+    if (result.ok === false) {
+      return sendJson(res, 200, {
+        ok: false,
+        current,
+        error: String(result.error || result.message || '检查更新失败，稍后再试。'),
+      })
+    }
+    return sendJson(res, 200, {
+      ok: true,
+      current: result.current || current,
+      latest: result.latest || '',
+      updateAvailable: result.updateAvailable === true,
+      summary: result.summary || '',
+      install: result.install || '',
+      command: result.command || '',
+      url: result.url || '',
+      message: result.message,
+    })
+  }
+
   // TODO: accessTokenEnv 留空时，可回退读 NapCat 的 onebot11*.json 里的 token（用户说可做可不做）。
   // 可选注入：没有 webServer 服务的部署照常工作（只是卡片上的按钮拿不到地址）。
   if (typeof ctx.inject === 'function') ctx.inject(['webServer'], (scoped) => {
@@ -3907,6 +3960,7 @@ export function apply(ctx, config) {
             return { ok: true }
           }),
         ],
+        ['/api/qq-bridge/update', handleUpdateRequest],
       ]
       for (const [path, handler] of routes) disposes.push(server.register({ kind: 'exact', path, handler }))
       scoped.effect(() => () => {
@@ -3918,7 +3972,7 @@ export function apply(ctx, config) {
           }
         }
       })
-      logger.info('NapCat 操作接口已挂载：/api/qq-bridge/napcat{,/launch,/reveal}（本机，或已登录的 DSH 面板）')
+      logger.info('NapCat 操作接口已挂载：/api/qq-bridge/napcat{,/launch,/reveal}；检查更新：/api/qq-bridge/update（本机，或已登录的 DSH 面板）')
     } catch (error) {
       for (const dispose of disposes) {
         try {
@@ -4013,6 +4067,20 @@ export function apply(ctx, config) {
       )
     },
   }))
+
+  // 默认关。打开后每次进程启动问一次，只写日志，不下载、不安装、不挡住 ready。
+  if (readSettings().checkUpdateOnStart === true) {
+    const current = PLUGIN_VERSION
+    Promise.resolve()
+      .then(() => checkPluginUpdate({ current }))
+      .then((result) => {
+        const text = String(result?.message || result?.error || '没有拿到结果。').replace(/\s+/g, ' ').trim()
+        logger.info(`启动时检查更新：${text}`)
+      })
+      .catch(() => {
+        logger.info('启动时检查更新：连不上 GitHub，这次没有检查到更新。稍后再试。')
+      })
+  }
 
   logger.info(`ready (target=${readSettings().targetSessionId || '未设置'}, onebot=${readSettings().onebotUrl || '未配置'}, state=${statePath})`)
 }

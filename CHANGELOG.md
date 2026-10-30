@@ -1,5 +1,12 @@
 # 更新日志
 
+## v0.2.4 — 2026-10-30
+
+- **设置页可以检查 GitHub 上有没有新版本**：卡片显示当前版本。点「检查更新」才请求 `yunfengnobug/dsh-qq-bot` 的 Releases，按 semver 对比。有新版时写出最新版本号、说明摘要，以及 `github:yunfengnobug/dsh-qq-bot#vX.Y.Z` 的安装命令。没有新版、连不上、被限流，都用白话说明，不把英文报错摆到界面上。不会自动下载或安装。
+- **新设置「启动时检查一次」**（`checkUpdateOnStart`，默认 `false`）：打开并保存后，下次启动 dsh-web 向 GitHub 问一次，只写日志。默认关。
+- **安装说明**：README 写清推荐用 Release tag（已发布的是 `v0.2.3`）、Watch Releases、最低环境、白名单先填再 @、三条升级路径（面板升级 / `#vX.Y.Z` / 重装后重启 dsh-web）、与官方 `sj244/dsh-qq-bridge` 不能同时挂同一个 OneBot，以及以后的发版流程（改版本号 → CHANGELOG → tag `vX.Y.Z` → GitHub Release）。
+- **npm 与插件市场**：`package.json` 补了 `publishConfig.access`（`public`）和 `engines.node`（`>=22`），`files` 白名单含更新检查模块和 CHANGELOG。维护者用 `npm login` 后自己 `npm publish`，本仓库不代发。包发布之后，用户可以 `dsh plugin --profile web add dsh-qq-bot@<版本>`；没发布时仍用 GitHub Release。本 fork 还没进 awesome-dsh-plugin，申请步骤和 Issue 模板（连不上 / 不回 / 发不出）写在 README。
+
 ## v0.2.3 — 2026-10-30
 
 - **商城表情按原生表情包发出去，普通图片仍是图片**：入站 `mface`，以及带着 `emoji_id` / `emoji_package_id` / `key` / `summary` 的 `image` 段，会把这四项跟图片哈希留在一起。图片落盘时旁边写 `<hash>.mface.json`。`qq_bridge_sticker` 的 `save` 把它们抄进登记表。`send` 时四项都在就发 OneBot `mface`（`emoji_package_id` 是数字）；缺任何一项仍用 `base64://` 发图片。模型看到的占位符也分开：商城表情是 `[表情包#短哈希]`，普通图片是 `[图片#短哈希]`。没有可下载图片的 `mface` 只有文字占位符，登记不了。没有这些 id 的图（本地图、收藏表情、普通图片）发出去仍是图片。
