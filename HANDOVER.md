@@ -1,4 +1,6 @@
-# HANDOVER —— dsh-qq-bridge 交接说明
+# HANDOVER —— 上游 dsh-qq-bridge 交接说明
+
+> 这份交接说明来自上游 sj244/dsh-qq-bridge。本 fork 的包名是 **dsh-qq-bot**，Cordis 插件 id 仍是 `qq-bridge`。文中的本机路径、会话 id 若出现占位符，不要换成真实环境。
 
 > 交接对象：接手本项目的专门 agent
 > 交接人：DSH 工作区会话 `<HANDOVER_SESSION>` 的 agent

@@ -1,19 +1,24 @@
-# dsh-qq-bridge
+# dsh-qq-bot
 
-**English** · Connect one **fixed DSH session** to QQ (OneBot / NapCat) and **keep its context** —
-no new session, no re-priming. A **fail-closed whitelist** gates who may drive it; **@-mentions,
-nicknames and pokes always wake** the model; everything else is only recorded (zero model calls)
-until a **configurable sampling probability** hits or the model opens a short **follow-up window**.
-Ships a settings card in **Settings → Plugins → Plugin configuration**, and can download, configure
-and launch **NapCat** for you.
+**DSH 插件**（不是独立服务）。把 DSH 会话接到 QQ（OneBot / NapCat 个人号）。需要已安装的 `@deepseek-ai/dsh`，以及一个 OneBot 实现（常用 NapCat）。
 
-把一个已有的 DSH 会话接到 QQ（OneBot / NapCat 个人号），提供类似 QQ 群友的交互感受。
+这是 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge) 的 fork，上游许可证为 MIT，版权归 sj244。安装和更新都走 `dsh plugin`，不要在服务器上打补丁脚本。
+
+**Cordis 插件 id 仍是 `qq-bridge`**（`cordis.patch.yml` 里的 `id`）。包名和界面显示名是 **dsh-qq-bot**。已有 profile 里按 `id: qq-bridge` 写的覆盖继续生效。设置命名空间、状态文件和 `/api/qq-bridge/...` 也沿用这个 id，避免升级时对不上。
 
 ```sh
-dsh plugin --profile web add github:sj244/dsh-qq-bridge
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
 ```
 
-> Created with DSH itself — this is a vibecoding project. / 这是个 vibecoding 项目。本项目由 DSH 写成。
+指定某次提交时：
+
+```sh
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
+```
+
+**English** · A DSH plugin that connects DSH sessions to QQ (OneBot / NapCat). Fail-closed whitelist; @-mentions, nicknames and pokes always wake the model; everything else is only recorded until a configurable probability hits. Fork of sj244/dsh-qq-bridge (MIT).
+
+> 上游由 DSH 写成。本 fork 的改动见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
 - 当前版本 **v0.1.3**（维护性更新，见 [`CHANGELOG.md`](./CHANGELOG.md)）
@@ -52,7 +57,7 @@ dsh plugin --profile web add github:sj244/dsh-qq-bridge
 **正式安装**（从 GitHub）：
 
 ```sh
-dsh plugin --profile web add github:sj244/dsh-qq-bridge
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
 ```
 
 **开发期**（修改本仓库代码时用 link 安装）：
@@ -488,4 +493,4 @@ node test-stickers.mjs  # 表情包登记表：哈希 / 读写 / 查找 / 原子
 | **M8** ✅ | 分得清“在 QQ 还是 DSH 里”：出站闸门按来源生效、出站方式做成开关、改模式立刻重挂提示词 |
 | **M9** 🚧 | 戳一戳（入站已通，出站受 NapCat 限制，见[已知限制](#已知限制与环境要求)） |
 
-完整变更记录见 [`CHANGELOG.md`](./CHANGELOG.md)，发行版见 [Releases](https://github.com/sj244/dsh-qq-bridge/releases)。
+完整变更记录见 [`CHANGELOG.md`](./CHANGELOG.md)。上游发行版见 [sj244/dsh-qq-bridge Releases](https://github.com/sj244/dsh-qq-bridge/releases)。

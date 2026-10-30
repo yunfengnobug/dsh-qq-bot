@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- **Fork 品牌改为 dsh-qq-bot**：包名、界面显示名、NapCat 配置里的默认名称改为 dsh-qq-bot。Cordis 插件 id、设置命名空间和 `/api/qq-bridge/...` 仍是 `qq-bridge`，已有 profile 覆盖不用改。v4 消息来源写成 `plugin:dsh-qq-bot`，同时仍认上游的 `plugin:dsh-qq-bridge`。上游 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge) 的 MIT 版权保留。
+
 - **修 issue #1：相邻重复的 `[QQ]` 块只发一次**：模型先写回答、再调工具、随后又把同一句重写一遍时，
   本轮正文按 step 累积，拼接后 QQ 会收到连着两句相同的话。现在相邻且完全相同的块只保留一个；
   非相邻的重复保持原样（可能是刻意复述）。比较的是块内正文（已 trim），

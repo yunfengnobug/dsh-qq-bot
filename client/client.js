@@ -1,5 +1,5 @@
 /**
- * dsh-qq-bridge —— 浏览器半（client half）
+ * dsh-qq-bot —— 浏览器半（client half）
  *
  * 作用：在 **设置 → 插件 → 插件配置** 里放一张名为“QQ 桥接”的卡片，
  * 用来改昵称、白名单、唤醒概率、目标会话这些设置 —— 也就是用户要的那个界面。
@@ -13,12 +13,12 @@
  *   参考实现：第三方插件 `dshmarket` 的 `client/client.js`（同样是手写/预构建产物）。
  *
  * 与宿主半的约定：
- *   - `id` 必须等于包名 `dsh-qq-bridge`；
+ *   - `id` 必须等于包名 `dsh-qq-bot`；
  *   - 卡片注册进 `settings.plugin.item`，**key 必须等于宿主注册的 settings 命名空间** `qq-bridge`，
  *     否则配置页那一栏里什么都不会出现（它按命名空间派发）。
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-qq-bridge',
+  id: 'dsh-qq-bot',
   factory: (require) => {
     var module = { exports: {} }
     var exports = module.exports
@@ -808,7 +808,7 @@ window.__ModuleLoader__.load({
       const candidates = []
       // 0.2.0 的表单 key 到底叫什么，源码里能看到的写法**全试一遍**（谁 ready 用谁）：
       // settings 命名空间 / profile entry id / 包名，以及带 include: 前缀的两种。
-      for (const namespace of [NS, `include:${NS}`, 'dsh-qq-bridge', 'include:dsh-qq-bridge']) {
+      for (const namespace of [NS, `include:${NS}`, 'dsh-qq-bot', 'include:dsh-qq-bot', 'dsh-qq-bridge', 'include:dsh-qq-bridge']) {
         try {
           const scope = service.bind({ namespace })
           if (scope && typeof scope === 'object') candidates.push({ namespace, scope })
@@ -940,7 +940,7 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     // 导出 name：Cordis 用它做插件标识，Slots inspect 里的 registrant 会显示成它
     // （不导的话那边显示的是产物里的 fallback 短名，排障时认不出是谁注册的卡片）。
-    exports.name = 'dsh-qq-bridge'
+    exports.name = 'dsh-qq-bot'
     // 纯函数给离线测试用（test-smoke.mjs 会在假 ctx 里真跑这个 bundle）。
     // Cordis 只认 apply / inject / name / Config，多余的导出它不管。
     exports.__test = { sessionOptions, draftFrom, parse, fields: FIELDS, bindSettings }

@@ -1408,7 +1408,7 @@ function sawSentText(s) {
   check('0.1.5 注入 source 用老的 plugin 包装', injectedMessageSource(true).kind === 'plugin')
   check(
     '0.2.0 注入 source 用 producer-owned（plugin:包名）',
-    injectedMessageSource(false).kind === 'plugin:dsh-qq-bridge',
+    injectedMessageSource(false).kind === 'plugin:dsh-qq-bot',
     JSON.stringify(injectedMessageSource(false)),
   )
   check('0.2.0 的 source.kind 不是已废弃的 plugin', injectedMessageSource(false).kind !== 'plugin')

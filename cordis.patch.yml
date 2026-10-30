@@ -1,9 +1,10 @@
-# dsh-qq-bridge bundle patch: one insert row carrying the whole plugin config.
+# dsh-qq-bot bundle patch: one insert row carrying the whole plugin config.
+# Cordis 插件 id 仍是 qq-bridge（与上游兼容）。显示名是 dsh-qq-bot。
 # 用户在 profile 的 cordis.patch.yml 里按 id 覆盖这一行；patch 会替换整份 config，
 # 所以要保留的键请全部重述。
 - insert:
     - id: qq-bridge
-      name: dsh-qq-bridge
+      name: dsh-qq-bot
       config:
         # 固定目标会话：QQ 的一切都注入这一个会话（保留其上下文）。
         # 留空表示不驱动任何会话。

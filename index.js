@@ -1,4 +1,5 @@
-// dsh-qq-bridge — 把一个“固定的”DSH 会话接到 QQ（OneBot / NapCat）。
+// dsh-qq-bot — 把 DSH 会话接到 QQ（OneBot / NapCat）。
+// Fork of sj244/dsh-qq-bridge. Cordis 插件 id 仍是 qq-bridge。
 //
 // 设计见同目录 DESIGN.md。核心两点：
 //   1) 唤醒策略：白名单(fail-closed) → 命中昵称/@ 必唤醒 → 否则按概率(默认 5%)唤醒
@@ -69,7 +70,9 @@ export function hasLegacySettings(service) {
 }
 const PLUGIN_TAG = 'qq-bridge'
 /** 包名（v4 消息格式里 producer 归属用）。 */
-const PACKAGE = 'dsh-qq-bridge'
+const PACKAGE = 'dsh-qq-bot'
+/** 上游包名。已注入的旧消息仍按这个 kind 认，避免升级后哑火。 */
+const PACKAGE_LEGACY = 'dsh-qq-bridge'
 
 /**
  * 注入消息用的 source，按宿主能力分叉（导出以便测试）。
@@ -84,7 +87,7 @@ export function injectedMessageSource(legacy) {
   return legacy ? { kind: 'plugin', plugin: PLUGIN_TAG } : { kind: `plugin:${PACKAGE}` }
 }
 /** 包名：与 `client/client.js` 里 `__ModuleLoader__.load({id})` 的值必须一致。 */
-const PACKAGE_NAME = 'dsh-qq-bridge'
+const PACKAGE_NAME = 'dsh-qq-bot'
 const MAX_BUFFER = 200
 const MAX_LOG = 200
 const MAX_OUTBOX = 50
@@ -1930,7 +1933,7 @@ export function apply(ctx, config) {
       // ⚠️ 两个条件都要：`mine` 是“认出来了”（消息 id / 正文前缀），`plugin === PLUGIN_TAG`
       // 是“来源字段还老实”时的兜底。**少任何一个都会哑火** —— 写这段时我先把后者删了，
       // 测试立刻挂了 8 条（真实链路里前缀一定匹配，但别把正确性押在“一定”上）。
-      if (mine || (kind === 'plugin' && plugin === PLUGIN_TAG) || kind === `plugin:${PACKAGE}`) {
+      if (mine || (kind === 'plugin' && plugin === PLUGIN_TAG) || kind === `plugin:${PACKAGE}` || kind === `plugin:${PACKAGE_LEGACY}`) {
         pendingFromQQ = true
         effect = 'pending=true（我们自己注入的 QQ 消息）'
       } else if (kind === 'user') {
@@ -3029,7 +3032,7 @@ export function buildUsagePrompt(s = {}) {
   const maxChars = usagePromptMaxChars(s)
   const mode = normalizeReplyMode(s?.replyMode)
   return [
-    '你正通过 dsh-qq-bridge 连着 QQ（可能是群聊，也可能是私聊）。',
+    '你正通过 dsh-qq-bot 连着 QQ（可能是群聊，也可能是私聊）。',
     '',
     '**下面这些规矩只对「被 QQ 唤醒的那一轮」生效** —— 判据是那一轮的用户消息带 `[QQ · …]` 前缀。',
     '会话发起人也可能在 **DSH 界面里直接跟你说话**：那种消息**不带**前缀，按平常方式回答就行，',

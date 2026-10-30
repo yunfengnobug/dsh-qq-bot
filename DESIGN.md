@@ -1,4 +1,6 @@
-# dsh-qq-bridge 设计草案
+# dsh-qq-bot 设计草案
+
+> 本文是上游 sj244/dsh-qq-bridge 的设计记录。Fork 的包名是 dsh-qq-bot，Cordis id 仍是 `qq-bridge`。下文里的旧包名指的是同一插件。
 
 > 目标：把 **一个指定的、已存在的 DSH 会话**（当前目标：
 > `<TARGET_SESSION_ID>`，<TARGET_WORKSPACE> 工作区）
