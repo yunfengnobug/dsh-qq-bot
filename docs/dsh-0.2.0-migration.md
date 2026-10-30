@@ -125,8 +125,10 @@ if (legacy) {
 
 - [ ] **精简诊断**：`client/client.js` 的 `bindSettings.detail()` 与卡片上那行“诊断：…”是排障用的；
       平台恢复后可去掉卡片上的那行（`namespaces` / `detail()` 建议保留，排障很有用）。
-- [ ] **README 补一句**：README“设置界面与全部设置项”一节在 0.2.0 上目前**不适用**
-      （表单不可用，只能改 profile 的 `cordis.patch.yml`）；等平台修好再恢复原有描述。
+- [x] **README 已写明 0.2.0 的设置方式**：「设置界面与全部设置项」说明卡片读写
+      `GET/POST /api/qq-bridge/settings`。本机请求可以直接改；经反向代理时认已经登录的
+      DSH 面板会话。`cordis.patch.yml` 仍可修改，改完重启生效，并会被
+      `$DSH_HOME/qq-bridge-settings.json` 覆盖。
 - [ ] **出站 poke 合流**：完整实现留在本地分支 `poke-tool-wip`（未推送）。
       触发条件：NapCat 的 PacketBackend 支持当前 QQ（9.9.36-53644），或换到受支持的 QQ（官方推荐 40768–44343）。
 - [ ] **桌面端沙箱 ACL**：本机桌面端在这个工作区上跑命令会失败
