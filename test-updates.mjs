@@ -1,6 +1,8 @@
 // 检查更新和一键安装。不连真 GitHub、不调真 dsh：fetch 和命令都由用例自己提供。
 // 运行：node test-updates.mjs
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import {
   applyPluginUpdate,
@@ -19,8 +21,11 @@ import {
   npmPackageUrl,
   NPM_REGISTRY,
   normalizeRegistry,
+  alignCordisNames,
   parseSemver,
+  profileDirectory,
   queryNpmVersions,
+  rewriteCordisPackageName,
   planPanelRestart,
   RESTART_HELPER,
   repackReleaseTarball,
@@ -886,6 +891,134 @@ const redirectedRegistry = await queryNpmVersions({
   },
 })
 check('registry 跳到别的网站就不跟', redirectedRegistry.ok === false && redirectedRegistry.code === 'network')
+
+const profileSample = [
+  '# 用户覆盖',
+  '- id: qq-bridge',
+  '  name: dsh-qq-bot  # 旧包名',
+  '  config:',
+  "    onebotUrl: 'ws://127.0.0.1:3001'",
+  "    nicknames: ['244', '小助手']",
+  '- id: other-plugin',
+  '  name: dsh-qq-bot',
+  '  config:',
+  '    keep: true',
+].join('\n') + '\n'
+const rewritten = rewriteCordisPackageName(profileSample, '@fengye_nobug/dsh-qq-bot')
+check(
+  '只改 qq-bridge 的旧包名，config 和别的插件不动',
+  rewritten.changed === true &&
+    rewritten.text.includes("name: '@fengye_nobug/dsh-qq-bot' # 旧包名") &&
+    rewritten.text.includes("onebotUrl: 'ws://127.0.0.1:3001'") &&
+    rewritten.text.includes("nicknames: ['244', '小助手']") &&
+    rewritten.text.includes('- id: other-plugin\n  name: dsh-qq-bot'),
+  rewritten.text,
+)
+const keptDev = rewriteCordisPackageName('- id: qq-bridge\n  name: ./local-dev\n  config:\n    keep: 1\n', '@fengye_nobug/dsh-qq-bot')
+check('qq-bridge 上不是我们的包名时不改', keptDev.changed === false && keptDev.text.includes('name: ./local-dev'))
+const alreadyScoped = "- id: qq-bridge\n  name: '@fengye_nobug/dsh-qq-bot'\n"
+check('已经是作用域包名时原样返回', rewriteCordisPackageName(alreadyScoped, '@fengye_nobug/dsh-qq-bot').changed === false)
+check('不把别的字符串写进 name', rewriteCordisPackageName(profileSample, 'not a package').changed === false)
+check(
+  'profile 目录只拼合法的 profile 名',
+  profileDirectory('/dsh', 'web').endsWith('/profiles/web') && profileDirectory('/dsh', '../web') === '' && profileDirectory('', 'web') === '',
+)
+
+const alignRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-align-'))
+const alignProfile = profileDirectory(alignRoot, 'web')
+const alignPkg = join(alignProfile, 'node_modules', '@fengye_nobug', 'dsh-qq-bot')
+mkdirSync(alignPkg, { recursive: true })
+writeFileSync(
+  join(alignPkg, 'package.json'),
+  JSON.stringify({
+    name: '@fengye_nobug/dsh-qq-bot',
+    version: '9.9.9',
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }),
+)
+const pluginPatch = "- insert:\n    - id: qq-bridge\n      name: dsh-qq-bridge\n      config:\n        targetSessionId: ''\n"
+writeFileSync(join(alignPkg, 'cordis.patch.yml'), pluginPatch)
+writeFileSync(join(alignProfile, 'cordis.patch.yml'), profileSample)
+writeFileSync(join(alignRoot, 'cordis.patch.yml'), '- id: qq-bridge\n  name: "dsh-qq-bot"\n  config:\n    statePath: \'\'\n')
+const aligned = alignCordisNames({ profileDir: alignProfile, home: alignRoot })
+const pluginAfter = readFileSync(join(alignPkg, 'cordis.patch.yml'), 'utf8')
+const profileAfter = readFileSync(join(alignProfile, 'cordis.patch.yml'), 'utf8')
+const homeAfter = readFileSync(join(alignRoot, 'cordis.patch.yml'), 'utf8')
+check(
+  '安装目录、profile 和 home 三处都改成实际包名',
+  aligned.ok === true &&
+    aligned.name === '@fengye_nobug/dsh-qq-bot' &&
+    aligned.changed.length === 3 &&
+    pluginAfter.includes("name: '@fengye_nobug/dsh-qq-bot'") &&
+    pluginAfter.includes("targetSessionId: ''") &&
+    profileAfter.includes("name: '@fengye_nobug/dsh-qq-bot' # 旧包名") &&
+    profileAfter.includes('name: dsh-qq-bot', profileAfter.indexOf('other-plugin')) &&
+    homeAfter.includes("name: '@fengye_nobug/dsh-qq-bot'"),
+  JSON.stringify({ changed: aligned.changed.length, pluginAfter, homeAfter }),
+)
+const untouched = alignCordisNames({ profileDir: alignProfile, home: alignRoot })
+check('包名已经对齐时不再改文件', untouched.changed.length === 0 && readFileSync(join(alignPkg, 'cordis.patch.yml'), 'utf8') === pluginAfter)
+
+const legacyRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-legacy-'))
+const legacyProfile = profileDirectory(legacyRoot, 'web')
+const legacyPkg = join(legacyProfile, 'node_modules', 'dsh-qq-bot')
+mkdirSync(legacyPkg, { recursive: true })
+writeFileSync(join(legacyPkg, 'package.json'), JSON.stringify({ name: 'dsh-qq-bot', version: '0.2.3' }))
+writeFileSync(join(legacyPkg, 'cordis.patch.yml'), "- insert:\n    - id: qq-bridge\n      name: '@fengye_nobug/dsh-qq-bot'\n")
+writeFileSync(join(legacyProfile, 'cordis.patch.yml'), '- id: qq-bridge\n  name: \'@fengye_nobug/dsh-qq-bot\'\n')
+const legacyAligned = alignCordisNames({ profileDir: legacyProfile, expectedVersion: '0.2.3' })
+check(
+  '磁盘上仍是无作用域包时，name 改回那个包名',
+  legacyAligned.name === 'dsh-qq-bot' &&
+    readFileSync(join(legacyPkg, 'cordis.patch.yml'), 'utf8').includes("name: 'dsh-qq-bot'") &&
+    readFileSync(join(legacyProfile, 'cordis.patch.yml'), 'utf8').includes("name: 'dsh-qq-bot'"),
+)
+const versionMiss = alignCordisNames({ profileDir: legacyProfile, expectedVersion: '9.9.9' })
+check('版本对不上就不改包名', versionMiss.reason === 'version' && versionMiss.changed.length === 0)
+
+writeFileSync(join(alignPkg, 'cordis.patch.yml'), pluginPatch)
+writeFileSync(join(alignProfile, 'cordis.patch.yml'), profileSample)
+writeFileSync(join(alignRoot, 'cordis.patch.yml'), '- id: qq-bridge\n  name: "dsh-qq-bot"\n  config:\n    statePath: \'\'\n')
+const appliedAlign = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url === npmPackageUrl()) {
+      return { ok: true, status: 200, json: async () => ({ versions: { '9.9.9': { version: '9.9.9' } } }) }
+    }
+    throw new Error(`不该访问 ${url}`)
+  },
+  runCommand: async (spec) => {
+    if (spec.packageSpec !== '@fengye_nobug/dsh-qq-bot@9.9.9') return { ok: false, code: 'error' }
+    return { ok: true, code: 0 }
+  },
+})
+const appliedWithHome = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  home: alignRoot,
+  profile: 'web',
+  fetchImpl: async (url) => {
+    if (String(url) === npmPackageUrl()) {
+      return { ok: true, status: 200, json: async () => ({ versions: { '9.9.9': { version: '9.9.9' } } }) }
+    }
+    throw new Error(`不该访问 ${url}`)
+  },
+  runCommand: async () => ({ ok: true, code: 0 }),
+  scheduleRestart: async () => ({ ok: true, mode: 'reexec' }),
+})
+check(
+  '一键安装成功后说明 Cordis 包名已改成实际安装的包',
+  appliedWithHome.ok === true &&
+    appliedWithHome.channel === 'npm' &&
+    /已经装上 v9.9.9/.test(appliedWithHome.message) &&
+    /Cordis 里 qq-bridge 的包名已经改成实际安装的 @fengye_nobug\/dsh-qq-bot/.test(appliedWithHome.message) &&
+    /没有改动 NapCat/.test(appliedWithHome.message) &&
+    appliedAlign.result.ok === true &&
+    !/Cordis 里 qq-bridge/.test(appliedAlign.result.message),
+  appliedWithHome.message,
+)
+rmSync(alignRoot, { recursive: true, force: true })
+rmSync(legacyRoot, { recursive: true, force: true })
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)

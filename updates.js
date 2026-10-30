@@ -7,11 +7,13 @@
 // 插件不写死第三方镜像。包还没发到 npm，或 registry 里没有这个版本时，才改从 GitHub 下载：
 // 先要 github.com 上的官方源码包，连不上再试同一标签的 codeload。只跟随仍指向同一标签的
 // github.com、api.github.com 或 codeload.github.com。不用 git 协议。
+// 安装成功后，若 profile、home 或插件自己的 cordis.patch.yml 里 qq-bridge 的 name
+// 仍是旧的无作用域名，会改成磁盘上 package.json 里的包名。不改 config，不改设置，不改 NapCat。
 
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { gunzipSync, gzipSync } from 'node:zlib'
 
 export const UPDATE_REPO = 'yunfengnobug/dsh-qq-bot'
@@ -1363,11 +1365,187 @@ export async function schedulePanelRestart(input = {}) {
   return { ok: true, mode: 'reexec' }
 }
 
-function successMessage(tag, channel) {
+const CORDIS_ID = 'qq-bridge'
+
+function isWritablePackageName(name) {
+  return name === PACKAGE_NAME || name === LEGACY_UNSCOPED_NAME || name === 'dsh-qq-bridge'
+}
+
+/** profile 目录。profile 名只接受 dsh 自己的那一档，避免把 `..` 拼进路径。 */
+export function profileDirectory(home, profile = 'web') {
+  const root = String(home ?? '')
+  if (root === '' || root.includes('\0')) return ''
+  const name = String(profile || 'web')
+  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) return ''
+  return join(root, 'profiles', name)
+}
+
+function profileDirOf(input) {
+  if (input && typeof input.profileDir === 'string' && input.profileDir !== '') return input.profileDir
+  if (input && typeof input.home === 'string' && input.home !== '') return profileDirectory(input.home, input.profile || 'web')
+  return ''
+}
+
+function bundlePatchPath(dir, manifest) {
+  const raw = manifest?.dsh?.bundle?.patch
+  const rel = typeof raw === 'string' && raw !== '' ? raw : 'cordis.patch.yml'
+  if (isAbsolute(rel) || rel.split(/[\\/]/).includes('..')) return ''
+  return join(dir, rel)
+}
+
+function readInstalledManifest(dir) {
+  let manifest
+  try {
+    manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+  } catch {
+    return null
+  }
+  if (!manifest || typeof manifest !== 'object' || !isWritablePackageName(manifest.name)) return null
+  return {
+    dir,
+    name: manifest.name,
+    version: String(manifest.version ?? ''),
+    patchFile: bundlePatchPath(dir, manifest),
+  }
+}
+
+/**
+ * 只改 `qq-bridge` 这一行的 `name`。config 和别的插件保持原样，包括注释和空行。
+ * 只认我们自己的三个包名；别人写的路径或别的包不动。
+ * @param {string} text
+ * @param {string} packageName
+ * @param {string} [pluginId]
+ */
+export function rewriteCordisPackageName(text, packageName, pluginId = CORDIS_ID) {
+  const source = String(text ?? '')
+  if (!isWritablePackageName(packageName) || !/^[A-Za-z0-9_-]+$/.test(pluginId)) return { text: source, changed: false }
+  const newline = source.includes('\r\n') ? '\r\n' : '\n'
+  const endsWithNewline = /\n$/.test(source)
+  const lines = source.split(/\r?\n/)
+  if (endsWithNewline && lines[lines.length - 1] === '') lines.pop()
+  let changed = false
+  for (let i = 0; i < lines.length; i++) {
+    const idMatch = lines[i].match(/^(\s*)(?:-\s+)?id:\s*(['"]?)([A-Za-z0-9_-]+)\2\s*(#.*)?$/)
+    if (!idMatch || idMatch[3] !== pluginId) continue
+    const entryIndent = idMatch[1].length
+    let keyIndent = -1
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j]
+      if (line.includes('\t')) break
+      if (line.trim() === '' || /^\s*#/.test(line)) continue
+      const indent = line.match(/^ */)?.[0].length ?? 0
+      if (indent <= entryIndent) break
+      if (keyIndent < 0) keyIndent = indent
+      if (indent !== keyIndent) continue
+      if (!/^\s*name:/.test(line)) continue
+      const nameMatch = line.match(/^(\s*)name:\s*(['"]?)([^'"\s#]+)\2\s*(#.*)?$/)
+      if (!nameMatch) break
+      const current = nameMatch[3]
+      if (isWritablePackageName(current) && current !== packageName) {
+        const comment = nameMatch[4] ? ` ${nameMatch[4]}` : ''
+        lines[j] = `${nameMatch[1]}name: '${packageName}'${comment}`
+        changed = true
+      }
+      break
+    }
+  }
+  if (!changed) return { text: source, changed: false }
+  let next = lines.join(newline)
+  if (endsWithNewline) next += newline
+  return { text: next, changed: true }
+}
+
+function writeTextAtomic(file, text) {
+  const tmp = `${file}.tmp-${process.pid}`
+  writeFileSync(tmp, text)
+  try {
+    chmodSync(tmp, statSync(file).mode)
+  } catch {
+    // 读不到原权限就按这次写入的默认权限留下。
+  }
+  try {
+    renameSync(tmp, file)
+  } catch (error) {
+    try { rmSync(tmp, { force: true }) } catch { /* 临时文件清不掉时，仍把写入失败抛回去 */ }
+    throw error
+  }
+}
+
+/**
+ * 把 profile、home（有这份文件才改）和已安装插件自己的补丁里，
+ * `qq-bridge` 的 `name` 改成磁盘上 package.json 的包名。
+ * 传入 expectedVersion 时，只有版本对得上才改，避免把半截安装写成错误的包名。
+ * @param {{ profileDir?: string, home?: string, expectedVersion?: string }} input
+ */
+export function alignCordisNames(input = {}) {
+  const profileDir = String(input.profileDir ?? '')
+  if (profileDir === '') return { ok: false, reason: 'no-profile', changed: [], name: '' }
+  const scoped = readInstalledManifest(join(profileDir, 'node_modules', '@fengye_nobug', 'dsh-qq-bot'))
+  const legacy = readInstalledManifest(join(profileDir, 'node_modules', 'dsh-qq-bot'))
+  const candidates = [scoped, legacy].filter(Boolean)
+  let installed = null
+  if (input.expectedVersion) {
+    installed = candidates.find((item) => compareSemver(item.version, input.expectedVersion) === 0) || null
+    if (!installed) return { ok: false, reason: 'version', changed: [], name: '' }
+  } else {
+    installed = scoped || legacy
+  }
+  if (!installed) return { ok: false, reason: 'missing', changed: [], name: '' }
+  const files = []
+  if (installed.patchFile) files.push(installed.patchFile)
+  files.push(join(profileDir, 'cordis.patch.yml'))
+  if (typeof input.home === 'string' && input.home !== '') files.push(join(input.home, 'cordis.patch.yml'))
+  const changed = []
+  let failed = false
+  for (const file of files) {
+    let text
+    try {
+      text = readFileSync(file, 'utf8')
+    } catch {
+      continue
+    }
+    const next = rewriteCordisPackageName(text, installed.name)
+    if (!next.changed) continue
+    try {
+      writeTextAtomic(file, next.text)
+      changed.push(file)
+    } catch {
+      failed = true
+    }
+  }
+  return {
+    ok: !failed,
+    failed,
+    reason: failed ? 'write' : 'ok',
+    changed,
+    name: installed.name,
+    version: installed.version,
+  }
+}
+
+function alignNote(input, expectedVersion) {
+  const profileDir = profileDirOf(input)
+  if (profileDir === '') return ''
+  try {
+    const result = alignCordisNames({
+      profileDir,
+      home: typeof input?.home === 'string' ? input.home : '',
+      expectedVersion,
+    })
+    if (result.failed) return '没能改 Cordis 的包名。若重启后设置页打不开，把 qq-bridge 的 name 改成实际安装的包名再重启。'
+    if (result.changed.length > 0) return `Cordis 里 qq-bridge 的包名已经改成实际安装的 ${result.name}。`
+    return ''
+  } catch {
+    return '没能改 Cordis 的包名。若重启后设置页打不开，把 qq-bridge 的 name 改成实际安装的包名再重启。'
+  }
+}
+
+function successMessage(tag, channel, note = '') {
   const via = channel === 'npm'
     ? '这次是从 npm 装的。'
     : '这一版在 npm 上还没有，所以从 GitHub 装上。'
-  return `已经装上 ${tag}，面板即将重启。请刷新页面；登录口令可能会变，用新的面板地址再打开。${via}现有设置还在，没有改动 NapCat。`
+  const base = `已经装上 ${tag}，面板即将重启。请刷新页面；登录口令可能会变，用新的面板地址再打开。${via}现有设置还在，没有改动 NapCat。`
+  return note ? `${base}${note}` : base
 }
 
 function shownInstall(channel, version, repo) {
@@ -1489,6 +1667,7 @@ export async function applyPluginUpdate(input = {}) {
 }
 
 async function finishApply(input, decision, channel) {
+  const note = alignNote(input)
   let restart
   try {
     const schedule = input.scheduleRestart || schedulePanelRestart
@@ -1497,7 +1676,7 @@ async function finishApply(input, decision, channel) {
     restart = { ok: false, error: restartError() }
   }
   if (!restart || restart.ok !== true) {
-    const message = restart?.error || restartError()
+    const message = `${restart?.error || restartError()}${note}`
     return {
       ok: false,
       stage: 'restart',
@@ -1512,7 +1691,7 @@ async function finishApply(input, decision, channel) {
       message,
     }
   }
-  const message = successMessage(decision.tag, channel)
+  const message = successMessage(decision.tag, channel, note)
   return {
     ok: true,
     applied: true,
