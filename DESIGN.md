@@ -6,7 +6,7 @@
 > `<TARGET_SESSION_ID>`，<TARGET_WORKSPACE> 工作区）
 > 接到 QQ，**保留原有上下文**（同一个 sessionId，不新建会话）。
 
-> Fork 现状以 README 为准。`sessionScope` 默认仍是 `single`（一个 `targetSessionId`）。设成 `perGroup` 时，每个群、每个私聊各有一条会话。出站在一轮里钉住唤醒时的目的地，`lastDestination` 只在没有这根钉时作回落。设置接口在本机可直接用；经反向代理时认已登录的 DSH 面板会话。
+> Fork 现状以 README 为准。`sessionScope` 默认仍是 `single`（一个 `targetSessionId`）。设成 `perGroup` 时，每个群、每个私聊各有一条会话。出站在一轮里钉住唤醒时的目的地，`lastDestination` 只在没有这根钉时作回落。设置接口在本机可直接用；经反向代理时要已登录的 DSH 面板会话，且来源主机名和请求的 `Host` 一致。空的 `requestRejection` 不算已登录。
 
 ## 1. 与现有 QQ 插件的根本区别
 

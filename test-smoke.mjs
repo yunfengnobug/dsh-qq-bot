@@ -1788,23 +1788,61 @@ function sawSentText(s) {
         errOf(resRemote),
       )
 
-      // ⑨ 反向代理：宿主已经认出面板会话时放行；认不出就仍然拒绝。本机上的站外 Origin 不能靠会话翻案。
+      // ⑨ 反向代理与明确登录：空的 requestRejection 不算已登录。
+      //    本机上的公网 Origin 只有在已登录、且来源主机名等于 Host 时才放行。
       const baseGet = apiCtx.get.bind(apiCtx)
       let panelConnection = null
       apiCtx.get = (name) => (name === 'connection' ? panelConnection : baseGet(name))
       try {
         const beforePanel = fileValues()
         panelConnection = { requestRejection() { return undefined } }
+        const resEmpty = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.41 } } }), resEmpty)
+        check('S1：非本机 + requestRejection 为 undefined → 403', resEmpty.out.status === 403, `${resEmpty.out.status} ${errOf(resEmpty)}`)
+        check('S1：空的 requestRejection 不改设置', JSON.stringify(fileValues()) === JSON.stringify(beforePanel), JSON.stringify(fileValues()))
+        for (const empty of [null, false, 0, '']) {
+          panelConnection = { requestRejection() { return empty } }
+          const resBlank = makeRes()
+          await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.41 } } }), resBlank)
+          check(
+            `S1：非本机 + requestRejection 为 ${JSON.stringify(empty)} → 403`,
+            resBlank.out.status === 403,
+            `${resBlank.out.status} ${errOf(resBlank)}`,
+          )
+        }
+        check('S1：空返回值都没有改设置', JSON.stringify(fileValues()) === JSON.stringify(beforePanel), JSON.stringify(fileValues()))
+
+        panelConnection = {
+          requestRejection() { return undefined },
+          isAuthenticated() { return true },
+        }
         const resOk = makeRes()
         await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.41 } } }), resOk)
-        check('S1：非本机 + 面板会话已通过 → 200', resOk.out.status === 200, `${resOk.out.status} ${errOf(resOk)}`)
-        check('S1：非本机 + 面板会话已通过 → 设置写进去了', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+        check('S1：非本机 + 明确 isAuthenticated → 200', resOk.out.status === 200, `${resOk.out.status} ${errOf(resOk)}`)
+        check('S1：明确登录后设置写进去了', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+
+        panelConnection = {
+          requestRejection() { return undefined },
+          admit() { return { peer: { id: 'panel-peer' } } },
+        }
+        const resAdmit = makeRes()
+        await route.handler(req('GET', { addr: '10.0.0.7' }), resAdmit)
+        check('S1：非本机 + admit 交回 peer → 200', resAdmit.out.status === 200, errOf(resAdmit))
 
         panelConnection = { requestRejection() { return 401 } }
         const res401 = makeRes()
         await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.77 } } }), res401)
         check('S1：非本机 + 未登录（401）→ 403', res401.out.status === 403 && errOf(res401).includes('本机'), errOf(res401))
         check('S1：未登录的非本机 POST 不改设置', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+
+        panelConnection = {
+          requestRejection() { return 401 },
+          isAuthenticated() { return true },
+        }
+        const res401Override = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.76 } } }), res401Override)
+        check('S1：401 不能被 isAuthenticated 翻案', res401Override.out.status === 403, errOf(res401Override))
+        check('S1：401 翻案失败时设置不变', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
 
         panelConnection = { requestRejection() { return 403 } }
         const res403 = makeRes()
@@ -1829,22 +1867,62 @@ function sawSentText(s) {
         await route.handler(req('GET', { addr: '10.0.0.8' }), resBrowser)
         check('S1：非本机 GET + browserAuth.isAuthenticated → 200', resBrowser.out.status === 200, errOf(resBrowser))
 
-        panelConnection = { requestRejection() { return undefined } }
+        panelConnection = {
+          requestRejection() { return undefined },
+          isAuthenticated() { return true },
+        }
+        const resProxy = makeRes()
+        await route.handler(
+          req('POST', {
+            headers: { origin: 'https://panel.example', host: 'panel.example' },
+            body: { set: { wakeProbability: 0.43 } },
+          }),
+          resProxy,
+        )
+        check(
+          'S1：本机反向代理 + 公网 Origin 与 Host 一致且已登录 → 200',
+          resProxy.out.status === 200,
+          `${resProxy.out.status} ${errOf(resProxy)}`,
+        )
+        check('S1：反向代理的已登录请求写进了设置', fileValues().wakeProbability === 0.43, JSON.stringify(fileValues()))
+
         const resEvilSession = makeRes()
         await route.handler(
-          req('POST', { headers: { origin: 'https://evil.example' }, body: { set: { wakeProbability: 0.99 } } }),
+          req('POST', {
+            headers: { origin: 'https://evil.example', host: 'panel.example' },
+            body: { set: { wakeProbability: 0.99 } },
+          }),
           resEvilSession,
         )
         check(
-          'S1：本机上的站外 Origin 不能靠面板会话翻案',
+          'S1：本机上的站外 Origin 不能靠已登录翻案',
           resEvilSession.out.status === 403 && errOf(resEvilSession).includes('evil.example'),
           errOf(resEvilSession),
         )
         check(
           'S1：站外 Origin 翻案失败时设置不变',
-          fileValues().wakeProbability === 0.42 && JSON.stringify(fileValues()) !== JSON.stringify(beforePanel),
+          fileValues().wakeProbability === 0.43,
           JSON.stringify(fileValues()),
         )
+
+        panelConnection = {
+          requestRejection() { return 403 },
+          browserAuth: { isAuthenticated() { return true } },
+        }
+        const resCross = makeRes()
+        await route.handler(
+          req('POST', {
+            headers: {
+              origin: 'https://panel.example',
+              host: 'panel.example',
+              'sec-fetch-site': 'cross-site',
+            },
+            body: { set: { wakeProbability: 0.11 } },
+          }),
+          resCross,
+        )
+        check('S1：已登录但浏览器标成跨站 → 403', resCross.out.status === 403, errOf(resCross))
+        check('S1：跨站请求不改设置', fileValues().wakeProbability === 0.43, JSON.stringify(fileValues()))
       } finally {
         panelConnection = null
         apiCtx.get = baseGet

@@ -116,7 +116,7 @@ if (legacy) {
 
 - [x] **自建设置通道 —— 已实现**（2026-10-01）：照抄皮肤中心 ——
       宿主半可选注入 `webServer`（`ctx.inject(['webServer'], …)`），`ctx.webServer.register()` 挂
-      `/api/qq-bridge/settings`（GET 读 / POST 写；本机直接可用，反向代理认已登录的面板会话，无会话的外网请求 403，只写 schema 白名单）；
+      `/api/qq-bridge/settings`（GET 读 / POST 写；本机直接可用，反向代理要已登录且来源主机名与 `Host` 一致，空的 `requestRejection` 不算登录，无明确登录的外网请求 403，只写 schema 白名单）；
       值存 `$DSH_HOME/qq-bridge-settings.json`（`readSettings()` 优先级 = 设置文件 > composition config）；
       浏览器半在拿不到可写域时自动改走它（`createApiScope()`，快照形状与宿主 scope 对齐，卡片没改）。
       离线测试覆盖：GET/POST/403/白名单/非法值/`unset` + 客户端 `via()==='api'`。
@@ -126,8 +126,8 @@ if (legacy) {
 - [ ] **精简诊断**：`client/client.js` 的 `bindSettings.detail()` 与卡片上那行“诊断：…”是排障用的；
       平台恢复后可去掉卡片上的那行（`namespaces` / `detail()` 建议保留，排障很有用）。
 - [x] **README 已写明 0.2.0 的设置方式**：「设置界面与全部设置项」说明卡片读写
-      `GET/POST /api/qq-bridge/settings`。本机请求可以直接改；经反向代理时认已经登录的
-      DSH 面板会话。`cordis.patch.yml` 仍可修改，改完重启生效，并会被
+      `GET/POST /api/qq-bridge/settings`。本机请求可以直接改；经反向代理时要已经登录的
+      DSH 面板会话，且来源主机名和 `Host` 一致。`cordis.patch.yml` 仍可修改，改完重启生效，并会被
       `$DSH_HOME/qq-bridge-settings.json` 覆盖。
 - [ ] **出站 poke 合流**：完整实现留在本地分支 `poke-tool-wip`（未推送）。
       触发条件：NapCat 的 PacketBackend 支持当前 QQ（9.9.36-53644），或换到受支持的 QQ（官方推荐 40768–44343）。

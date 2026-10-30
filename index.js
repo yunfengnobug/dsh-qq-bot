@@ -529,23 +529,27 @@ export function apply(ctx, config) {
   /**
    * 设置接口与 NapCat 按钮的准入。
    *
-   * 本机回环照旧放行（命令行、SSH 隧道、本机面板）。本机上若 Origin/Referer 指向别的网站，
-   * 仍然拒绝：浏览器里的任意网页都能对 `127.0.0.1` 发无预检请求，会话也不能拿来盖过这条。
+   * 本机回环、且没有外来源（命令行）或来源也是本机（本机打开的面板）时直接放行。
+   * 反向代理常常把公网面板转到 `127.0.0.1`，这时来源是公网主机名：只有宿主明确判定已登录，
+   * 并且来源主机名与本次请求的 `Host` 一致，才放行。来源对不上 `Host` 的网页（含带着 cookie
+   * 打到本机的别的网站）仍然拒绝。
    *
-   * 不是回环地址时，不再要求 trustedHosts。DSH 面板自己的登录已经挡住了未授权访问：
-   * `connection.requestRejection` 为空表示宿主已经放行；它因主机围栏返回 403 时，
-   * 再看会话是否已登录。没有可确认的会话就拒绝，避免把接口开成公网。
+   * 不是回环地址时同样要明确登录，不再要求 trustedHosts。
+   * `requestRejection()` 返回空、`undefined`、`null`、`false`、`0` 或 `''` 只表示「没有给出拒绝码」，
+   * 不算已登录。已登录只认 `isAuthenticated` / `browserAuth.isAuthenticated` /
+   * `auth.isAuthenticated` 返回 `true`，或 `admit()` 交回一个没有拒绝码的 peer。
+   * `requestRejection` 给出 401，或给出除 403 以外的拒绝码时，直接拒绝（403 是主机围栏，
+   * 已登录的会话仍可过）。
    *
    * 带体 POST 仍必须声明 JSON。放行返回 `null`，拒绝返回中文原因。
    */
   function rejectionStatus(rejection) {
-    if (rejection == null || rejection === false || rejection === 0 || rejection === '') return 0
     if (typeof rejection === 'number') return rejection
-    if (typeof rejection === 'object') {
+    if (rejection && typeof rejection === 'object') {
       const status = rejection.status ?? rejection.statusCode
       if (typeof status === 'number') return status
     }
-    return 403
+    return null
   }
 
   function panelHttps() {
@@ -564,7 +568,58 @@ export function apply(ctx, config) {
     }
   }
 
-  /** 宿主已经认出这是一次登录过的 DSH 面板请求。认不出就当没有。 */
+  /** `Host` 头里的主机名。取不到时返回 `null`。端口不参与比较。 */
+  function requestHostName(req) {
+    const raw = String(req?.headers?.host ?? '').trim()
+    if (raw === '') return null
+    try {
+      return new URL(`http://${raw}`).hostname
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 来源（Origin，没有则 Referer）的主机名是否就是这次请求的 `Host`。
+   * 反向代理把公网面板转到本机时，两者都是面板自己的主机名；别的网站打到本机时对不上。
+   */
+  function sourceMatchesRequestHost(req, source) {
+    const from = originHostOf(source)
+    const host = requestHostName(req)
+    if (!from || !host) return false
+    return from.toLowerCase() === host.toLowerCase()
+  }
+
+  /** 浏览器把这次请求标成跨站。这种请求不能改设置。 */
+  function isCrossSiteRequest(req) {
+    return String(req?.headers?.['sec-fetch-site'] ?? '').toLowerCase() === 'cross-site'
+  }
+
+  /**
+   * 宿主明确判定这次请求已登录。
+   * `requestRejection()` 没给拒绝码不算登录：当前 DSH 上 `undefined` 表示 admit 已通过，
+   * 但空返回也可能只是没实现认证，所以这里再要一个明确的已登录信号。
+   */
+  function explicitPanelLogin(connection, req) {
+    if (
+      authSaysYes(connection.isAuthenticated, connection, req) ||
+      authSaysYes(connection.browserAuth?.isAuthenticated, connection.browserAuth, req) ||
+      authSaysYes(connection.auth?.isAuthenticated, connection.auth, req)
+    ) {
+      return true
+    }
+    if (typeof connection.admit !== 'function') return false
+    try {
+      const admission = connection.admit(req)
+      if (!admission || typeof admission !== 'object') return false
+      if ('rejection' in admission && admission.rejection) return false
+      return admission.peer != null
+    } catch {
+      return false
+    }
+  }
+
+  /** 宿主已经明确认出这是一次登录过的 DSH 面板请求。认不出就当没有。 */
   function panelSessionAllows(req) {
     const connection = ctx.get?.('connection')
     if (!connection || typeof connection !== 'object') return false
@@ -576,14 +631,12 @@ export function apply(ctx, config) {
         return false
       }
       const status = rejectionStatus(rejection)
-      if (status === 0) return true
-      if (status === 401 || status !== 403) return false
+      // 401 是明确未登录。除 403（主机围栏）以外的拒绝码也直接拒绝。
+      // null 是空返回，不算已登录，落到下面的明确登录判定。
+      if (status === 401) return false
+      if (status != null && status !== 403) return false
     }
-    return (
-      authSaysYes(connection.isAuthenticated, connection, req) ||
-      authSaysYes(connection.browserAuth?.isAuthenticated, connection.browserAuth, req) ||
-      authSaysYes(connection.auth?.isAuthenticated, connection.auth, req)
-    )
+    return explicitPanelLogin(connection, req)
   }
 
   function checkLocalRequest(req) {
@@ -592,15 +645,22 @@ export function apply(ctx, config) {
     const origin = String(req?.headers?.origin ?? '').trim()
     const referer = String(req?.headers?.referer ?? '').trim()
     const source = origin !== '' ? origin : referer
+    if (isCrossSiteRequest(req)) {
+      return '浏览器把这次请求标成了跨站，设置接口不接受。请在 DSH 面板自己的页面里操作。'
+    }
     if (loopback && source !== '') {
       const host = originHostOf(source)
       if (host === null || !isLoopbackHost(host)) {
-        return `只接受本机页面发来的请求（来源 ${source} 不是本机）。请在本机打开的 DSH 界面里操作。`
+        if (sourceMatchesRequestHost(req, source) && panelSessionAllows(req)) {
+          // 反向代理：对端是本机，来源是公网面板，且已登录、来源与 Host 一致。
+        } else {
+          return `只接受本机页面，或与当前 Host 同源且已登录的面板请求（来源 ${source}）。请在 DSH 面板里操作。`
+        }
       }
     }
     if (!loopback && !panelSessionAllows(req)) {
       const who = addr === '' ? '未知' : addr
-      return `这个接口不按回环地址拦截。对端 ${who} 不是本机，且没有已通过的 DSH 面板会话。请用带登录 token 的面板打开后再改设置（不需要再配 trustedHosts）。`
+      return `这个接口不按回环地址拦截。对端 ${who} 不是本机，且没有已登录的 DSH 面板会话。请用带登录 token 的面板打开后再改设置（不需要再配 trustedHosts）。`
     }
     if (String(req?.method ?? '').toUpperCase() === 'POST' && requestHasBody(req) && !isJsonContentType(req)) {
       const got = String(req?.headers?.['content-type'] ?? '')
@@ -639,8 +699,8 @@ export function apply(ctx, config) {
    * - `POST` → `{ set?: {...}, unset?: [...] }`：先过 schema 校验，再写文件，
    *   最后跑一遍副作用（传输重连 / 用法说明重挂）。
    *
-   * 准入判定见 `checkLocalRequest`：对端不是回环地址、来源不是本机、或 POST 没声明
-   * `application/json` 时一律 403。只写 schema 白名单里的键。
+   * 准入判定见 `checkLocalRequest`：未登录的非本机请求、来源与 Host 对不上的请求、
+   * 或带体 POST 没声明 `application/json` 时一律 403。只写 schema 白名单里的键。
    */
   async function handleSettingsRequest(req, res) {
     // 与 NapCat 路由共用同一道闸门，不许某一条路由自己少判一项。

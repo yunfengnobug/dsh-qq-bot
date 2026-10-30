@@ -337,7 +337,8 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 > 插件都一样）。本插件因此**自己挂了一条设置接口**：`GET/POST /api/qq-bridge/settings`。
 > 值存 `$DSH_HOME/qq-bridge-settings.json`，优先级为 **设置文件 > `cordis.patch.yml` 里的安装配置**（composition config）。
 > 卡片照常可以使用；`cordis.patch.yml` 也仍然可以修改（改完重启生效，且会被上面的设置文件覆盖）。
-> 本机回环请求可以直接改（命令行、SSH 隧道、本机打开的面板）。经反向代理进来时，认 DSH 面板已经通过的登录会话，**不必再配 `trustedHosts`**。卡片上的读取和保存会带上面板登录 cookie（`credentials: 'include'`）。没有会话的外网请求仍然 403。打到本机 `127.0.0.1`、但来源是别的网站的请求也仍然拒绝。接口只写 schema 白名单里的键。
+> 本机回环、且没有外来源（命令行、SSH 隧道）或来源也是本机时，可以直接改。经反向代理进来时，对端常常仍是 `127.0.0.1`，来源却是公网面板地址：这时必须是**已经登录**的面板会话，并且来源主机名和这次请求的 `Host` 一致，设置才能保存。卡片上的读取和保存会带上面板登录 cookie（`credentials: 'include'`）。**不必再配 `trustedHosts`**。
+> 宿主 `requestRejection()` 返回空、`undefined` 或 `0` **不算**已登录。已登录只认宿主明确给出的结果：`isAuthenticated`、浏览器会话，或 `admit()` 交回的身份。没有这个结果的外网请求是 403。来源是别的网站、和 `Host` 对不上的请求也是 403，就算带着 cookie 也不行。接口只写 schema 白名单里的键。
 
 卡片展开后还有 3 个操作按钮（0.1.5 与 0.2.0 上都有）：
 
@@ -350,7 +351,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
   Linux 用 `xdg-open`）。目录不存在时不打开，卡片上会提示：自己部署或 Docker 里的路径通常不是默认值，请填写「NapCat 安装目录」。
 
 这 3 个按钮走 `GET /api/qq-bridge/napcat`、`POST /api/qq-bridge/napcat/launch`、
-`POST /api/qq-bridge/napcat/reveal`，准入与设置接口相同：本机可以直接用，反向代理要带已登录的面板会话。没有会话的外网请求 403。请求进行中按钮禁用，token 只拼进 URL 不写日志。
+`POST /api/qq-bridge/napcat/reveal`，准入与设置接口相同：本机可以直接用；反向代理要带已登录的面板会话，且来源主机名和 `Host` 一致。没有明确登录结果的外网请求 403。请求进行中按钮禁用，token 只拼进 URL 不写日志。
 
 修改**出站方式**会立刻重挂注入给目标会话的用法说明：提示词正文按模式分叉，
 不重挂时模型会按本部署里已经不生效的做法回话。
