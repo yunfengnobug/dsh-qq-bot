@@ -9,10 +9,14 @@ import {
   findSticker,
   hashOfBuffer,
   importSticker,
+  isCompleteMface,
   listStickers,
   loadStickers,
+  mfaceSendData,
+  normalizeMface,
   saveStickers,
   shortHash,
+  stickerKind,
   upsertSticker,
 } from './stickers.js'
 
@@ -132,6 +136,36 @@ const H2 = hashOfBuffer(PNG2)
       return true
     }
   })())
+  const FACE = { emoji_id: 'e1', emoji_package_id: '203', key: 'k1', summary: '[好]' }
+  const withFace = importSticker({ store, srcPath: src1, destDir, mood: '无语', description: '商城表情', mface: FACE })
+  check(
+    'importSticker：商城表情字段收成整数 package id',
+    withFace.mface?.emoji_id === 'e1' && withFace.mface?.emoji_package_id === 203 && withFace.mface?.key === 'k1' && withFace.mface?.summary === '[好]',
+    JSON.stringify(withFace.mface),
+  )
+  check('importSticker：四字段齐全 → 可发 mface', isCompleteMface(withFace.mface) && stickerKind(withFace) === 'mface')
+  check(
+    'mfaceSendData：出站 data 用数字 package id',
+    JSON.stringify(mfaceSendData(withFace)) === JSON.stringify({ emoji_package_id: 203, emoji_id: 'e1', key: 'k1', summary: '[好]' }),
+    JSON.stringify(mfaceSendData(withFace)),
+  )
+  const kept = importSticker({ store, srcPath: src1, destDir, mood: '开心', description: '重存不带 mface' })
+  check(
+    'importSticker：重存没带 mface 时保留原来的',
+    kept.mood === '开心' && kept.description === '重存不带 mface' && kept.mface?.key === 'k1' && kept.sentCount === 5,
+    JSON.stringify(kept.mface),
+  )
+  const renamed = importSticker({ store, srcPath: src1, destDir, mood: '开心', description: '只改表情名', mface: { summary: '[更好]' } })
+  check(
+    'importSticker：只带来的字段覆盖，其余 mface 字段还在',
+    renamed.mface?.summary === '[更好]' && renamed.mface?.emoji_id === 'e1' && renamed.mface?.key === 'k1' && renamed.mface?.emoji_package_id === 203,
+    JSON.stringify(renamed.mface),
+  )
+  check('normalizeMface：只有 summary 不算商城表情', normalizeMface({ summary: '普通图' }) === null)
+  check('normalizeMface：小数 package id 丢掉，于是不齐全', isCompleteMface({ emoji_id: 'e1', emoji_package_id: 1.5, key: 'k1', summary: '[好]' }) === false)
+  check('mfaceSendData：缺 key 返回 null', mfaceSendData({ mface: { emoji_id: 'e1', emoji_package_id: 1, summary: '[好]' } }) === null)
+  check('stickerKind：没有 mface 的条目是 image', stickerKind({ hash: 'abc' }) === 'image')
+
   check('importSticker：无扩展名的源文件回落到 png', (() => {
     const src2 = join(dir, 'noext')
     writeFileSync(src2, PNG2)
