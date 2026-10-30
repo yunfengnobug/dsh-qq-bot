@@ -52,112 +52,121 @@ window.__ModuleLoader__.load({
       },
       {
         key: 'targetSessionId',
-        label: '目标会话',
+        label: '接到哪个会话',
         kind: 'session',
-        hint: '要接管哪个会话 —— 按名字选就行，不用记 id。',
+        hint: '按名字选就行，不用记那串 id。选「每个群、每个私聊各记各的」时可以留空，留空就用宿主当前的默认模型；填了则新建的会话沿用这个会话的模型。',
       },
       {
         key: 'nicknames',
-        label: '昵称',
+        label: '听到这些名字就回应',
         kind: 'list',
-        hint: '被叫到这些名字必然唤醒；逗号分隔，例如：244, 小助手。',
+        hint: '别人喊到这些名字就一定回话。用逗号分开，例如：244, 小助手。',
       },
       {
         key: 'wakeProbability',
-        label: '唤醒概率',
+        label: '没点名时的回应概率',
         kind: 'number',
         step: '0.01',
-        hint: '既没被 @ 也没叫名字时的唤醒概率（0–1）。默认 0.05 = 5%；嫌耗 token 就调小。',
+        hint: '没 @、也没喊名字时，按这个概率回话（0 到 1）。默认 0.05，也就是大约二十条里回一条。想少说话就调小。',
       },
       {
         key: 'whitelist',
-        label: '私聊白名单',
+        label: '哪些私聊可以叫醒',
         kind: 'list',
-        hint: '允许唤醒的私聊 QQ 号；**空 = 谁都不能唤醒**。',
+        hint: '填 QQ 号，用逗号分开。留空 = 任何私聊都不会叫醒机器人。',
       },
       {
         key: 'groupWhitelist',
-        label: '群白名单',
+        label: '哪些群可以叫醒',
         kind: 'list',
-        hint: '允许唤醒的群号；**空 = 任何群都不唤醒**。',
+        hint: '填群号，用逗号分开。留空 = 任何群都不会叫醒机器人。',
       },
       {
         key: 'atOnlyInGroup',
-        label: '群里只认 @',
+        label: '群里必须 @ 才理',
         kind: 'boolean',
-        hint: '开启后，群里没被 @ 就完全不处理（比概率唤醒更严）。',
+        hint: '打开之后，群里没 @ 机器人就当没看见。比上面的概率更严。',
       },
       {
         key: 'replyMode',
-        label: '出站方式',
+        label: '群里发出去的是哪一段',
         kind: 'select',
         options: [
-          ['marker', '标记块（默认）'],
-          ['tool', '工具调用'],
-          ['always', '整轮都发'],
+          ['marker', '只发「发给群」里的那段'],
+          ['tool', '用发消息工具'],
+          ['always', '整段回答都进群（慎用）'],
         ],
-        hint: '标记块 = 只发块里的内容；工具调用 = 关掉标记块、改用 qq_bridge_send 发送（每轮多一次模型调用，但发不出去时有明确反馈）；整轮都发 = 技术内容也会进群，慎用。',
+        hint: '「发给群」的那段要用 [QQ] 和 [/QQ] 包起来，包外面的话不会进群。选「用发消息工具」就改调 qq_bridge_send。选「整段回答都进群」会把思考过程也发出去，一般别用。',
       },
       {
         key: 'delivery',
-        label: '投递方式',
+        label: '忙的时候怎么插话',
         kind: 'select',
         options: [
-          ['auto', '自动（忙时插话）'],
-          ['followup', '排队'],
-          ['steer', '总是插话'],
+          ['auto', '能插就插，不能就排队（推荐）'],
+          ['followup', '一律新开一轮'],
+          ['steer', '不管忙不忙都插'],
         ],
-        hint: 'QQ 消息怎么进目标会话：自动 = 目标正忙就插话（在下一个 step 边界塞进去）、空闲时排队；排队 = 永远排成独立一轮（更稳）；总是插话 = 无论忙闲都插。',
+        hint: '推荐：会话正忙就插进去接着说，闲着就排队等下一轮。「一律新开一轮」每次都等当前这轮结束。「不管忙不忙都插」会打断正在做的事。',
       },
-      { key: 'replyWithQuote', label: '引用原消息', kind: 'boolean', hint: '回复时引用触发的那条消息。' },
-      { key: 'stripMarkdown', label: '去掉 Markdown', kind: 'boolean', hint: '出站前去掉 Markdown 标记（QQ 不渲染）。' },
+      { key: 'replyWithQuote', label: '回复时带上原消息', kind: 'boolean', hint: '回话时引用那条把机器人叫醒的消息。' },
+      { key: 'stripMarkdown', label: '去掉 Markdown 记号', kind: 'boolean', hint: '发出去之前拿掉 **粗体**、`代码` 这类记号。QQ 不会渲染它们。' },
       {
         key: 'replyMaxChars',
-        label: '出站字数上限',
+        label: '一条最多多少字',
         kind: 'number',
-        hint: '出站文本的字数上限；超过就不发送，请缩短后重发。',
+        hint: '超过这个字数就整条不发，需要缩短后再发。',
       },
       {
         key: 'onebotUrl',
-        label: 'OneBot 地址',
+        label: 'OneBot 连接地址',
         kind: 'text',
-        hint: 'NapCat 的正向 WS 地址，如 ws://127.0.0.1:3001；留空 = 完全不启用传输。',
+        hint: 'NapCat 的 WebSocket 地址，例如 ws://127.0.0.1:3001。留空 = 先不连接。',
       },
       {
         key: 'accessTokenEnv',
-        label: 'OneBot Token 凭据名',
+        label: 'OneBot 令牌放在哪个环境变量',
         kind: 'text',
-        hint: '指 **NapCat / OneBot 的 access_token** 存在哪个环境变量里 —— 填「变量名」（如 NAPCAT_TOKEN），不是 token 本身；NapCat 没开 token 校验就留空。⚠️ 不是模型 API key（DeepSeek 等），两者无关，别填错。',
+        hint: '填环境变量的名字（例如 NAPCAT_TOKEN），不要把令牌本身贴进来。这也不是模型的 API key。NapCat 没开令牌校验就留空。',
         check: (v) => {
           const s = String(v ?? '').trim()
           if (s === '') return null
           if (/^(sk-|Bearer\s)/i.test(s) || s.length > 64 || /[.\s]/.test(s)) {
-            return '这看起来像一串 token —— 这一栏要填的是「存它的环境变量名」（如 NAPCAT_TOKEN），不是 token 本身。'
+            return '这里要填的是环境变量名（例如 NAPCAT_TOKEN），不是令牌本身，也不是模型的 API key。'
           }
           return null
         },
       },
-      { key: 'selfId', label: '机器人 QQ', kind: 'text', hint: '留空 = 连上后自动获取。' },
-      // ↓ 这些键以前只在 Schema 里、卡片上没做输入框，等于“设了也改不了”（用户报的正是这个）
+      { key: 'selfId', label: '机器人自己的 QQ 号', kind: 'text', hint: '留空 = 连上之后自动读取。' },
       {
         key: 'visionModel',
-        label: '识图模型',
+        label: '用来看图的模型',
         kind: 'text',
-        hint: '给图片写描述的多模态模型，形如 provider/model（如 deepseek-official/deepseek-v4-flash-vision-exp）；留空 = 自动找（优先名字带 vision 的）。',
+        hint: '写成 provider/model。留空 = 自动找一个能看图的模型。',
       },
       {
         key: 'agentPreset',
-        label: 'Agent Preset',
+        label: '人设预设',
         kind: 'text',
-        hint: '恢复目标会话时挂载哪个 preset（决定它的人设/人格）；留空 = 沿用会话自己记着的那个。',
+        hint: '接到会话时用哪套人设。留空 = 沿用那个会话自己记着的。',
       },
-      { key: 'attachRecentChat', label: '附带未唤醒记录', kind: 'boolean', hint: '唤醒时是否把"未唤醒期间"的聊天记录一并附上。' },
-      { key: 'recentChatLimit', label: '附带条数', kind: 'number', hint: '上面那段摘要最多带最近几条（0–200）。' },
-      { key: 'napcatInstallDir', label: 'NapCat 目录', kind: 'text', hint: 'NapCat 安装目录；留空 = $DSH_HOME/napcat。' },
-      { key: 'napcatVersion', label: 'NapCat 版本', kind: 'text', hint: '要下载的版本 tag（如 v4.18.28）；留空 = 最新。' },
-      { key: 'downloadProxy', label: '下载代理', kind: 'text', hint: '下载 NapCat 用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量。' },
-      { key: 'onebotPort', label: 'OneBot 端口', kind: 'number', hint: '写进 NapCat 配置、并用来连的正向 WS 端口。' },
-      { key: 'qqNumber', label: '快速登录 QQ', kind: 'text', hint: '快速登录用的 QQ 号（需先成功登录过一次）。' },
+      { key: 'attachRecentChat', label: '把没叫醒时的聊天一并带上', kind: 'boolean', hint: '下次叫醒时，把中间没理的那些话一起附上。' },
+      { key: 'recentChatLimit', label: '附带最近几条', kind: 'number', hint: '上面那段最多带最近几条（0–200）。' },
+      {
+        key: 'napcatInstallDir',
+        label: 'NapCat 安装目录',
+        kind: 'text',
+        hint: '留空 = $DSH_HOME/napcat。自己装的或 Docker 里的 NapCat 不在这个默认位置，请填实际目录。',
+      },
+      { key: 'napcatVersion', label: '要下载的 NapCat 版本', kind: 'text', hint: '例如 v4.18.28。留空 = 下载最新版。' },
+      { key: 'downloadProxy', label: '下载时走的代理', kind: 'text', hint: '例如 http://127.0.0.1:7890。留空 = 先看环境变量，没有就直接下载。' },
+      {
+        key: 'onebotPort',
+        label: 'OneBot 端口',
+        kind: 'number',
+        hint: '写进 NapCat 配置、也用来连接的端口。NapCat 如果是自己另外部署的，这里要和那边的端口一致。',
+      },
+      { key: 'qqNumber', label: '快速登录用的 QQ 号', kind: 'text', hint: '需要先在 NapCat 里成功登录过一次。' },
     ]
 
     function format(field, raw) {
@@ -214,7 +223,7 @@ window.__ModuleLoader__.load({
      */
     function sessionOptions(state, current, archivedIds) {
       const archived = new Set((Array.isArray(archivedIds) ? archivedIds : []).map((id) => String(id)))
-      const out = [{ value: '', label: '（不驱动任何会话）' }]
+      const out = [{ value: '', label: '（不接到任何会话）' }]
       const ids = Array.isArray(state?.ids) ? state.ids : []
       const byId = state && typeof state.byId === 'object' && state.byId ? state.byId : {}
       const cur = String(current ?? '')

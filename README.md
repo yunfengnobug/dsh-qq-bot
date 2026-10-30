@@ -43,8 +43,8 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
 - **图片可见**：图片先落盘缓存。唤醒时由多模态模型写成文字。文字填回图片原来的位置。
 - **表情包**：群友发的图可以登记成表情包，之后按情绪或哈希再发出去。登记过的图不再调用多模态模型。
   详见[表情包](#表情包)。
-- **有设置卡片**：昵称、白名单、概率、目标会话、出站方式、OneBot 地址、视觉模型等都在
-  `设置 → 插件 → 插件配置` 里修改，保存即生效。
+- **有设置卡片**：名称是白话（哪些群可以叫醒、群里发出去的是哪一段、忙的时候怎么插话等），
+  配置键仍是英文。在 `设置 → 插件 → 插件配置` 里修改，保存即生效。
 - **NapCat 自助托管**：插件可以按需下载、校验、解包、写配置、启停 NapCat。
 
 **不做的三件事**：
@@ -323,8 +323,9 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 ## 设置界面与全部设置项
 
-**设置 → 插件 → 插件配置** 里有一张 **QQ 桥接** 卡片（可折叠）。昵称、白名单、唤醒概率、目标会话、
-出站方式、OneBot 地址、视觉模型等都在这里修改，**保存即生效**（写入 `settings.yaml` 的用户层，不用重启）。
+**设置 → 插件 → 插件配置** 里有一张 **QQ 桥接** 卡片（可折叠）。卡片上的名称是白话
+（例如「哪些群可以叫醒」「群里发出去的是哪一段」），写进配置文件的键仍是英文。
+在这里修改后**保存即生效**（写入 `settings.yaml` 的用户层，不用重启）。
 
 > **DSH 0.2.0 上**：宿主不再给第三方插件可写的设置命名空间（DSH #677 的迁移未完成，生态里所有走这条路的
 > 插件都一样）。本插件因此**自己挂了一条设置接口**：`GET/POST /api/qq-bridge/settings`。
@@ -353,32 +354,34 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 **已归档的会话不会列出**，当前选中的那个例外，会标成“（已归档）”。
 配置里的会话不在列表里时（别的工作区、宿主还没有加载完），保留成“（不在会话列表里）”的兜底项。
 
+卡片上的叫法和下面「说明」一致。第一列是配置键，不会出现在按钮上。
+
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `targetSessionId` | `''` | 固定目标会话 id。`single` 时**空 = 不驱动任何会话**。`perGroup` 时可以留空（新建会话用宿主当前默认模型）；填了则新建会话沿用该会话的模型 |
-| `sessionScope` | `single` | `single` = 所有群共用 `targetSessionId`；`perGroup` = 每个群、每个私聊各开一条 DSH 会话，映射写在状态文件的 `sessionByDest`（键为 `group:<群号>` / `private:<QQ号>`） |
-| `maxRecentTurns` | `40` | 每个被 QQ 驱动的会话最多保留的最近轮数。超出后调用宿主 `compaction.compactNow` 尽量压缩。`0` = 不限制 |
-| `nicknames` | `['244','小助手']` | 命中即唤醒 |
-| `wakeProbability` | `0.05` | 非昵称消息唤醒概率 |
-| `whitelist` / `groupWhitelist` | `[]` | 私聊 / 群白名单（**空 = 任何来源都不能唤醒**） |
-| `attachRecentChat` / `recentChatLimit` | `true` / `8` | 是否把未唤醒聊天附给下次唤醒，以及条数 |
-| `atOnlyInGroup` | `false` | 群里只有被 @ 才处理 |
-| `replyMode` | `'marker'` | 出站方式开关：`marker` ｜ `tool` ｜ `always` |
-| `delivery` | `'auto'` | 投递方式：`auto`（忙则插话）｜ `followup` ｜ `steer` |
-| `replyMaxChars` | `1500` | 出站字数上限（下限 100）；**超过就不发送** |
-| `replyWithQuote` | `false` | 回复时引用触发的那条消息 |
-| `stripMarkdown` | `true` | 出站去掉 Markdown 标记 |
-| `visionModel` | `''` | 给图片写描述的多模态模型（`"provider/model"`）；空 = 自动查找 |
-| `agentPreset` | `''` | resume 目标会话时挂载的 agent preset；空 = 沿用会话 header 里记录的 |
-| `onebotUrl` | `''` | NapCat 正向 WS 地址；空 = 不启用传输 |
-| `accessTokenEnv` | `''` | access_token 的凭据引用名 |
-| `selfId` | `''` | 插件自身的 QQ 号；空 = 连上后自动获取 |
-| `heartbeatTimeoutMs` | `90000` | 多久没有 WS 流量就判定连接已死并重连 |
-| `napcatInstallDir` | `''` | NapCat 安装目录；空 = `$DSH_HOME/napcat` |
-| `napcatVersion` | `''` | 要装的版本 tag；空 = 最新 |
-| `downloadProxy` | `''` | 下载用代理；空 = 读环境变量 |
-| `onebotPort` | `3001` | 写进 NapCat 配置并用来连的 WS 端口 |
-| `qqNumber` | `''` | 快速登录用 QQ 号（需先手动登录过一次） |
+| `targetSessionId` | `''` | 接到哪个会话。`single` 时**空 = 不接到任何会话**。`perGroup` 时可以留空（新建会话用宿主当前默认模型）；填了则新建会话沿用该会话的模型 |
+| `sessionScope` | `single` | 会话怎么分。`single` = 所有群共用一个会话；`perGroup` = 每个群、每个私聊各记各的，映射写在状态文件的 `sessionByDest`（键为 `group:<群号>` / `private:<QQ号>`） |
+| `maxRecentTurns` | `40` | 每个会话最多留几轮。超出后调用宿主 `compaction.compactNow` 尽量压缩。`0` = 不限制 |
+| `nicknames` | `['244','小助手']` | 听到这些名字就回应 |
+| `wakeProbability` | `0.05` | 没点名时的回应概率 |
+| `whitelist` / `groupWhitelist` | `[]` | 哪些私聊可以叫醒 / 哪些群可以叫醒（**留空 = 谁都不能叫醒**） |
+| `attachRecentChat` / `recentChatLimit` | `true` / `8` | 把没叫醒时的聊天一并带上，以及附带最近几条 |
+| `atOnlyInGroup` | `false` | 群里必须 @ 才理 |
+| `replyMode` | `'marker'` | 群里发出去的是哪一段：`marker` 只发「发给群」里的那段｜`tool` 用发消息工具｜`always` 整段回答都进群（慎用） |
+| `delivery` | `'auto'` | 忙的时候怎么插话：`auto` 能插就插，不能就排队（推荐）｜`followup` 一律新开一轮｜`steer` 不管忙不忙都插 |
+| `replyMaxChars` | `1500` | 一条最多多少字（下限 100）；**超过就不发送** |
+| `replyWithQuote` | `false` | 回复时带上原消息 |
+| `stripMarkdown` | `true` | 去掉 Markdown 记号 |
+| `visionModel` | `''` | 用来看图的模型（`provider/model`）；空 = 自动查找 |
+| `agentPreset` | `''` | 人设预设；空 = 沿用会话自己记着的 |
+| `onebotUrl` | `''` | OneBot 连接地址；空 = 先不连接 |
+| `accessTokenEnv` | `''` | OneBot 令牌放在哪个环境变量（填变量名，不是令牌，也不是模型 API key） |
+| `selfId` | `''` | 机器人自己的 QQ 号；空 = 连上后自动读取 |
+| `heartbeatTimeoutMs` | `90000` | 多久没收到连接数据就判定断线并重连 |
+| `napcatInstallDir` | `''` | NapCat 安装目录；空 = `$DSH_HOME/napcat`。自己装的或 Docker 里的请填实际目录 |
+| `napcatVersion` | `''` | 要下载的 NapCat 版本；空 = 最新 |
+| `downloadProxy` | `''` | 下载时走的代理；空 = 读环境变量 |
+| `onebotPort` | `3001` | OneBot 端口。自己另外部署的 NapCat 要和这边一致 |
+| `qqNumber` | `''` | 快速登录用的 QQ 号（需先手动登录过一次） |
 
 这些值优先从设置界面 / `settings.yaml` 取，未设置时回落到 `cordis.patch.yml` 里的 composition base。
 
@@ -476,7 +479,7 @@ QQ 侧没有人能点击“同意”，因此：
 
 改用法、设置或运行行为时，同一次提交里更新本文件。约定见 [`AGENTS.md`](./AGENTS.md)。
 
-4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **516 条断言**：
+4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **518 条断言**：
 
 ```powershell
 node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具 + 设置卡片字段（假 ctx，纯离线）

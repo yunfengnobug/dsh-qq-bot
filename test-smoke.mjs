@@ -1294,6 +1294,20 @@ function sawSentText(s) {
       const cardKeys = (mod.__test?.fields ?? []).map((x) => x.key)
       const schemaKeys = Object.keys(registeredSettings[0]?.schema?.dict ?? {})
       const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k))
+      const replyModeField = (mod.__test?.fields ?? []).find((x) => x.key === 'replyMode')
+      const deliveryField = (mod.__test?.fields ?? []).find((x) => x.key === 'delivery')
+      check(
+        '群里发出去的是哪一段：三个选项是白话',
+        replyModeField?.label === '群里发出去的是哪一段' &&
+          replyModeField.options.map((o) => o[1]).join('|') === '只发「发给群」里的那段|用发消息工具|整段回答都进群（慎用）',
+        JSON.stringify(replyModeField?.options),
+      )
+      check(
+        '忙的时候怎么插话：三个选项是白话',
+        deliveryField?.label === '忙的时候怎么插话' &&
+          deliveryField.options.map((o) => o[1]).join('|') === '能插就插，不能就排队（推荐）|一律新开一轮|不管忙不忙都插',
+        JSON.stringify(deliveryField?.options),
+      )
       check('每个 settings 键在卡片上都有输入框', notOnCard.length === 0, `缺：${notOnCard.join(', ')}（卡片共 ${cardKeys.length} 项）`)
       check('卡片上的键都真实存在于 Schema（没写错名字）', cardKeys.every((k) => schemaKeys.includes(k)), cardKeys.filter((k) => !schemaKeys.includes(k)).join(', '))
     }
@@ -1306,7 +1320,7 @@ function sawSentText(s) {
       byId: { s1: { displayTitle: '甲' }, s2: { displayTitle: '乙', running: true }, s3: { displayTitle: '丙' } },
     }
     const opts = so(list, 's1', ['s3'])
-    check('第一项是「不驱动任何会话」', opts[0]?.value === '', JSON.stringify(opts[0]))
+    check('第一项是「不接到任何会话」', opts[0]?.value === '' && String(opts[0]?.label).includes('不接到任何会话'), JSON.stringify(opts[0]))
     check('归档的会话不出现在下拉里', !opts.some((o) => o.value === 's3'), JSON.stringify(opts.map((o) => o.value)))
     check('运行中的会话有标注', String(opts.find((o) => o.value === 's2')?.label ?? '').includes('运行中'))
     const keep = so(list, 's3', ['s3'])
