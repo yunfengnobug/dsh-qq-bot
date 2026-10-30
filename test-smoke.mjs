@@ -2614,8 +2614,43 @@ function sawSentText(s) {
       }
       // 摘要不掺进来：断言只看本条消息那一段。
       resolved2.attachRecentChat = false
+      let streamCancelled = false
       globalThis.fetch = async (url) => {
-        if (String(url).includes('bad')) throw new Error('fetch failed')
+        const href = String(url)
+        if (href.includes('bad')) throw new Error('fetch failed')
+        if (href.includes('huge-header')) {
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: (name) => (name === 'content-length' ? String(9 * 1024 * 1024) : null) },
+            body: { cancel: async () => {} },
+            arrayBuffer: async () => {
+              throw new Error('不该读取超限正文')
+            },
+          }
+        }
+        if (href.includes('huge-stream')) {
+          streamCancelled = false
+          const chunk = new Uint8Array(1024 * 1024)
+          let sent = 0
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            body: {
+              getReader: () => ({
+                read: async () => {
+                  sent += chunk.byteLength
+                  if (sent > 9 * 1024 * 1024) return { done: true, value: undefined }
+                  return { done: false, value: chunk }
+                },
+                cancel: async () => {
+                  streamCancelled = true
+                },
+              }),
+            },
+          }
+        }
         return {
           ok: true,
           status: 200,
@@ -2638,6 +2673,17 @@ function sawSentText(s) {
         goodFirst === `[图片#${short}]：一只无语的猫[图片]（未描述）`,
         goodFirst,
       )
+
+      const warnedHuge = warnings.length
+      const hugeHeader = await fireImages(['https://huge-header.invalid/1.png'])
+      check('单张图 content-length 超过 8MB → 不落盘', hugeHeader === '[图片]（未描述）', hugeHeader)
+      check(
+        '超限的 content-length 写进日志',
+        warnings.slice(warnedHuge).some((w) => String(w).includes('声明了')),
+        JSON.stringify(warnings.slice(warnedHuge)),
+      )
+      const hugeStream = await fireImages(['https://huge-stream.invalid/1.png'])
+      check('单张图读流超过 8MB → 中止且不落盘', hugeStream === '[图片]（未描述）' && streamCancelled === true, hugeStream)
 
       // 唤醒认领了“下一轮”，走一遍 turn/start + turn/end 把闸门还原。
       stickerHandlers['session/event']({ id: 'session-sticker' }, { type: 'turn/start', data: { turn: 9 } })

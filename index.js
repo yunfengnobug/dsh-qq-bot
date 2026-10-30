@@ -108,6 +108,8 @@ const MAX_BUFFER_IMAGES_TOTAL = 10
 /** 图片本地缓存：容量上限，超出就淘汰最旧的（用户提议的方案）。 */
 const MAX_IMAGE_CACHE_BYTES = 64 * 1024 * 1024
 const MAX_IMAGE_CACHE_FILES = 300
+/** 单次下载的上限。缓存目录的 64MB 管的是落盘总量，不管这一张读进来多大。 */
+const MAX_IMAGE_DOWNLOAD_BYTES = 8 * 1024 * 1024
 /** 摘要默认取最近几条（`recentChatLimit` 的默认值）。 */
 const DEFAULT_RECENT_CHAT_LIMIT = 8
 /** `qq_bridge_sticker` 的 `list` 最多列几条。 */
@@ -1671,13 +1673,53 @@ export function apply(ctx, config) {
    * 而且**命中已有文件时照样能拿到 hash**（表情包登记与描述缓存都按 hash 认图）。
    * @returns {{path: string, mediaType: string, bytes: number, hash: string} | null}
    */
+  /** 把响应正文读进内存，超过单张上限就停掉流，不再继续收。 */
+  async function readCappedImageBody(res) {
+    const limit = MAX_IMAGE_DOWNLOAD_BYTES
+    const declared = Number(res.headers?.get?.('content-length'))
+    if (Number.isFinite(declared) && declared > limit) {
+      try {
+        await res.body?.cancel?.()
+      } catch {
+        // 已经决定不要这份正文
+      }
+      throw new Error(`图片超过 ${limit} 字节（声明了 ${declared} 字节）`)
+    }
+    const reader = res.body?.getReader?.()
+    if (typeof reader?.read === 'function') {
+      const chunks = []
+      let size = 0
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          const buf = Buffer.from(value)
+          size += buf.length
+          if (size > limit) throw new Error(`图片超过 ${limit} 字节，已中止下载`)
+          chunks.push(buf)
+        }
+      } catch (error) {
+        try {
+          await reader.cancel()
+        } catch {
+          // 取消失败不影响这次拒绝
+        }
+        throw error
+      }
+      return Buffer.concat(chunks)
+    }
+    const data = Buffer.from(await res.arrayBuffer())
+    if (data.length > limit) throw new Error(`图片超过 ${limit} 字节（实际 ${data.length} 字节）`)
+    return data
+  }
+
   async function cacheImage(item) {
     try {
       if (!item?.url) return null
       mkdirSync(imageCacheDir, { recursive: true })
       const res = await fetch(item.url, { signal: AbortSignal.timeout(20000) })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = Buffer.from(await res.arrayBuffer())
+      const data = await readCappedImageBody(res)
       const mediaType = sniffImageMediaType(data)
       if (!mediaType) throw new Error(`不是可识别的图片（${data.length} 字节）`)
       const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[mediaType]
