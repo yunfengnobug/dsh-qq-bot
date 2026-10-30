@@ -949,7 +949,10 @@ export function apply(ctx, config) {
     }
   }
 
-  function saveState() {
+  /** 同一轮里多次改状态只落一次盘。微任务里写的是当时的最新内容。 */
+  let stateFlushQueued = false
+
+  function writeStateFile() {
     try {
       mkdirSync(dirname(statePath), { recursive: true })
       const tmp = `${statePath}.tmp`
@@ -958,6 +961,18 @@ export function apply(ctx, config) {
     } catch (error) {
       logger.warn(`state save failed: ${error?.message ?? error}`)
     }
+  }
+
+  function saveState() {
+    if (stateFlushQueued) return
+    stateFlushQueued = true
+    queueMicrotask(flushState)
+  }
+
+  function flushState() {
+    if (!stateFlushQueued) return
+    stateFlushQueued = false
+    writeStateFile()
   }
 
   /**
@@ -1394,6 +1409,7 @@ export function apply(ctx, config) {
   }
 
   ctx.effect(() => () => {
+    flushState()
     for (const handle of handles.values()) {
       Promise.resolve(handle.dispose()).catch(() => {})
     }
