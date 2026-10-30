@@ -341,8 +341,8 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = react.useState(false)
       const [error, setError] = react.useState('')
       const [note, setNote] = react.useState('')
-      // 折叠块：跟官方那几张卡片一致 —— 默认收起
-      const [open, setOpen] = react.useState(false)
+      // 默认展开：字段直接可见。标题仍可收起。
+      const [open, setOpen] = react.useState(true)
       // NapCat 的三个操作按钮：展开时拉一次接口；拿不到就保持 null（按钮禁用）。
       const [napcat, setNapcat] = react.useState(null)
       const [napcatBusy, setNapcatBusy] = react.useState('')
@@ -392,7 +392,7 @@ window.__ModuleLoader__.load({
        */
       async function fetchNapcat() {
         if (typeof fetch !== 'function') return undefined
-        const res = await fetch(NAPCAT_API, { headers: { accept: 'application/json' } })
+        const res = await fetch(NAPCAT_API, { credentials: 'include', headers: { accept: 'application/json' } })
         const body = await res.json().catch(() => ({}))
         return body && body.ok === true ? body : undefined
       }
@@ -431,6 +431,7 @@ window.__ModuleLoader__.load({
           // 这两个动作本身没有请求体，服务端也放行无体的 POST —— 那条是给还没刷新的旧 bundle 兜底。
           const res = await fetch(`${NAPCAT_API}/${action}`, {
             method: 'POST',
+            credentials: 'include',
             headers: { 'content-type': 'application/json' },
           })
           const body = await res.json().catch(() => ({}))
@@ -682,7 +683,6 @@ window.__ModuleLoader__.load({
         h('span', { style: S.sub }, dirty ? '有未保存的改动' : '把固定的 DSH 会话接到 QQ'),
         h('span', { style: S.chevron }, open ? '▴' : '▾'),
       )
-      // 默认收起：和官方那几张卡片一样，点标题才展开，免得一屏全是表单
       if (!open) return h('div', { style: S.wrap }, header)
       return h(
         'div',
@@ -790,7 +790,7 @@ window.__ModuleLoader__.load({
         }
         publish({ status: 'loading' })
         try {
-          const res = await fetch(API_PATH, { headers: { accept: 'application/json' } })
+          const res = await fetch(API_PATH, { credentials: 'include', headers: { accept: 'application/json' } })
           const body = await res.json().catch(() => ({}))
           if (!res.ok || body?.ok !== true) throw new Error(body?.error || `HTTP ${res.status}`)
           accept(body)
@@ -813,6 +813,7 @@ window.__ModuleLoader__.load({
         set: async (field, value) => {
           const res = await fetch(API_PATH, {
             method: 'POST',
+            credentials: 'include',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ set: { [field]: value } }),
           })
@@ -825,6 +826,7 @@ window.__ModuleLoader__.load({
           if (typeof fetch !== 'function') throw new Error('qq-bridge: 这个环境没有 fetch')
           const res = await fetch(API_PATH, {
             method: 'POST',
+            credentials: 'include',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ unset: [field] }),
           })
@@ -935,47 +937,134 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** 插件详情页只在这一包上显示设置。旧包名和 Cordis id 也认。 */
+    function subjectIsOurs(subject) {
+      if (!subject || typeof subject !== 'object') return false
+      const pkgName = subject.pkg && typeof subject.pkg === 'object' ? String(subject.pkg.name ?? '') : ''
+      if (pkgName === 'dsh-qq-bot' || pkgName === 'dsh-qq-bridge') return true
+      const id = String(subject.id ?? '')
+      if (id === NS || id === 'dsh-qq-bot' || id === 'dsh-qq-bridge') return true
+      if (subject.kind === 'item' && id.includes('qq-bridge')) return true
+      const pkg = String(subject.package ?? subject.packageName ?? '')
+      return pkg === 'dsh-qq-bot' || pkg === 'dsh-qq-bridge'
+    }
+
+    /**
+     * 不经过宿主设置服务，直接读写 `/api/qq-bridge/settings`。
+     * DSH 0.2.x 上 `settingsScope` / `webUiSettings` 可能根本不存在；再等它们，卡片永远不会挂上。
+     */
+    function apiBoundScope() {
+      const api = createApiScope()
+      return {
+        namespaces: [],
+        via: () => (api.getSnapshot().status === 'ready' ? 'api' : 'none'),
+        detail: () => {
+          const apiSnap = api.getSnapshot()
+          return `本机接口=${apiSnap.status}${apiSnap.reason ? `（${apiSnap.reason}）` : ''}`
+        },
+        getSnapshot: () => {
+          api.start()
+          const apiSnap = api.getSnapshot()
+          if (apiSnap.status === 'ready') return apiSnap
+          if (apiSnap.status === 'loading' || apiSnap.status === 'idle') return LOADING_SNAPSHOT
+          return UNAVAILABLE_SNAPSHOT
+        },
+        subscribe: (listener) => {
+          const off = api.subscribe(listener)
+          api.start()
+          return off
+        },
+        set: (field, value) => api.set(field, value),
+        unset: (field) => api.unset(field),
+      }
+    }
+
     function apply(ctx) {
-      // ⚠️ DSH 两代之间**两处都换了名字**（2026-10-01 用户指出第二处）：
-      //   ① 客户端**设置服务**：0.1.5-rc.3（web-all 0.3.x）叫 `settingsScope`，
-      //      0.2.0（web-all 0.4.x）叫 `webUiSettings`；
-      //   ② 插件配置页的**挂载 slot**：0.1.5-rc.3 是 `settings.plugin.item`（按 settings 命名空间派发），
-      //      0.2.0 是 `settings.plugins.tab`（插件自己是一个 tab）。
-      // 只 inject 旧服务名 = 0.2.0 上回调永远不跑（Cordis 的 inject 是响应式的，等不到就一直等），
-      // slot 再双注册也没用 —— 所以**服务门和 slot 都要各敲两遍**。
+      // 卡片立刻挂上，不等 settingsScope / webUiSettings。
+      // 这两个服务在部分 0.2.x 上不存在，ctx.inject 会一直等，回调永远不跑。
+      // 设置数据：宿主设置域已经在就用它（0.1.5 的命名空间、以及还能 bind 的 webUiSettings）；
+      // 否则用本插件自己的设置接口。请求带 credentials: 'include'，好把面板登录 cookie 带上。
       let registered = false
-      const setup = (service, scoped) => {
-        // 万一某个版本两个服务都在：只注册一次，别把卡片注册成两份。
+      let hostBound = false
+      const listeners = new Set()
+      let inner = null
+      let innerOff = () => {}
+      const notify = () => {
+        for (const listener of [...listeners]) {
+          try {
+            listener()
+          } catch {
+            // 一个订阅者抛错不影响别人
+          }
+        }
+      }
+      const adopt = (next) => {
+        try {
+          innerOff()
+        } catch {
+          // 旧订阅卸不掉就盖掉
+        }
+        inner = next
+        const off = inner.subscribe?.(notify)
+        innerOff = typeof off === 'function' ? off : () => {}
+        notify()
+      }
+      const scope = {
+        via: () => (typeof inner?.via === 'function' ? inner.via() : 'none'),
+        detail: () => (typeof inner?.detail === 'function' ? inner.detail() : ''),
+        getSnapshot: () => inner.getSnapshot(),
+        subscribe: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+        set: (field, value) => inner.set(field, value),
+        unset: (field) => inner.unset(field),
+      }
+      const mount = (scoped) => {
         if (registered) return
-        if (!service || typeof service.bind !== 'function') return
+        if (!scoped?.slots || typeof scoped.slots.inject !== 'function') return
         registered = true
-        // 两个 key 都绑，谁 ready 用谁（0.1.5 的命名空间 vs 0.2.0 的 entry id）。
-        const scope = bindSettings(service)
-        // sessionsOf 用“取的时候再解析”而不是现在取一次：
-        // sessions 服务可能比本插件晚出现，也可能这个部署根本没装 —— 那时卡片照常渲染，
-        // 只是目标会话那一栏只有一个兜底项，而不是整张卡片消失。
         const card = () =>
           h(Card, { scope, sessionsOf: () => ctx.get('sessions'), workspacesOf: () => ctx.get('workspaces') })
-
-        // slot 也各注册一遍：`slots.inject(slot, factory)` 只在那个 slot 存在时才跑 factory，
-        // 所以多注入一个是安全的；外面再包一层 try，兜住“slot 不存在就直接抛错”的实现。
-        const registerCard = (slot, options) => {
+        // slots.inject 只在那个 slot 存在时才跑回调，多注册一个是安全的。
+        const registerCard = (slot, options, render) => {
           try {
-            scoped.slots.inject(slot, () => scoped.slots.register({ ...options, name: slot }, card))
+            scoped.slots.inject(slot, () => scoped.slots.register({ ...options, name: slot }, render || card))
           } catch (error) {
-            // 这个版本的 DSH 没有这个 slot —— 忽略，另一个会生效。
             console?.debug?.(`qq-bridge: slot ${slot} unavailable (${error?.message ?? error})`)
           }
         }
-        registerCard('settings.plugin.item', { key: NS })
         registerCard('settings.plugins.tab', { id: NS, order: 100, label: () => 'QQ 桥接' })
+        registerCard('settings.plugin.item', { key: NS })
+        registerCard('plugins.tab', { id: NS, order: 100, label: () => 'QQ 桥接' })
+        registerCard(
+          'plugins.detail.section',
+          { id: 'qq-bridge-settings', order: 50, label: () => 'QQ 桥接设置' },
+          (props) => {
+            const subject = props && props.subject
+            if (subject && !subjectIsOurs(subject)) return null
+            return card()
+          },
+        )
       }
-      // 每扇门里再互相兜一下（社区插件 `@linxin666/*` 的写法是 `ctx.get('webUiSettings') ?? ctx.settingsScope`）：
-      // 万一某版本两个服务都在、或名字以后又微调，两条路都拿得到；`registered` 闸门保证只注册一次。
-      // 两个服务的 **API 一致**：`bind({ namespace })` 之后同样是 `getSnapshot() / set() / subscribe()`
-      // （本卡片只用这三个），活参考见 `@linxin666/dsh-pet/lib/client.js`。
-      ctx.inject(['settingsScope'], (scoped) => setup(scoped.settingsScope ?? scoped.get?.('webUiSettings'), scoped))
-      ctx.inject(['webUiSettings'], (scoped) => setup(scoped.webUiSettings ?? scoped.get?.('settingsScope'), scoped))
+      const preferHost = (service) => {
+        if (hostBound) return
+        if (!service || typeof service.bind !== 'function') return
+        hostBound = true
+        adopt(bindSettings(service))
+      }
+      const tryInject = (name, pick) => {
+        if (typeof ctx.inject !== 'function') return
+        try {
+          ctx.inject([name], (scoped) => preferHost(pick(scoped)))
+        } catch {
+          // 没有这扇门：下面会改走设置接口。
+        }
+      }
+      tryInject('webUiSettings', (scoped) => scoped.webUiSettings ?? scoped.get?.('settingsScope'))
+      tryInject('settingsScope', (scoped) => scoped.settingsScope ?? scoped.get?.('webUiSettings'))
+      if (!hostBound) adopt(apiBoundScope())
+      mount(ctx)
     }
 
     exports.apply = apply

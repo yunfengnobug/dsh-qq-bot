@@ -1093,13 +1093,24 @@ function sawSentText(s) {
     vm.runInNewContext(src, sandbox)
     check('bundle 被 __ModuleLoader__ 装载', def?.id === pkg.name, String(def?.id))
 
+    const stateInits = []
     const fakeReact = {
       createElement: (...args) => ({ args }),
       useCallback: (fn) => fn,
       useMemo: (fn) => fn(),
-      useState: () => [null, () => {}],
+      useState: (init) => {
+        stateInits.push(init)
+        return [init, () => {}]
+      },
       useEffect: () => {},
-      useSyncExternalStore: () => undefined,
+      useSyncExternalStore: (_subscribe, get) => {
+        try {
+          const snap = typeof get === 'function' ? get() : undefined
+          return snap && typeof snap === 'object' ? snap : { status: 'loading' }
+        } catch {
+          return { status: 'loading' }
+        }
+      },
     }
     const mod = def.factory((name) => {
       if (name === 'react') return fakeReact
@@ -1132,11 +1143,13 @@ function sawSentText(s) {
     //   0.2.0 改成了 settings.plugins.tab（插件自己是一个 tab）。
     //   真的 slots.inject 只在那个 slot 存在时才跑 factory，所以两个都注入是安全的。
     check(
-      '同时向新旧两个 slot 注入（兼容 0.1.5-rc.3 与 0.2.0）',
-      slotInjects.includes('settings.plugin.item') && slotInjects.includes('settings.plugins.tab'),
+      '同时向设置页和插件页的 slot 注入',
+      ['settings.plugin.item', 'settings.plugins.tab', 'plugins.tab', 'plugins.detail.section'].every((name) =>
+        slotInjects.includes(name),
+      ),
       JSON.stringify(slotInjects),
     )
-    check('两个 slot 各自的卡片都注册了', cards.length === 2, String(cards.length))
+    check('四个 slot 各自的卡片都注册了', cards.length === 4, String(cards.length))
     const oldCard = cards.find((c) => c.options.name === 'settings.plugin.item')
     const newCard = cards.find((c) => c.options.name === 'settings.plugins.tab')
     check(
@@ -1153,6 +1166,9 @@ function sawSentText(s) {
       JSON.stringify(newCard?.options),
     )
     check('卡片渲染函数可调用', cards.every((c) => typeof c.cell === 'function' && Boolean(c.cell())))
+    const rendered = newCard.cell()
+    if (typeof rendered?.args?.[0] === 'function') rendered.args[0](rendered.args[1])
+    check('卡片默认展开', stateInits.includes(true), JSON.stringify(stateInits))
 
     // ★ 第三个变化轴（2026-10-01 桌面端真机）：**可写设置域的 key 也换了**。
     //   0.1.5 用 settings 命名空间 `qq-bridge`；0.2.0 用 profile entry id `include:qq-bridge`
@@ -1196,7 +1212,12 @@ function sawSentText(s) {
         {
           const calls = []
           sandbox.fetch = async (url, init) => {
-            calls.push({ url: String(url), method: init?.method ?? 'GET', body: init?.body })
+            calls.push({
+              url: String(url),
+              method: init?.method ?? 'GET',
+              body: init?.body,
+              credentials: init?.credentials,
+            })
             const values = { nicknames: init?.method === 'POST' ? ['y'] : ['x'] }
             return { ok: true, status: 200, json: async () => ({ ok: true, values, overridden: ['nicknames'] }) }
           }
@@ -1235,6 +1256,11 @@ function sawSentText(s) {
               unsetCall.url.includes('/api/qq-bridge/settings') &&
               String(unsetCall.body) === JSON.stringify({ unset: ['nicknames'] }),
             JSON.stringify(unsetCall),
+          )
+          check(
+            '设置接口的请求带上面板登录 cookie',
+            calls.length >= 3 && calls.every((c) => c.credentials === 'include'),
+            JSON.stringify(calls.map((c) => c.credentials)),
           )
           check(
             '接口不可用（没有 fetch）时如实报 unavailable，不炸',
@@ -1280,11 +1306,50 @@ function sawSentText(s) {
         },
       }
       mod.apply(fakeCtx2)
-      check('只有 webUiSettings 时也能注册（0.2.0 的服务名）', cards2.length === 2, String(cards2.length))
+      check('只有 webUiSettings 时也能注册（0.2.0 的服务名）', cards2.length === 4, String(cards2.length))
       check(
         '两个服务都在时只注册一次（不重复挂卡片）',
-        cards.length === 2 && cards2.length === 2,
+        cards.length === 4 && cards2.length === 4,
         `旧 ctx=${cards.length} 新 ctx=${cards2.length}`,
+      )
+    }
+
+    // 部分 0.2.x 上 settingsScope / webUiSettings 不存在，inject 回调永远不跑。卡片仍要挂上。
+    {
+      const cards3 = []
+      const slotNames = []
+      const fakeCtx3 = {
+        get: () => undefined,
+        inject: () => {},
+        slots: {
+          inject: (name, cb) => {
+            slotNames.push(name)
+            return cb()
+          },
+          register: (options, cell) => {
+            cards3.push({ options, cell })
+            return () => {}
+          },
+        },
+      }
+      mod.apply(fakeCtx3)
+      check('没有设置服务、inject 不回调时也立刻挂上卡片', cards3.length === 4, String(cards3.length))
+      const detail = cards3.find((c) => c.options.name === 'plugins.detail.section')
+      check('插件详情：没带 subject 时仍给出卡片', typeof detail?.cell === 'function' && Boolean(detail.cell()))
+      check(
+        '插件详情：别的插件不显示这张卡片',
+        detail.cell({ subject: { kind: 'bundle', pkg: { name: 'other-plugin' } } }) == null,
+      )
+      check(
+        '插件详情：本包和旧包名、以及 qq-bridge 这个 id 才显示',
+        Boolean(detail.cell({ subject: { kind: 'bundle', pkg: { name: 'dsh-qq-bot' } } })) &&
+          Boolean(detail.cell({ subject: { kind: 'bundle', pkg: { name: 'dsh-qq-bridge' } } })) &&
+          Boolean(detail.cell({ subject: { kind: 'item', id: 'qq-bridge' } })),
+      )
+      check(
+        '没有设置服务时仍注入插件页 slot',
+        slotNames.includes('plugins.tab') && slotNames.includes('plugins.detail.section'),
+        JSON.stringify(slotNames),
       )
     }
 

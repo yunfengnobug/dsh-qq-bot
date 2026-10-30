@@ -325,7 +325,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 ## 设置界面与全部设置项
 
-**设置 → 插件 → 插件配置** 里有一张 **QQ 桥接** 卡片（可折叠）。卡片上的名称是白话
+**设置 → 插件 → 插件配置** 里有一张 **QQ 桥接** 卡片（可折叠，默认展开）。卡片上的名称是白话
 （例如「哪些群可以叫醒」「群里发出去的是哪一段」），写进配置文件的键仍是英文。
 在这里修改后**保存即生效**（写入 `settings.yaml` 的用户层，不用重启）。
 
@@ -333,7 +333,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 > 插件都一样）。本插件因此**自己挂了一条设置接口**：`GET/POST /api/qq-bridge/settings`。
 > 值存 `$DSH_HOME/qq-bridge-settings.json`，优先级为 **设置文件 > composition config**。
 > 卡片照常可以使用；`cordis.patch.yml` 也仍然可以修改（改完重启生效，且会被上面的设置文件覆盖）。
-> 本机回环请求可以直接改（命令行、SSH 隧道、本机打开的面板）。经反向代理进来时，认 DSH 面板已经通过的登录会话，**不必再配 `trustedHosts`**。没有会话的外网请求仍然 403。打到本机 `127.0.0.1`、但来源是别的网站的请求也仍然拒绝。接口只写 schema 白名单里的键。
+> 本机回环请求可以直接改（命令行、SSH 隧道、本机打开的面板）。经反向代理进来时，认 DSH 面板已经通过的登录会话，**不必再配 `trustedHosts`**。卡片上的读取和保存会带上面板登录 cookie（`credentials: 'include'`）。没有会话的外网请求仍然 403。打到本机 `127.0.0.1`、但来源是别的网站的请求也仍然拒绝。接口只写 schema 白名单里的键。
 
 卡片展开后还有 3 个操作按钮（0.1.5 与 0.2.0 上都有）：
 
@@ -395,9 +395,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 1. `package.json` 里的 `dsh.client` 还在；
 2. **重启过 `dsh web`**。浏览器端的内容是启动时读盘并计算指纹的，修改后必须重启；
 3. **重启之后刷新过页面（F5）**。清单是页面加载时注入的，只重启服务器时，已经打开的页面手里还是旧清单；
-4. DSH 版本：**0.2.0 改了 2 处名字** —— 客户端设置服务 `settingsScope` → `webUiSettings`，
-   插件配置页的挂载点 `settings.plugin.item` → `settings.plugins.tab`（插件自身是一个 tab）。
-   本插件**2 个服务门、2 个 slot 各注册一次**，哪个存在哪个生效，所以 0.1.5-rc.3 与 0.2.0 都能显示卡片。
+4. DSH 版本：0.2.0 把客户端设置服务从 `settingsScope` 改名为 `webUiSettings`，插件配置页的挂载点从 `settings.plugin.item` 改成 `settings.plugins.tab`。有的 0.2.x 上这两个服务都不存在，`ctx.inject` 会一直等。本插件**不等它们**：`apply` 时就挂上卡片。宿主设置域还在就用它；否则读写 `/api/qq-bridge/settings`。挂载点有四个：`settings.plugins.tab`、`settings.plugin.item`、`plugins.tab`、`plugins.detail.section`（详情页只在本包 `dsh-qq-bot`、旧包名 `dsh-qq-bridge`，或 id `qq-bridge` 上显示）。卡片默认展开。
 
 > 卡片按 settings 命名空间派发，`client/client.js` 里的 key 必须逐字等于 `qq-bridge`。
 > 对不上不会报错，只是静默不显示（`test-smoke.mjs` 包含该一致性的断言）。
@@ -481,7 +479,7 @@ QQ 侧没有人能点击“同意”，因此：
 
 改用法、设置或运行行为时，同一次提交里更新本文件。约定见 [`AGENTS.md`](./AGENTS.md)。
 
-4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **525 条断言**：
+4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **532 条断言**：
 
 ```powershell
 node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具 + 设置卡片字段（假 ctx，纯离线）
