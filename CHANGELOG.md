@@ -3,6 +3,7 @@
 ## v0.2.6 — 2026-10-30
 
 - **一键更新之后，Cordis 按实际装上的包名挂 `qq-bridge`**：npm 包是 `@fengye_nobug/dsh-qq-bot`。v0.2.5 自带的 `cordis.patch.yml` 仍写 `name: dsh-qq-bot`。Cordis 按这个名字去加载，无作用域包并不存在，插件 id `qq-bridge` 不会挂上，`/api/qq-bridge/settings` 就是 HTTP 404，设置页显示本机接口不可用。现在插件自带的补丁把 `name` 写成 `@fengye_nobug/dsh-qq-bot`。安装成功后，还会看 profile 的 `cordis.patch.yml`、`$DSH_HOME/cordis.patch.yml`（这份文件里有 `qq-bridge` 才改），以及已经装进 profile 的插件补丁。这三处里 `qq-bridge` 的 `name` 如果还是 `dsh-qq-bot` 或 `dsh-qq-bridge`，就改成磁盘上 `package.json` 的包名。别的插件不动，`config` 里的设置不动。界面显示名和消息来源仍是 `dsh-qq-bot`，Cordis id 仍是 `qq-bridge`。从 0.2.5 点「更新」时，跑的仍是 0.2.5 里的安装程序，profile 里手写的旧 `name` 要先改成 `@fengye_nobug/dsh-qq-bot` 再重启；这一版自己跑一键更新时会改。
+- **一键更新卡住时会停掉安装进程**：`dsh plugin add` 或它拉起的 `pnpm add` 超过三分钟没有结束，会停掉这一组进程，并用白话说明，不带路径和堆栈。profile 里的 `.plugin-manager/run.json` 只在记录的进程已经不在、或记录读不懂时删掉；进程还在就不删，也不会再开第二个安装。超时之后如果磁盘上已经是这次要装的版本，仍把 `qq-bridge` 的 `name` 改成实际包名，但不会自动重启，需要自己重启 dsh-web，设置页才会出来。没有确认装上时，可以再点一次「更新」。
 
 ## v0.2.5 — 2026-10-30
 
