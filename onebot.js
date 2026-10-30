@@ -72,6 +72,18 @@ export function createOneBotTransport(options) {
     sent: 0,
   }
 
+  /**
+   * 事件里先带了 self_id、get_login_info 还没回来时，先记住。
+   * 已经有值就不覆盖：配置或登录信息优先。
+   */
+  function rememberSelfId(id) {
+    const next = String(id ?? '').trim()
+    if (next === '' || status.selfId) return
+    status.selfId = next
+    notify()
+    logger.info(`self_id = ${status.selfId}（来自事件，get_login_info 尚未返回）`)
+  }
+
   function snapshot() {
     return {
       ...status,
@@ -372,5 +384,5 @@ export function createOneBotTransport(options) {
     status.connectedAt = null
   }
 
-  return { start, dispose, reconnectNow, isOpen, call, status: snapshot }
+  return { start, dispose, reconnectNow, isOpen, call, rememberSelfId, status: snapshot }
 }

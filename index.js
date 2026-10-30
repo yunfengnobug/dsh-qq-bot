@@ -2077,7 +2077,9 @@ export function apply(ctx, config) {
     if (event.post_type === 'message_sent') return
     if (event.post_type !== 'message') return
 
-    const selfId = readSettings().selfId || transport.status().selfId || ''
+    // get_login_info 连上后才异步返回。这之前若事件自带 self_id，先用它过滤自身、识别 @。
+    // 事件没带 self_id、配置里也没填时，这段空窗仍可能漏过自身消息。
+    const selfId = selfIdForEvent(event)
     const userId = event.user_id === undefined ? null : String(event.user_id)
     if (selfId !== '' && userId === selfId) return
 
@@ -2105,8 +2107,19 @@ export function apply(ctx, config) {
    * 方便照真实 payload 继续补。
    * 与消息走**同一个** `handleInbound`：白名单、唤醒策略、渲染、出站闸门全部复用。
    */
+  /** 配置优先，其次是已经学到的号，再次是本条事件的 self_id。 */
+  function selfIdForEvent(event) {
+    const configured = String(readSettings().selfId ?? '').trim()
+    if (configured) return configured
+    const known = String(transport.status().selfId ?? '').trim()
+    const raw = event?.self_id
+    const fromEvent = raw === undefined || raw === null ? '' : String(raw).trim()
+    if (!known && fromEvent) transport.rememberSelfId(fromEvent)
+    return known || fromEvent
+  }
+
   async function handleNotice(event) {
-    const selfId = readSettings().selfId || transport.status().selfId || ''
+    const selfId = selfIdForEvent(event)
     const inbound = mapOneBotNotice(event, selfId)
     if (!inbound) {
       logger.info(`未适配的 notice：notice_type=${event.notice_type ?? '?'} sub_type=${event.sub_type ?? '?'}`)

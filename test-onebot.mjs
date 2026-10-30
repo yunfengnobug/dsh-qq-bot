@@ -602,6 +602,102 @@ await mock.close()
   }
 }
 
+// 12) get_login_info 返回前，事件里的 self_id 就要能过滤自身、识别 @。
+{
+  const savedWebSocket = globalThis.WebSocket
+  const sockets = []
+  let releaseLogin
+  const loginGate = new Promise((resolve) => {
+    releaseLogin = resolve
+  })
+  globalThis.WebSocket = class {
+    constructor() {
+      this.readyState = 0
+      this.sent = []
+      sockets.push(this)
+      queueMicrotask(() => {
+        this.readyState = 1
+        this.onopen?.({})
+      })
+    }
+    send(text) {
+      const msg = JSON.parse(String(text))
+      this.sent.push(msg)
+      if (msg.action === 'get_login_info') return
+      queueMicrotask(() => {
+        this.onmessage?.({
+          data: JSON.stringify({ status: 'ok', retcode: 0, data: { message_id: 1, group_name: '测试群' }, echo: msg.echo }),
+        })
+      })
+    }
+    close() {
+      this.readyState = 3
+      this.onclose?.({ code: 1000 })
+    }
+  }
+  const { ctx: earlyCtx, state: early } = createFakeCtx()
+  const earlyPath = join(tmpdir(), 'qq-bridge-selfid-early.json')
+  if (existsSync(earlyPath)) rmSync(earlyPath)
+  try {
+    apply(earlyCtx, {
+      targetSessionId: 'session-target',
+      statePath: earlyPath,
+      debugTools: true,
+      onebotUrl: 'ws://127.0.0.1:9/early-self',
+      selfId: '',
+      wakeProbability: 0,
+      nicknames: ['244'],
+      whitelist: [],
+      groupWhitelist: ['42'],
+      napcatInstallDir: join(tmpdir(), 'qq-bridge-no-napcat'),
+    })
+    const earlyTransport = early.registered.find((t) => t.name === 'qq_bridge_transport')
+    await earlyTransport.execute({ action: 'reconnect' })
+    const opened = await waitFor(() => sockets.some((s) => s.readyState === 1 && s.sent.some((m) => m.action === 'get_login_info')))
+    check('self_id 空窗：连接已打开且登录信息还没回来', opened)
+    const socket = sockets.find((s) => s.readyState === 1)
+    socket.onmessage?.({
+      data: JSON.stringify({
+        post_type: 'message',
+        message_type: 'group',
+        group_id: 42,
+        user_id: 10001,
+        self_id: 10001,
+        message: [{ type: 'text', data: { text: '244 我自己说的' } }],
+        sender: { nickname: '机器人' },
+      }),
+    })
+    socket.onmessage?.({
+      data: JSON.stringify({
+        post_type: 'message',
+        message_type: 'group',
+        group_id: 42,
+        user_id: 7,
+        self_id: 10001,
+        message: [
+          { type: 'at', data: { qq: '10001' } },
+          { type: 'text', data: { text: '在吗' } },
+        ],
+        sender: { nickname: '甲' },
+      }),
+    })
+    await waitFor(() => early.followups.length >= 1)
+    const learned = JSON.parse(await earlyTransport.execute({}))
+    const woke = textOf(early.followups[0] ?? {})
+    check('self_id 空窗：事件里的 self_id 已记上', String(learned.selfId) === '10001', `selfId=${learned.selfId}`)
+    check('self_id 空窗：自身消息不唤醒', early.followups.length === 1, `followups=${early.followups.length}`)
+    check('self_id 空窗：@ 自己仍能认出来', woke.includes('在吗') && !woke.includes('@10001'), woke.slice(0, 80))
+    releaseLogin()
+    socket.onmessage?.({
+      data: JSON.stringify({ status: 'ok', retcode: 0, data: { user_id: 10001 }, echo: socket.sent.find((m) => m.action === 'get_login_info')?.echo }),
+    })
+  } finally {
+    for (const d of early.disposers) await d()
+    globalThis.WebSocket = savedWebSocket
+    rmSync(earlyPath, { force: true })
+  }
+}
+
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 if (state.warnings.length) console.log('warnings:', state.warnings.slice(0, 5))
 process.exit(failed === 0 ? 0 : 1)

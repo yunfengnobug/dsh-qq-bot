@@ -140,7 +140,8 @@ QQ 消息 ─┬─ 不在白名单 ──────────────�
 - `onebotUrl` **留空 = 完全不启用传输**（默认值，安全）。
 - NapCat 侧要开一个 **WebSocket 服务器**（不是 HTTP 服务器），并允许本机连接。
 - `selfId` 留空即可：连上后插件自动调用 `get_login_info` 取得自身的 QQ 号，用于过滤自身消息，
-  防止回复死循环，同时忽略 `message_sent` 事件。
+  防止回复死循环，同时忽略 `message_sent` 事件。`get_login_info` 返回之前，事件里如果已经带了 `self_id`，
+  先用它过滤自身消息、识别 @ 和戳一戳。事件没带 `self_id` 的那一小段仍可能漏过；想完全避开就填上 `selfId`。
 - 两次建连叠在一起时只保留后一次。先发起、后拿到 token 的那次不会拆掉新连接，也不会留下多余的 socket。
 
 ### 配置 access_token（不得明文写入配置）
@@ -387,7 +388,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `agentPreset` | `''` | 人设预设；空 = 沿用会话自己记着的 |
 | `onebotUrl` | `''` | OneBot 连接地址；空 = 先不连接 |
 | `accessTokenEnv` | `''` | OneBot 令牌放在哪个环境变量（填变量名，不是令牌，也不是模型 API key） |
-| `selfId` | `''` | 机器人自己的 QQ 号；空 = 连上后自动读取 |
+| `selfId` | `''` | 机器人自己的 QQ 号。空 = 连上后自动读取；读取完成前，先用事件里的 `self_id`。想避开这段空窗就填上 |
 | `heartbeatTimeoutMs` | `90000` | 多久没收到连接数据就判定断线并重连 |
 | `napcatInstallDir` | `''` | NapCat 安装目录；空 = `$DSH_HOME/napcat`。自己装的或 Docker 里的请填实际目录 |
 | `napcatWebuiUrl` | `''` | NapCat 网页管理地址。空 = 读 `webui.json`（通常是 `127.0.0.1`，只有跑着 NapCat 的机器能打开）。远程使用时填外面打得开的地址 |
