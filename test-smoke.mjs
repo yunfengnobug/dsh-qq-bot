@@ -7,8 +7,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, FACE_NAME_TO_ID, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeMaxRecentTurns, normalizeReplyMode, normalizeSessionScope, NS, textToOneBotSegments, truncateText } from './index.js'
-import { hashOfBuffer, loadStickers, saveStickers, shortHash, upsertSticker } from './stickers.js'
+import { apply, buildUsagePrompt, extractQQReply, FACE_NAME_TO_ID, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotMessage, mapOneBotNotice, normalizeDelivery, normalizeMaxRecentTurns, normalizeReplyMode, normalizeSessionScope, NS, textToOneBotSegments, truncateText } from './index.js'
+import { hashOfBuffer, isCompleteMface, loadStickers, mfaceSendData, normalizeMface, saveStickers, shortHash, upsertSticker } from './stickers.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
 // 不删的话上一次运行留下的 buffer/log 会串进这一次（测出过“只灌 1 条却显示 9 条”）。
@@ -733,6 +733,10 @@ function sawSentText(s) {
     '用法说明：图片占位符带短哈希（模型能指着一张具体的图）',
     p.includes('[图片#') && p.includes('短哈希'),
     p.slice(0, 0),
+  )
+  check(
+    '用法说明：商城表情和普通图片分开写',
+    p.includes('[表情包#') && p.includes('普通图片') && p.includes('mface') && p.includes('仍是图片'),
   )
   check(
     '用法说明：教用 qq_bridge_sticker（list / send / save）',
@@ -1593,6 +1597,119 @@ function sawSentText(s) {
   check('没有占位符就不动正文', inlineImageNotes('只有文字', [i1], d) === '只有文字')
   check('关键：不会再多出一段 [图片] 开头的描述行', !/\n\s*\[图片/.test(inlineImageNotes('[图片] 文字', [i1], d)))
   check('digest 与入站各自对齐（不会串号）', inlineImageNotes('缓冲 [图片]', [i1], d) + inlineImageNotes('本条 [图片]', [i2], d) === '缓冲 [图片#aaaaaa]：一只猫本条 [图片#bbbbbb]：一张卡牌：攻击力 3')
+  const face = {
+    hash: 'cccccc3333333333',
+    mface: { emoji_id: 'e1', emoji_package_id: 203, key: 'k1', summary: '[好]' },
+  }
+  check(
+    '商城表情占位符跟普通图片分开（带表情名和短哈希）',
+    inlineImageNotes('[图片]', [face], new Map([[face, { text: '一只猫', hash: face.hash }]])) === '[表情包#cccccc]：[好] 一只猫',
+  )
+  check(
+    '商城表情和普通图片按槽位各写各的',
+    inlineImageNotes('[图片][图片]', [face, i1], new Map([[face, { text: '一只猫', hash: face.hash }], [i1, note('一张卡', i1.hash)]])) ===
+      '[表情包#cccccc]：[好] 一只猫[图片#aaaaaa]：一张卡',
+  )
+  check(
+    '商城表情没描述也保留表情名',
+    inlineImageNotes('[图片]', [face], new Map()) === '[表情包#cccccc]：[好]（未描述）',
+  )
+  check(
+    '商城表情描述失败时仍带表情名',
+    inlineImageNotes('[图片]', [face], new Map([[face, { text: '（描述失败：超时）', hash: face.hash }]])) ===
+      '[表情包#cccccc]：[好] （描述失败：超时）',
+  )
+  check(
+    '只有 summary 的图片仍是普通图片',
+    inlineImageNotes('[图片]', [{ hash: i1.hash, mface: { summary: '简介' } }], new Map()) === '[图片]（未描述）',
+  )
+}
+
+// 入站：商城表情字段要跟图片槽一起留下。NapCat 常把 mface 收成带 emoji_* 的 image 段。
+{
+  const inbound = mapOneBotMessage(
+    {
+      message_type: 'group',
+      group_id: 2001,
+      user_id: 1001,
+      message_id: 9,
+      sender: { nickname: '甲' },
+      message: [
+        { type: 'text', data: { text: '看' } },
+        {
+          type: 'image',
+          data: {
+            file: 'a.gif',
+            url: 'https://example.invalid/a.gif',
+            summary: '[好]',
+            emoji_id: 'e1',
+            emoji_package_id: '203',
+            key: 'k1',
+          },
+        },
+        { type: 'image', data: { url: 'https://example.invalid/b.png', file: 'b.png', summary: '普通图简介' } },
+      ],
+    },
+    '10001',
+  )
+  check('入站 image 带商城字段：正文仍是两个 [图片] 槽', inbound.text === '看[图片][图片]', inbound.text)
+  check(
+    '入站 image 带商城字段：emoji_id / package id / key / summary 挂在槽上',
+    inbound.images[0]?.mface?.emoji_id === 'e1' &&
+      inbound.images[0]?.mface?.emoji_package_id === 203 &&
+      inbound.images[0]?.mface?.key === 'k1' &&
+      inbound.images[0]?.mface?.summary === '[好]' &&
+      inbound.images[0]?.url === 'https://example.invalid/a.gif',
+    JSON.stringify(inbound.images[0]),
+  )
+  check('入站普通图片即使有 summary 也不算商城表情', inbound.images[1]?.mface === undefined, JSON.stringify(inbound.images[1]))
+  const bare = mapOneBotMessage(
+    {
+      message_type: 'private',
+      user_id: 1001,
+      message: [{ type: 'mface', data: { summary: '[动画表情]', emoji_id: 'e2', emoji_package_id: 7, key: 'k2' } }],
+    },
+    '',
+  )
+  check(
+    '没有地址的 mface 不占图片槽，占位符仍带 summary',
+    bare.images.length === 0 && bare.text === '[表情包:[动画表情]]',
+    JSON.stringify(bare),
+  )
+  const withUrl = mapOneBotMessage(
+    {
+      message_type: 'private',
+      user_id: 1001,
+      message: [
+        {
+          type: 'mface',
+          data: { url: 'https://example.invalid/m.gif', emoji_id: 'e2', emoji_package_id: 7, key: 'k2', summary: '[哈]' },
+        },
+      ],
+    },
+    '',
+  )
+  check(
+    '带地址的 mface 收成图片槽并留下字段',
+    withUrl.text === '[图片]' && withUrl.images[0]?.mface?.emoji_id === 'e2' && withUrl.images[0]?.mface?.emoji_package_id === 7,
+    JSON.stringify(withUrl),
+  )
+  const cq = mapOneBotMessage(
+    {
+      message_type: 'private',
+      user_id: 1001,
+      message: '[CQ:image,file=a.gif,url=https://example.invalid/a.gif,emoji_id=e1,emoji_package_id=203,key=k1,summary=&#91;好&#93;]后面',
+    },
+    '',
+  )
+  check(
+    'CQ 图片里的商城字段会译出来（方括号实体）',
+    cq.text === '[图片]后面' &&
+      cq.images[0]?.mface?.summary === '[好]' &&
+      cq.images[0]?.mface?.emoji_package_id === 203 &&
+      cq.images[0]?.mface?.key === 'k1',
+    JSON.stringify(cq),
+  )
 }
 
 // 戳一戳：OneBot 里它是 notice 事件（不是消息段），以前会被静默丢掉（2026-10-01 用户要求适配）
@@ -2659,6 +2776,7 @@ function sawSentText(s) {
       out.count === 1 && first?.hash === shortHash(hash) && first?.mood === '无语' && first?.bytes === png.length,
       JSON.stringify(out),
     )
+    check('list：普通图片 kind=image', first?.kind === 'image' && first?.summary === '', JSON.stringify(first))
     const filtered = JSON.parse(await stickerTool.execute({ action: 'list', mood: '开心' }))
     check('list：按 mood 过滤（没有该情绪时给提示）', filtered.count === 0 && String(filtered.note).includes('开心'), JSON.stringify(filtered))
   }
@@ -2672,7 +2790,7 @@ function sawSentText(s) {
     check('send：没有目的地 → 清晰错误', noDest.ok === false && String(noDest.error).includes('目的地'), JSON.stringify(noDest))
 
     const sent = JSON.parse(await stickerTool.execute({ action: 'send', hash, groupId: '12345678' }))
-    check('send：按 hash 发送成功', sent.ok === true && sent.hash === shortHash(hash), JSON.stringify(sent))
+    check('send：按 hash 发送成功', sent.ok === true && sent.hash === shortHash(hash) && sent.as === 'image', JSON.stringify(sent))
     const offGroup = JSON.parse(await stickerTool.execute({ action: 'send', hash, groupId: '999' }))
     check(
       'send：显式群号不在 groupWhitelist 里不发送',
@@ -2690,7 +2808,11 @@ function sawSentText(s) {
     const call = socket?.sent.find((m) => m.action === 'send_group_msg')
     check('send：走 send_group_msg 且带上群号', !!call && String(call.params.group_id) === '12345678', JSON.stringify(call?.action))
     const file = String(call?.params?.message?.[0]?.data?.file ?? '')
-    check('send：图片走 base64://（不用本地路径）', file.startsWith('base64://') && !file.includes(dir), file.slice(0, 24))
+    check(
+      'send：普通图片走 image 段的 base64://（不用本地路径）',
+      call?.params?.message?.[0]?.type === 'image' && file.startsWith('base64://') && !file.includes(dir),
+      file.slice(0, 24),
+    )
     check('send：base64 解出来就是原图', Buffer.from(file.slice('base64://'.length), 'base64').equals(png))
 
     const after = loadStickers(join(dir, 'qq-bridge-stickers.json'))
@@ -2703,7 +2825,7 @@ function sawSentText(s) {
     const ob = st.recentOutbox[st.recentOutbox.length - 1]
     check(
       'send：记 outbox（via tool / action sticker）',
-      ob?.via === 'tool' && ob?.action === 'sticker' && String(ob?.text).includes(`[表情包#${shortHash(hash)}]`),
+      ob?.via === 'tool' && ob?.action === 'sticker' && String(ob?.text).includes(`[图片#${shortHash(hash)}]`),
       JSON.stringify(ob),
     )
 
@@ -2711,6 +2833,81 @@ function sawSentText(s) {
     check('send：只给 mood 时随机挑一张（私聊）', byMood.ok === true && byMood.hash === shortHash(hash), JSON.stringify(byMood))
     const second = socket?.sent.filter((m) => m.action === 'send_private_msg').pop()
     check('send：私聊走 send_private_msg', String(second?.params?.user_id) === '1001', JSON.stringify(second?.action))
+
+    // 商城表情：图片缓存在 $DSH_HOME/qq-bridge-images，字段在旁边的 <hash>.mface.json。
+    // 唤醒之后缓冲会被清掉，save 靠的就是这份旁路文件，而不是缓冲区里的那张图。
+    {
+      const pngM = Buffer.from('89504e470d0a1a0a0000000d4948445200000002000000020806000000', 'hex')
+      const hashM = hashOfBuffer(pngM)
+      const cacheDir = join(process.env.DSH_HOME, 'qq-bridge-images')
+      mkdirSync(cacheDir, { recursive: true })
+      writeFileSync(join(cacheDir, `${hashM}.png`), pngM)
+      writeFileSync(
+        join(cacheDir, `${hashM}.mface.json`),
+        `${JSON.stringify({ emoji_id: 'e1', emoji_package_id: 203, key: 'k1', summary: '[好]' })}\n`,
+      )
+      const savedM = JSON.parse(await stickerTool.execute({
+        action: 'save',
+        hash: hashM,
+        mood: '开心',
+        description: '商城表情',
+      }))
+      check('save：旁路文件里的商城表情写进登记表', savedM.ok === true && savedM.kind === 'mface' && savedM.summary === '[好]', JSON.stringify(savedM))
+      const diskM = loadStickers(join(dir, 'qq-bridge-stickers.json')).stickers[hashM]
+      check(
+        'save：mface 四字段落盘，package id 是数字',
+        diskM?.mface?.emoji_id === 'e1' && diskM?.mface?.emoji_package_id === 203 && diskM?.mface?.key === 'k1' && diskM?.mface?.summary === '[好]',
+        JSON.stringify(diskM?.mface),
+      )
+      const sentM = JSON.parse(await stickerTool.execute({ action: 'send', hash: hashM, groupId: '12345678' }))
+      check('send：字段齐全时 as=mface', sentM.ok === true && sentM.as === 'mface', JSON.stringify(sentM))
+      const callM = socket?.sent.filter((m) => m.action === 'send_group_msg').pop()
+      const segM = callM?.params?.message?.[0]
+      check(
+        'send：走 mface 段，不带 base64 图片',
+        segM?.type === 'mface' &&
+          segM?.data?.emoji_package_id === 203 &&
+          segM?.data?.emoji_id === 'e1' &&
+          segM?.data?.key === 'k1' &&
+          segM?.data?.summary === '[好]' &&
+          segM?.data?.file === undefined,
+        JSON.stringify(segM),
+      )
+      rmSync(join(dir, 'qq-bridge-stickers', `${hashM}.png`), { force: true })
+      const sentMissing = JSON.parse(await stickerTool.execute({ action: 'send', hash: hashM, userId: '1001' }))
+      check('send：原生表情不依赖本地图片文件', sentMissing.ok === true && sentMissing.as === 'mface', JSON.stringify(sentMissing))
+      const kept = loadStickers(join(dir, 'qq-bridge-stickers.json')).stickers[hashM]
+      check(
+        'send：更新发送次数时不抹掉 mface',
+        kept?.mface?.key === 'k1' && kept?.sentCount >= 1,
+        JSON.stringify(kept),
+      )
+
+      const pngI = Buffer.from('89504e470d0a1a0a0000000d4948445200000003000000030806000000', 'hex')
+      const hashI = hashOfBuffer(pngI)
+      writeFileSync(join(cacheDir, `${hashI}.png`), pngI)
+      writeFileSync(
+        join(cacheDir, `${hashI}.mface.json`),
+        `${JSON.stringify({ emoji_id: 'e2', emoji_package_id: '203', summary: '[缺key]' })}\n`,
+      )
+      const savedI = JSON.parse(await stickerTool.execute({
+        action: 'save',
+        hash: hashI,
+        mood: '无语',
+        description: '缺 key 的图',
+      }))
+      check('save：字段不齐时 kind 仍是 image', savedI.ok === true && savedI.kind === 'image', JSON.stringify(savedI))
+      const sentI = JSON.parse(await stickerTool.execute({ action: 'send', hash: hashI, groupId: '12345678' }))
+      check('send：字段不齐退回图片', sentI.ok === true && sentI.as === 'image', JSON.stringify(sentI))
+      const callI = socket?.sent.filter((m) => m.action === 'send_group_msg').pop()
+      const fileI = String(callI?.params?.message?.[0]?.data?.file ?? '')
+      check(
+        'send：退回路径是 base64 图片段',
+        callI?.params?.message?.[0]?.type === 'image' &&
+          fileI.startsWith('base64://') &&
+          Buffer.from(fileI.slice('base64://'.length), 'base64').equals(pngI),
+      )
+    }
 
     const unknown = JSON.parse(await stickerTool.execute({ action: 'send', mood: '不存在' }))
     check('send：mood 没有匹配 → 指向 list', unknown.ok === false && String(unknown.error).includes('list'), JSON.stringify(unknown))

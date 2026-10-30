@@ -30,8 +30,11 @@ import {
   importSticker,
   listStickers,
   loadStickers,
+  mfaceSendData,
+  normalizeMface,
   saveStickers,
   shortHash,
+  stickerKind,
   STICKERS_DIR,
   STICKERS_FILE,
   upsertSticker,
@@ -250,19 +253,43 @@ export function labelForSegment(type, data) {
  * 元素为 `null` 表示那张图没有描述（落盘失败）—— 该占位符写成 `[图片]（未描述）`，
  * 并且**不占用**其它图片的描述（后面的图不得往前顶位）。
  * 多出来的占位符留原样。
+ *
+ * 槽上带了商城表情字段（`mface.emoji_id` 等）时，占位符写成 `[表情包#短哈希]`，
+ * 让模型分得清「这是 QQ 表情包」和「这是一张普通图」。普通图仍是 `[图片#短哈希]`。
  */
+function marketFaceOf(slot) {
+  return normalizeMface(slot?.mface)
+}
+
+function stickerNoteText(summary, text) {
+  const name = String(summary ?? '').trim()
+  const body = String(text ?? '')
+  if (name === '') return body
+  if (body.trim() === '' || body.includes(name)) return body || name
+  return `${name} ${body}`
+}
+
 export function inlineImageNotes(text, images, noteById) {
   const list = Array.isArray(images) ? images : []
   const notes = noteById instanceof Map ? noteById : new Map()
   let i = 0
   return String(text ?? '').replace(/\[图片\]/g, (m) => {
     if (i >= list.length) return m
-    const raw = notes.get(list[i])
+    const slot = list[i]
+    const raw = notes.get(slot)
     i += 1
-    if (raw === undefined || raw === null) return '[图片]（未描述）'
+    const face = marketFaceOf(slot) || (raw && typeof raw === 'object' ? normalizeMface(raw.mface) : null)
+    if (raw === undefined || raw === null) {
+      if (!face) return '[图片]（未描述）'
+      const short = shortHash(slot?.hash)
+      if (short === '') return face.summary ? `[表情包:${face.summary}]（未描述）` : '[表情包]（未描述）'
+      return face.summary ? `[表情包#${short}]：${face.summary}（未描述）` : `[表情包#${short}]（未描述）`
+    }
     const note = typeof raw === 'string' ? { text: raw } : raw
-    const short = shortHash(note.hash ?? list[i - 1]?.hash)
-    return `${short === '' ? '[图片]' : `[图片#${short}]`}：${note.text ?? ''}`
+    const short = shortHash(note.hash ?? slot?.hash)
+    if (!face) return `${short === '' ? '[图片]' : `[图片#${short}]`}：${note.text ?? ''}`
+    const head = short === '' ? '[表情包]' : `[表情包#${short}]`
+    return `${head}：${stickerNoteText(face.summary, note.text)}`
   })
 }
 
@@ -298,6 +325,149 @@ export function mapOneBotNotice(event, selfId) {
     atSelf: pokedMe,
     poke: true,
     images: [],
+  }
+}
+
+/** CQ 码里的逗号和方括号是实体。先按逗号切开，再把值译回来。 */
+function cqUnescape(value) {
+  return String(value ?? '')
+    .replace(/&amp;/g, '&')
+    .replace(/&#44;/g, ',')
+    .replace(/&#91;/g, '[')
+    .replace(/&#93;/g, ']')
+}
+
+function parseCqArgs(body) {
+  const kv = {}
+  for (const part of String(body ?? '').split(',')) {
+    if (part === '') continue
+    const i = part.indexOf('=')
+    if (i < 0) kv[part] = ''
+    else kv[part.slice(0, i)] = cqUnescape(part.slice(i + 1))
+  }
+  return kv
+}
+
+/**
+ * 图片段，或带了可下载地址的 mface 段 → 入站图片槽。
+ * 商城表情的 emoji_id / emoji_package_id / key / summary 挂在 `mface` 上，跟后面的内容哈希走。
+ * 没有地址也没有这些字段时返回 null（调用方仍占一个槽，好跟 `[图片]` 对齐）。
+ */
+function imageItemFromData(data) {
+  const src = data && typeof data === 'object' ? data : {}
+  const url = String(src.url || src.file || '').trim()
+  const mface = normalizeMface(src)
+  if (url === '' && !mface) return null
+  const item = {}
+  if (url !== '') {
+    item.url = url
+    if (src.file) item.name = String(src.file).split(/[\\/]/).pop()
+  }
+  if (mface) item.mface = mface
+  return item
+}
+
+/**
+ * OneBot 消息事件 → handleInbound 的 msg。
+ * 兼容 message 为 **array**（NapCat 常见）与 string 两种形态。导出是为了可测试。
+ *
+ * 商城表情在 NapCat 里经常以 **image** 段上报，段上仍带着 emoji_id 等字段；
+ * 也有人直接给 **mface** 段。有可下载地址时收成图片槽（占位符仍先写 `[图片]`，
+ * 描述填回时若槽上有 mface 会改写成 `[表情包#短哈希]`）。没有地址的 mface 只留文字占位符。
+ */
+export function mapOneBotMessage(event, selfId) {
+  const message = event?.message
+  const isGroup = event?.message_type === 'group'
+  const userId = event?.user_id === undefined || event?.user_id === null ? null : String(event.user_id)
+  const me = selfId === undefined || selfId === null ? '' : String(selfId)
+  let text = ''
+  let atSelf = false
+  /** 收集到的图片（带 url，以及可选的 mface）。唤醒时下载成附件。 */
+  const images = []
+
+  if (Array.isArray(message)) {
+    const parts = []
+    for (const seg of message) {
+      const type = seg?.type
+      const data = seg?.data ?? {}
+      if (type === 'text') {
+        parts.push(String(data.text ?? ''))
+        continue
+      }
+      if (type === 'at') {
+        if (me !== '' && String(data.qq) === me) atSelf = true
+        else if (data.qq) parts.push(`@${data.qq} `)
+        continue
+      }
+      // 带地址的 mface 跟图片一样落盘，元数据挂在槽上。没地址就只留占位符，不占图片槽。
+      if (type === 'mface') {
+        const item = imageItemFromData(data)
+        if (item?.url) {
+          images.push(item)
+          parts.push('[图片]')
+        } else {
+          const label = labelForSegment('mface', data)
+          if (label !== '') parts.push(label)
+        }
+        continue
+      }
+      // 图片：除了占位符，还把 URL 收起来，之后下载成真正的附件给目标会话看。
+      // 拿不到 URL 的图片段也占一个位置（写 `null`，或只剩 mface 的对象）：
+      // 占位符与图片必须逐位对齐，否则后面的图会顶到前面那个占位符上。
+      if (type === 'image') images.push(imageItemFromData(data))
+      const label = labelForSegment(type, data)
+      if (label !== '') parts.push(label)
+    }
+    text = parts.join('')
+  } else {
+    const raw = String(event?.raw_message ?? message ?? '')
+    if (me !== '' && new RegExp(`\\[CQ:at,qq=${me}(?:,[^\\]]*)?\\]`).test(raw)) atSelf = true
+    const re = /\[CQ:([a-z_]+)(?:,([^\]]*))?\]/g
+    let cursor = 0
+    let out = ''
+    for (let match = re.exec(raw); match; match = re.exec(raw)) {
+      out += raw.slice(cursor, match.index)
+      cursor = match.index + match[0].length
+      const key = match[1]
+      const data = match[2] === undefined ? {} : parseCqArgs(match[2])
+      if (key === 'at') {
+        const qq = String(data.qq ?? '')
+        if (me !== '' && qq === me) continue
+        if (qq !== '') out += `@${qq} `
+        continue
+      }
+      if (key === 'image') {
+        images.push(imageItemFromData(data))
+        out += '[图片]'
+        continue
+      }
+      if (key === 'mface') {
+        const item = imageItemFromData(data)
+        if (item?.url) {
+          images.push(item)
+          out += '[图片]'
+        } else {
+          const label = labelForSegment('mface', data)
+          if (label !== '') out += label
+        }
+        continue
+      }
+      const label = labelForSegment(key, null)
+      if (label !== '') out += label
+    }
+    out += raw.slice(cursor)
+    text = out.trim()
+  }
+
+  return {
+    text: text.trim(),
+    userId,
+    nickname: event?.sender?.card || event?.sender?.nickname || null,
+    groupId: isGroup && event?.group_id !== undefined && event?.group_id !== null ? String(event.group_id) : null,
+    groupName: null,
+    atSelf,
+    messageId: event?.message_id === undefined || event?.message_id === null ? null : String(event.message_id),
+    images,
   }
 }
 
@@ -1757,6 +1927,8 @@ export function apply(ctx, config) {
     try {
       return readdirSync(imageCacheDir)
         .map((name) => {
+          // 商城表情旁路文件不是图片，不参与张数和容量淘汰。
+          if (name.endsWith('.mface.json')) return null
           const path = join(imageCacheDir, name)
           try {
             const st = statSync(path)
@@ -1771,6 +1943,44 @@ export function apply(ctx, config) {
     }
   }
 
+  /** `<hash>.mface.json`：唤醒清掉缓冲之后，save 仍能找回商城表情字段。 */
+  function mfaceSidecarPath(hash) {
+    const h = String(hash ?? '').trim().toLowerCase()
+    if (!/^[0-9a-f]{16}$/.test(h)) return null
+    return join(imageCacheDir, `${h}.mface.json`)
+  }
+
+  function readMfaceSidecar(hash) {
+    const path = mfaceSidecarPath(hash)
+    if (!path || !existsSync(path)) return null
+    try {
+      return normalizeMface(JSON.parse(readFileSync(path, 'utf8')))
+    } catch {
+      return null
+    }
+  }
+
+  function writeMfaceSidecar(hash, mface) {
+    const path = mfaceSidecarPath(hash)
+    const data = normalizeMface(mface)
+    if (!path || !data) return
+    try {
+      mkdirSync(imageCacheDir, { recursive: true })
+      writeFileSync(path, `${JSON.stringify(data)}\n`, 'utf8')
+    } catch (error) {
+      logger.warn(`商城表情元数据写入失败：${error?.message ?? error}`)
+    }
+  }
+
+  /** 槽上没有 mface 时，按内容哈希读旁路文件补上。就地改，好让后面的 save 看见。 */
+  function rememberMface(image) {
+    if (!image || typeof image !== 'object') return image
+    if (normalizeMface(image.mface)) return image
+    const side = readMfaceSidecar(image.hash)
+    if (side) image.mface = side
+    return image
+  }
+
   /** 超出容量/张数就删最旧的（按 mtime）。 */
   function evictImageCache() {
     try {
@@ -1781,6 +1991,8 @@ export function apply(ctx, config) {
         if (total <= MAX_IMAGE_CACHE_BYTES && count <= MAX_IMAGE_CACHE_FILES) break
         try {
           rmSync(f.path, { force: true })
+          const base = f.name.replace(/\.[^.]+$/, '').toLowerCase()
+          if (/^[0-9a-f]{16}$/.test(base)) rmSync(join(imageCacheDir, `${base}.mface.json`), { force: true })
           total -= f.size
           count -= 1
         } catch {
@@ -1792,13 +2004,6 @@ export function apply(ctx, config) {
     }
   }
 
-  /**
-   * 下载一张图并落到本地缓存。**只下载，不调用模型**（保住缓冲的零开销性质）。
-   *
-   * 文件名就是内容哈希（`<hash>.<ext>`）：同一张图重复出现不再重复落盘，
-   * 而且**命中已有文件时照样能拿到 hash**（表情包登记与描述缓存都按 hash 认图）。
-   * @returns {{path: string, mediaType: string, bytes: number, hash: string} | null}
-   */
   /** 把响应正文读进内存，超过单张上限就停掉流，不再继续收。 */
   async function readCappedImageBody(res) {
     const limit = MAX_IMAGE_DOWNLOAD_BYTES
@@ -1839,9 +2044,18 @@ export function apply(ctx, config) {
     return data
   }
 
+  /**
+   * 下载一张图并落到本地缓存。**只下载，不调用模型**（保住缓冲的零开销性质）。
+   *
+   * 文件名就是内容哈希（`<hash>.<ext>`）：同一张图重复出现不再重复落盘，
+   * 而且**命中已有文件时照样能拿到 hash**（表情包登记与描述缓存都按 hash 认图）。
+   * 槽上有商城表情字段时，另写 `<hash>.mface.json`。下载失败也把这份字段退回去，
+   * 占位符仍能写成表情包；没有字段、也没有地址时返回 null。
+   */
   async function cacheImage(item) {
+    const mface = normalizeMface(item?.mface)
     try {
-      if (!item?.url) return null
+      if (!item?.url) return mface ? { mface } : null
       mkdirSync(imageCacheDir, { recursive: true })
       const res = await fetch(item.url, { signal: AbortSignal.timeout(20000) })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -1855,10 +2069,11 @@ export function apply(ctx, config) {
         writeFileSync(path, data)
         evictImageCache()
       }
-      return { path, mediaType, bytes: data.length, hash }
+      if (mface && existsSync(path)) writeMfaceSidecar(hash, mface)
+      return { path, mediaType, bytes: data.length, hash, ...(mface ? { mface } : {}) }
     } catch (error) {
       logger.warn(`图片缓存失败：${String(item?.url).slice(0, 80)} -> ${error?.message ?? error}`)
-      return null
+      return mface ? { mface } : null
     }
   }
 
@@ -1945,7 +2160,8 @@ export function apply(ctx, config) {
     //
     // ⚠️ 两个数组的分工不能混：
     //   `cachedImages` 只装**落盘成功**的图（缓冲、附件、描述用它）；
-    //   `inlineSlots` 与正文里的 `[图片]` 占位符**逐位对齐**，落盘失败的位留 `null`。
+    //   `inlineSlots` 与正文里的 `[图片]` 占位符**逐位对齐**。落盘失败时，
+    //   有商城表情字段就留下 `{ mface }`（占位符写成表情包），否则留 `null`。
     // 早先只传 `cachedImages`：第 1 张落盘失败时，第 2 张的描述与短哈希会落到第 1 个
     // 占位符上，模型把描述归给错的图。
     const cachedImages = []
@@ -1954,7 +2170,7 @@ export function apply(ctx, config) {
       for (const item of msg.images.slice(0, MAX_BUFFER_IMAGES_PER_ITEM)) {
         const cached = await cacheImage(item)
         inlineSlots.push(cached ?? null)
-        if (cached) cachedImages.push(cached)
+        if (cached?.path) cachedImages.push(cached)
       }
     }
 
@@ -2253,80 +2469,6 @@ export function apply(ctx, config) {
     await handleInbound(inbound)
   }
 
-  /**
-   * OneBot 消息事件 → handleInbound 的 msg。
-   * 兼容 message 为 **array**（用户当前配置）与 string 两种形态。
-   */
-  function mapOneBotMessage(event, selfId) {
-    const message = event.message
-    const isGroup = event.message_type === 'group'
-    const userId = event.user_id === undefined || event.user_id === null ? null : String(event.user_id)
-    let text = ''
-    let atSelf = false
-    /** 收集到的图片（带 url），唤醒时下载成附件。 */
-    const images = []
-
-    if (Array.isArray(message)) {
-      const parts = []
-      for (const seg of message) {
-        const type = seg?.type
-        const data = seg?.data ?? {}
-        if (type === 'text') {
-          parts.push(String(data.text ?? ''))
-          continue
-        }
-        if (type === 'at') {
-          if (selfId !== '' && String(data.qq) === selfId) atSelf = true
-          else if (data.qq) parts.push(`@${data.qq} `)
-          continue
-        }
-        // 图片：除了占位符，还把 URL 收起来，之后下载成真正的附件给目标会话看。
-        // 拿不到 URL 的图片段也占一个位置（写 `null`）：占位符与图片必须逐位对齐，
-        // 否则后面的图会顶到前面那个占位符上（见 handleInbound 的 `inlineSlots`）。
-        if (type === 'image') {
-          const url = data.url || data.file || ''
-          if (url) images.push({ url: String(url), name: data.file ? String(data.file).split(/[\\/]/).pop() : undefined })
-          else images.push(null)
-        }
-        // 其余段都给个占位符：表情包、语音、视频、文件、卡片……都不能让消息凭空消失。
-        const label = labelForSegment(type, data)
-        if (label !== '') parts.push(label)
-      }
-      text = parts.join('')
-    } else {
-      const raw = String(event.raw_message ?? message ?? '')
-      // string 形态下 @ 是 CQ 码；顺便把常见 CQ 码换成可读占位符。
-      if (selfId !== '' && new RegExp(`\\[CQ:at,qq=${selfId}(?:,[^\\]]*)?\\]`).test(raw)) atSelf = true
-      // 从 CQ 码里抠图片 URL（url= 优先，退 file=）。
-      // 抠不到 URL 的 CQ 图片同样占一个位置（`null`），保住占位符与图片的逐位对齐。
-      for (const m of raw.matchAll(/\[CQ:image,([^\]]*)\]/g)) {
-        const kv = Object.fromEntries(
-          m[1].split(',').map((p) => {
-            const i = p.indexOf('=')
-            return i < 0 ? [p, ''] : [p.slice(0, i), p.slice(i + 1)]
-          }),
-        )
-        const url = kv.url || kv.file || ''
-        if (url) images.push({ url, name: kv.file ? kv.file.split(/[\\/]/).pop() : undefined })
-        else images.push(null)
-      }
-      text = raw
-        .replace(/\[CQ:at,qq=([^,\]]+)(?:,[^\]]*)?\]/g, (_m, qq) => (selfId !== '' && String(qq) === selfId ? '' : `@${qq} `))
-        .replace(/\[CQ:([a-z_]+)(?:,[^\]]*)?\]/g, (_m, key) => labelForSegment(key, null))
-        .trim()
-    }
-
-    return {
-      text: text.trim(),
-      userId,
-      nickname: event.sender?.card || event.sender?.nickname || null,
-      groupId: isGroup && event.group_id !== undefined ? String(event.group_id) : null,
-      groupName: null,
-      atSelf,
-      messageId: event.message_id === undefined ? null : String(event.message_id),
-      images,
-    }
-  }
 
   /** 懒加载群名（拿不到就返回 null，不影响策略）。 */
   async function loadGroupName(groupId) {
@@ -2399,7 +2541,7 @@ export function apply(ctx, config) {
       segments.push({ type: 'reply', data: { id: String(quoteId) } })
     }
     // 去完 Markdown 再拆表情。标记块和 qq_bridge_send 都进 sendToQQ。
-    // qq_bridge_sticker 自己组 image 段，不经过这里。
+    // qq_bridge_sticker 自己组 image 或 mface 段，不经过这里。
     segments.push(...textToOneBotSegments(body))
 
     try {
@@ -3123,8 +3265,9 @@ export function apply(ctx, config) {
   // ── 表情包：登记 / 列表 / 发送 ──────────────────────────────────────────────
   //
   // 不受 debugTools 限制 —— 这是产品的玩法（收藏群友发的图、按情绪发表情包），不是调试工具。
-  // 发送走与 `qq_bridge_send` **同一道**来源闸门；图片本体一律用 **base64** 送，
-  // 不送本地路径（NapCat 的 `enableLocalFile2Url` 是 false，给路径它读不到）。
+  // 发送走与 `qq_bridge_send` **同一道**来源闸门。
+  // 登记项四字段齐全（emoji_id / emoji_package_id / key / summary）时发 OneBot mface；
+  // 否则图片本体用 **base64** 送，不送本地路径（NapCat 的 `enableLocalFile2Url` 是 false）。
 
   /** 登记项的图片本体大小（读不到就是 null，不抛）。 */
   function stickerBytes(entry) {
@@ -3140,15 +3283,26 @@ export function apply(ctx, config) {
     for (const item of orderedBufferItems(preferKey)) {
       const list = Array.isArray(item?.images) ? item.images : []
       const image = list[list.length - 1]
-      if (image?.path) return { image, item }
+      if (image?.path) {
+        rememberMface(image)
+        return { image, item }
+      }
     }
     return null
+  }
+
+  function cachedFileHit(file, hash) {
+    const image = { path: file.path, hash }
+    const side = readMfaceSidecar(hash)
+    if (side) image.mface = side
+    return { image, item: null }
   }
 
   /**
    * 按 hash（短哈希或全哈希）找源图：先在**缓冲区**找（那里带着来源信息），
    * 再到**图片缓存目录**找。缓存里的新文件名就是 hash；老文件名没有 hash，
    * 只好把内容算一遍再比（save 是显式动作，这点 I/O 可以接受）。
+   * 商城表情字段在图片旁边的 `<hash>.mface.json`；缓冲里没有时从这里补上。
    */
   function findSourceByHash(hash) {
     const want = String(hash ?? '')
@@ -3157,18 +3311,21 @@ export function apply(ctx, config) {
     if (want === '') return null
     for (const item of orderedBufferItems()) {
       for (const image of Array.isArray(item?.images) ? item.images : []) {
-        if (String(image?.hash ?? '').toLowerCase().startsWith(want)) return { image, item }
+        if (String(image?.hash ?? '').toLowerCase().startsWith(want)) {
+          rememberMface(image)
+          return { image, item }
+        }
       }
     }
     for (const file of listImageCache()) {
-      if (!file.name.toLowerCase().startsWith(want)) {
-        try {
-          if (!hashOfBuffer(readFileSync(file.path)).startsWith(want)) continue
-        } catch {
-          continue
-        }
+      const named = file.name.replace(/\.[^.]+$/, '').toLowerCase()
+      if (/^[0-9a-f]{16}$/.test(named) && named.startsWith(want)) return cachedFileHit(file, named)
+      try {
+        const content = hashOfBuffer(readFileSync(file.path))
+        if (content.startsWith(want)) return cachedFileHit(file, content)
+      } catch {
+        continue
       }
-      return { image: { path: file.path }, item: null }
     }
     return null
   }
@@ -3184,16 +3341,17 @@ export function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: 'qq_bridge_sticker',
     description:
-      '表情包：收藏群友发的图、按情绪或哈希发出去。' +
-      'action:"list" 看已登记的有哪些（可按 mood 过滤）；' +
-      'action:"save" 把某张图存成表情包（给 hash，或 fromLast:true 取缓冲区里最近一张；mood 与 description 必填）；' +
+      '表情包：收藏群友发的图或商城表情，按情绪或哈希发出去。' +
+      'action:"list" 看已登记的有哪些（可按 mood 过滤；kind 为 mface 的是 QQ 原生表情包，image 的是普通图片）；' +
+      'action:"save" 把某张图存下来（给 hash，或 fromLast:true 取缓冲区里最近一张；mood 与 description 必填）。' +
+      '入站若带了商城表情字段，save 会一并记下；' +
       'action:"send" 发一张（给 hash 精确发，或只给 mood 在该情绪里随机挑一张）。' +
-      '图片本体以 base64 发送，不依赖本地路径。' +
+      '四字段齐全（emoji_id、emoji_package_id、key、summary）时发 QQ 原生表情包（mface）；缺了就按图片 base64 发，图还是图。' +
       '发送与 qq_bridge_send 共用同一道来源闸门：不是 QQ 唤醒的那一轮，第一次调用只会回一句确认。' +
       '显式 groupId / userId 还必须在对应白名单里，否则不会发出去。',
     parameters: {
       action: { type: 'string', required: true, description: 'list / save / send。' },
-      hash: { type: 'string', description: '短哈希或完整哈希；入站正文里的 [图片#xxxxxx] 就是它。' },
+      hash: { type: 'string', description: '短哈希或完整哈希；入站正文里的 [图片#xxxxxx] 或 [表情包#xxxxxx] 就是它。' },
       fromLast: { type: 'boolean', description: 'save 时 true = 取缓冲区里最近一张图。' },
       mood: { type: 'string', description: '情绪分类，如 无语 / 开心 / 震惊。save 必填；send 只给 mood 时随机挑一张。' },
       description: { type: 'string', description: '这张图是什么。save 必填，之后识图与发送都用它。' },
@@ -3223,6 +3381,8 @@ export function apply(ctx, config) {
               hash: shortHash(e.hash),
               mood: e.mood ?? '',
               description: truncateText(e.description ?? '', MAX_STICKER_DESC),
+              kind: stickerKind(e),
+              summary: truncateText(e.mface?.summary ?? '', MAX_STICKER_DESC),
               bytes: stickerBytes(e),
               sentCount: Number(e.sentCount ?? 0),
             })),
@@ -3242,7 +3402,7 @@ export function apply(ctx, config) {
           }
           else if (String(args.hash ?? '').trim() !== '') src = findSourceByHash(args.hash)
           else {
-            return JSON.stringify({ ok: false, error: 'save 需要 hash（正文里 [图片#xxxxxx] 那个短哈希）或 fromLast: true。' }, null, 2)
+            return JSON.stringify({ ok: false, error: 'save 需要 hash（正文里 [图片#xxxxxx] 或 [表情包#xxxxxx] 那个短哈希）或 fromLast: true。' }, null, 2)
           }
           if (!src) {
             return JSON.stringify({
@@ -3259,14 +3419,17 @@ export function apply(ctx, config) {
             mood,
             description,
             source: sourceLabelOf(src.item),
+            mface: src.image?.mface,
           })
           saveStickerStore()
-          logger.info(`表情包已登记 #${shortHash(entry.hash)}（${entry.mood}）`)
+          logger.info(`表情包已登记 #${shortHash(entry.hash)}（${entry.mood}，${stickerKind(entry)}）`)
           return JSON.stringify({
             ok: true,
             hash: shortHash(entry.hash),
             mood: entry.mood,
             description: entry.description,
+            kind: stickerKind(entry),
+            summary: entry.mface?.summary ?? '',
             file: entry.file,
             bytes: stickerBytes(entry),
           }, null, 2)
@@ -3316,13 +3479,23 @@ export function apply(ctx, config) {
           if (!transport.isOpen()) {
             return JSON.stringify({ ok: false, error: 'OneBot 传输未连接，表情包没有发出去。' }, null, 2)
           }
-          const filePath = join(dirname(statePath), String(entry.file ?? ''))
-          if (!entry.file || !existsSync(filePath)) {
-            return JSON.stringify({ ok: false, error: `登记表里的图片文件不存在：${entry.file ?? '(空)'}` }, null, 2)
+          // 四字段齐全才发原生表情包。缺 key 或 id 的图继续走图片，避免发出去的是一张打不开的空表情。
+          const native = mfaceSendData(entry)
+          let message
+          let sentAs
+          if (native) {
+            message = [{ type: 'mface', data: native }]
+            sentAs = 'mface'
+          } else {
+            const filePath = join(dirname(statePath), String(entry.file ?? ''))
+            if (!entry.file || !existsSync(filePath)) {
+              return JSON.stringify({ ok: false, error: `登记表里的图片文件不存在：${entry.file ?? '(空)'}` }, null, 2)
+            }
+            const b64 = readFileSync(filePath).toString('base64')
+            // base64:// 是 NapCat 唯一可靠的送图方式：enableLocalFile2Url 关着时本地路径读不到。
+            message = [{ type: 'image', data: { file: `base64://${b64}` } }]
+            sentAs = 'image'
           }
-          const b64 = readFileSync(filePath).toString('base64')
-          // base64:// 是 NapCat 唯一可靠的送图方式：enableLocalFile2Url 关着时本地路径读不到。
-          const message = [{ type: 'image', data: { file: `base64://${b64}` } }]
           if (dest.kind === 'group') await transport.call('send_group_msg', { group_id: dest.groupId, message })
           else await transport.call('send_private_msg', { user_id: dest.userId, message })
 
@@ -3332,19 +3505,21 @@ export function apply(ctx, config) {
             lastSentAt: Date.now(),
           })
           saveStickerStore()
+          const short = shortHash(entry.hash)
           recordOutbox({
             sessionId: 'tool:qq_bridge_sticker',
             via: 'tool',
             action: 'sticker',
             nonQQTurn: !gateOf(sessionIdOf(exec?.agent)).currentTurnFromQQ,
             to: dest,
-            text: `[表情包#${shortHash(entry.hash)}]`,
+            text: sentAs === 'mface' ? `[表情包#${short}]` : `[图片#${short}]`,
           })
-          logger.info(`已发送表情包 #${shortHash(entry.hash)} 到 ${dest.kind}:${dest.groupId ?? dest.userId}`)
+          logger.info(`已发送${sentAs === 'mface' ? '商城表情' : '图片'} #${short} 到 ${dest.kind}:${dest.groupId ?? dest.userId}`)
           return JSON.stringify({
             ok: true,
             sent: 1,
-            hash: shortHash(entry.hash),
+            as: sentAs,
+            hash: short,
             mood: entry.mood ?? '',
             to: dest,
           }, null, 2)
@@ -3897,8 +4072,9 @@ export function buildUsagePrompt(s = {}) {
     '【你会看到什么】',
     '- 入站消息形如「[QQ · 群名] 昵称：内容」；私聊时地点写成「私聊」。',
     '- 你没被唤醒期间的聊天会攒成一段「[QQ 未唤醒期间聊天记录] … [记录结束]」摘要，附在消息前面。',
-    '- 图片由多模态模型先转成文字，**就地**贴在图片原来的位置上，形如「[图片#a1b2c3]：<描述>」—— 描述可能不准，别当成绝对事实。',
-    '  方括号里的 6 位短哈希就是这张图在插件里的编号：模型可以用它把某张图存成表情包或再发出去。',
+    '- 图片由多模态模型先转成文字，**就地**贴在原来的位置上。普通图片形如「[图片#a1b2c3]：<描述>」。',
+    '  QQ 商城表情（带表情 id 的）形如「[表情包#a1b2c3]：<表情名> <描述>」。描述可能不准，别当成绝对事实。',
+    '  方括号里的 6 位短哈希就是编号：交给 `qq_bridge_sticker` 的 save / send。',
     '- 被「戳一戳」会显示成「[戳一戳]（戳的是我）」—— 那和被人 @ 一样，是有人在叫你。',
     '- 系统表情显示成「[表情182]」这种带编号的占位符。',
     '',
@@ -3928,7 +4104,8 @@ export function buildUsagePrompt(s = {}) {
     '',
     '【表情包】',
     '- 想发表情包就调 `qq_bridge_sticker`：用 `list` 看已登记的有哪些，用 `send` 按情绪（mood）或哈希发一张。',
-    '- 想收藏群友发的图，把正文里那张图的短哈希交给 `save`，再给它 mood 与 description。',
+    '  `kind` 为 mface 的会发成 QQ 原生表情包；`kind` 为 image 的普通图片发出去仍是图片。',
+    '- 想收藏群友发的图或商城表情，把正文里 `[图片#…]` 或 `[表情包#…]` 的短哈希交给 `save`，再给它 mood 与 description。',
     '  存过之后这张图直接命中登记表，识图不再花多模态调用。',
     '- 发了表情包**不要解释**它是什么意思（除非有人问）：人自己看得懂，解释反而奇怪。',
     '',

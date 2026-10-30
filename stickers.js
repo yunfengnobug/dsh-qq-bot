@@ -3,6 +3,8 @@
 // 登记表把“群里出现过的一张图”变成可复用的资产：
 //   * 图片本体复制到 `qq-bridge-stickers/<hash>.<ext>`；
 //   * 元数据（mood / description / 来源 / 发送次数）写在 `qq-bridge-stickers.json`。
+//   * 商城表情另外带一份 mface（emoji_id / emoji_package_id / key / summary）。
+//     四字段齐全时出站发 OneBot mface；缺了就仍发图片。
 //
 // hash 取图片字节 sha256 的**前 16 位十六进制**（小写）—— 与 `qq-bridge-images/` 的文件名同构，
 // 因此登记的图能直接命中宿主的图片描述缓存（省一次多模态调用）。
@@ -21,6 +23,65 @@ export const STICKERS_DIR = 'qq-bridge-stickers'
 export const HASH_LEN = 16
 /** 短哈希位数（正文占位符与工具里显示的是它）。 */
 export const SHORT_HASH_LEN = 6
+
+/**
+ * 把入站段或登记项上的商城表情字段收成一份干净对象。
+ * 只有 summary（普通图片也会带简介）不算商城表情，返回 null。
+ * `emoji_package_id` 收成非负整数；带不来的字段直接不写。
+ */
+export function normalizeMface(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const emojiId = String(raw.emoji_id ?? raw.emojiId ?? '').trim()
+  const key = String(raw.key ?? '').trim()
+  const summary = String(raw.summary ?? '').trim()
+  const pkg = packageIdOf(raw.emoji_package_id ?? raw.emojiPackageId)
+  if (emojiId === '' && key === '' && pkg === undefined) return null
+  const out = {}
+  if (emojiId !== '') out.emoji_id = emojiId
+  if (pkg !== undefined) out.emoji_package_id = pkg
+  if (key !== '') out.key = key
+  if (summary !== '') out.summary = summary
+  return out
+}
+
+/** 非负安全整数。数字或纯数字字符串都可以，别的（含小数）丢掉。 */
+function packageIdOf(value) {
+  if (typeof value === 'number') {
+    if (Number.isInteger(value) && value >= 0 && Number.isSafeInteger(value)) return value
+    return undefined
+  }
+  const text = String(value ?? '').trim()
+  if (!/^[0-9]+$/.test(text)) return undefined
+  const n = Number(text)
+  if (!Number.isSafeInteger(n)) return undefined
+  return n
+}
+
+/** 四字段都在，才能发 OneBot mface。缺任何一个就当普通图片。 */
+export function isCompleteMface(raw) {
+  const m = normalizeMface(raw)
+  return Boolean(m && m.emoji_id && m.key && m.summary && Number.isInteger(m.emoji_package_id))
+}
+
+/**
+ * 登记项 → 出站 mface 的 data。不齐就返回 null，调用方改发图片。
+ * `emoji_package_id` 是数字，跟 NapCat 当前的消息段定义一致。
+ */
+export function mfaceSendData(entry) {
+  const m = normalizeMface(entry?.mface)
+  if (!isCompleteMface(m)) return null
+  return {
+    emoji_package_id: m.emoji_package_id,
+    emoji_id: m.emoji_id,
+    key: m.key,
+    summary: m.summary,
+  }
+}
+
+/** 发给模型看的种类：四字段齐全是 mface，否则是 image。 */
+export function stickerKind(entry) {
+  return isCompleteMface(entry?.mface) ? 'mface' : 'image'
+}
 
 /** 图片字节 → 16 位小写十六进制 hash。 */
 export function hashOfBuffer(buffer) {
@@ -132,8 +193,9 @@ export function findSticker(store, { hash, mood } = {}) {
  *
  * 源文件读不到时**抛错**（由调用方翻成一句给模型看的提示）。落盘由调用方负责
  * （宿主半统一 `saveStickers`），这样本函数保持“输入进、条目出”的纯形状。
+ * `mface` 可选：有商城表情字段就合并进条目；这次没给就留着上次的。
  */
-export function importSticker({ store, srcPath, destDir, mood, description, source }) {
+export function importSticker({ store, srcPath, destDir, mood, description, source, mface }) {
   const data = readFileSync(srcPath)
   const hash = hashOfBuffer(data)
   const rawExt = extname(String(srcPath ?? ''))
@@ -146,6 +208,19 @@ export function importSticker({ store, srcPath, destDir, mood, description, sour
   if (!existsSync(destPath)) copyFileSync(srcPath, destPath)
 
   const prev = findSticker(store, { hash })
+  // 新来的字段盖住旧的；没带来的字段留着。这次没传 mface 就不写这个键，
+  // upsert 会保住登记表里已有的那份（重存普通图不该把商城表情信息抹掉）。
+  // 只带 summary 时：没有旧记录就不把普通图片简介当成商城表情；有旧记录就只改表情名。
+  let merged = null
+  if (mface !== undefined) {
+    const prevM = normalizeMface(prev?.mface) ?? {}
+    const incoming = normalizeMface(mface)
+    if (incoming) merged = { ...prevM, ...incoming }
+    else {
+      const summary = String(mface?.summary ?? '').trim()
+      if (summary !== '' && Object.keys(prevM).length > 0) merged = { ...prevM, summary }
+    }
+  }
   const entry = {
     hash,
     mood: String(mood ?? '').trim(),
@@ -156,6 +231,7 @@ export function importSticker({ store, srcPath, destDir, mood, description, sour
     source: String(source ?? '').trim(),
     // 新条目给全字段；已登记的图只换 mood / 描述，保留累计次数与首次登记时间。
     ...(prev ? {} : { addedAt: Date.now(), sentCount: 0, lastSentAt: null }),
+    ...(merged ? { mface: merged } : {}),
   }
   return upsertSticker(store, entry)
 }

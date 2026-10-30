@@ -23,7 +23,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
 > 上游由 DSH 写成。本 fork 的改动见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
-- 当前版本 **v0.2.2**（出站把 `[笑哭]` 这类表情名变成 QQ 系统表情。见 [`CHANGELOG.md`](./CHANGELOG.md)）
+- 当前版本 **v0.2.3**（商城表情按 QQ 原生表情包发送，普通图片仍是图片。见 [`CHANGELOG.md`](./CHANGELOG.md)）
 - **M1–M8 全部完成**，已在**真实 NapCat + 真实 QQ** 上端到端跑通（Windows 真机）
 
 ## 目录
@@ -235,7 +235,7 @@ QQ 路径与 `NapCatWinBootHook.dll`；此时 QQ 路径取不到会明确报错�
 - **字数上限**：出站文本超过 `replyMaxChars` 时**一条都不发**，调用方拿到 `reason: 'too-long'`，
   应按提示缩短后重发；未超长时 `replyWithQuote: true` 让消息带上引用；
   `stripMarkdown: true`（默认）时先去掉 Markdown 标记（QQ 不渲染）。字数按去掉 Markdown 之后、拆表情之前的正文计算。
-- **系统表情**：去掉 Markdown 之后，`sendToQQ` 把正文拆成 OneBot 消息段。`[笑哭]`、`[挥手]` 这类名字变成 `face` 段（笑哭是 182，挥手是 129），NapCat 显示系统表情。也认入站占位符 `[表情182]`，以及 `[CQ:face,id=182]`。对不上的方括号（例如 `[没这表情]`、`[图片]`）留在文字段里。标记块和 `qq_bridge_send` 都走这条路。`qq_bridge_sticker` 继续按登记表发送图片。名字表在 `faces.js`，常见的还有微笑、捂脸、吃瓜、比心。
+- **系统表情**：去掉 Markdown 之后，`sendToQQ` 把正文拆成 OneBot 消息段。`[笑哭]`、`[挥手]` 这类名字变成 `face` 段（笑哭是 182，挥手是 129），NapCat 显示系统表情。也认入站占位符 `[表情182]`，以及 `[CQ:face,id=182]`。对不上的方括号（例如 `[没这表情]`、`[图片]`）留在文字段里。标记块和 `qq_bridge_send` 都走这条路。名字表在 `faces.js`，常见的还有微笑、捂脸、吃瓜、比心。商城表情不走这条路，由 `qq_bridge_sticker` 按登记表发送，见[表情包](#表情包)。
 - **目的地钉在唤醒那一刻**。这一轮的标记块、`qq_bridge_send`、`qq_bridge_sticker` 和 `qq_bridge_listen` 都发回把这一轮叫醒的那个群或私聊，不会被同一时间另一条只记录下来的消息改掉。显式传入 `groupId` 或 `userId` 时发到那里，并且不引用别的会话里的原消息；这个群号必须在 `groupWhitelist` 里，这个 QQ 号必须在 `whitelist` 里，对不上就一条都不发（`reason: "not-allowlisted"`）。白名单留空等于不允许。钉住的目的地不再查一遍，它在入站时已经通过了白名单。同一会话后面没有新唤醒的轮次，仍回落到最后一次非丢弃的入站。
 - **连不上或还没有目的地时丢弃并记日志**，不静默排队堆积。
 - **标记块发出时传输失败**（`reason: 'send-failed'`）同样记进丢弃台账，并把原因回注到这一轮的会话里。模型能看到没发出去，而不是只在日志里留一行。
@@ -248,6 +248,7 @@ QQ 路径与 `NapCatWinBootHook.dll`；此时 QQ 路径取不到会明确报错�
 QQ 的表情、表情包、图片、语音、视频、文件、卡片、合并转发等都会换成可读占位符
 （如 `[表情4]`、`[表情包:[动画表情]]`、`[图片]`、`[文件:a.zip]`），**不会让整条消息丢失**。
 系统表情的入站占位符带编号，例如 `[表情182]`。出站时模型写的 `[笑哭]`，或这种占位符，会再变回系统表情，见[出站](#出站三种模式--来源闸门)。
+商城表情若带了可下载的图，描述填回去之后写成 `[表情包#短哈希]`，和普通图片的 `[图片#短哈希]` 分开，见[表情包](#表情包)。
 
 ### 戳一戳
 
@@ -277,6 +278,8 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 短哈希是这张图在插件里的编号。描述可能不准，而模型需要指着一张具体的图说话，
 所以占位符里带上短哈希 —— 模型把这个短哈希交给 `qq_bridge_sticker` 就能存下或再发出去。
 
+普通图片是 `[图片#a1b2c3]：<描述>`。入站段上带了商城表情的 `emoji_id`（NapCat 常把商城表情收成这种 `image` 段，也会直接给 `mface` 段）时，同一位置写成 `[表情包#a1b2c3]：<表情名> <描述>`。只有简介、没有表情 id 的图仍算普通图片。
+
 第 2 步是必需的：**目标会话的模型通常不支持图片输入**（如 `deepseek-v4-flash` 是纯文本），
 附件会被系统剥成 `image omitted`，只有描述能让模型知道图里的内容。
 
@@ -287,14 +290,14 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 - 解析结果会缓存：成功的解析按 `visionModel` 的值缓存，值没变就不再枚举模型列表。
   自动查找失败的结果也会缓存，但只用于同一次设置内的去重 —— 设置一改就丢掉并重试，
   所以之后补上视觉模型不必改动 `visionModel`。
-- **单张图失败会重试 2 次**（共 3 次尝试，退避 300/600ms）；3 次都失败才记“描述失败 + 原因”，
-  正文里写成 `[图片#a1b2c3]：（描述失败：原因）`。
+- **单张图失败会重试 2 次**（共 3 次尝试，退避 300/600ms）；3 次都失败才记“描述失败 + 原因”。
+  普通图片写成 `[图片#a1b2c3]：（描述失败：原因）`。商城表情写成 `[表情包#a1b2c3]：<表情名> （描述失败：原因）`。
 - 一次唤醒最多描述 3 张（每张 = 一次多模态调用）；描述失败不影响文本处理与策略判定。
 - 图片已登记为表情包时，描述直接取登记表里的 `description`，不调用多模态模型。
 
 ### 表情包
 
-群友发的图可以登记成表情包，之后按情绪（mood）或哈希再发出去。登记与发送都由 `qq_bridge_sticker` 工具完成。
+群友发的图和商城表情可以登记下来，之后按情绪（mood）或哈希再发出去。带齐商城表情字段的登记项发成 QQ 原生表情包；普通图片发出去仍是图片。登记与发送都由 `qq_bridge_sticker` 工具完成。
 
 **存储位置**（与 statePath 同目录）：
 
@@ -315,6 +318,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `file` | 图片本体路径，相对 statePath 目录 |
 | `ext` | 扩展名 |
 | `source` | 来源：`group:<群号>` / `private:<QQ号>` / `cache`（只从图片缓存捞到） |
+| `mface` | 可选。商城表情的 `emoji_id`（字符串）、`emoji_package_id`（非负整数）、`key`、`summary`。缺了这项的旧条目照常当图片 |
 | `addedAt` | 首次登记时间 |
 | `sentCount` / `lastSentAt` | 累计发送次数与上次发送时间 |
 
@@ -322,18 +326,19 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 | action | 参数 | 作用 |
 |---|---|---|
-| `list` | `mood?` | 列出已登记的：短哈希、mood、描述（截断 40 字）、图片大小、发送次数 |
-| `save` | `hash?`、`fromLast?`、`mood`、`description` | 登记一张图。`fromLast: true` 取缓冲区里最近一张 |
-| `send` | `hash?`、`mood?`、`groupId?`、`userId?` | 发一张。给 `hash` 精确发；只给 `mood` 时在该情绪里随机挑一张 |
+| `list` | `mood?` | 列出已登记的：短哈希、mood、描述（截断 40 字）、`kind`（`mface` 或 `image`）、表情名、图片大小、发送次数 |
+| `save` | `hash?`、`fromLast?`、`mood`、`description` | 登记一张图。`fromLast: true` 取缓冲区里最近一张。源图上若有商城表情字段，一并写入 |
+| `send` | `hash?`、`mood?`、`groupId?`、`userId?` | 发一张。给 `hash` 精确发；只给 `mood` 时在该情绪里随机挑一张。`mface` 四字段齐全时发原生表情包，否则发图片 |
 
 - `save` 先在**缓冲区**找源图（那里带着来源信息），再到**图片缓存目录**找。两处都没有时返回错误，
   提示先让群友发一张图。
 - `send` 与 `qq_bridge_send` **共用同一道来源闸门**：不是 QQ 唤醒的那一轮，第一次调用只回一句确认，
   同一轮里再调一次才真的发。
-- 发送成功记进 outbox（`via: 'tool'`、`action: 'sticker'`、`text: '[表情包#<短哈希>]'`），
-  并更新该条的 `sentCount` 与 `lastSentAt`。
-- 图片本体用 `base64://` 发送，不用本地路径：NapCat 的 `enableLocalFile2Url` 是 false，本地路径读不到。
-- 该工具**不受 `debugTools` 限制**：表情包是产品的玩法，不是调试工具。
+- 发送成功记进 outbox（`via: 'tool'`、`action: 'sticker'`）。原生表情包的 `text` 是 `[表情包#<短哈希>]`，普通图片是 `[图片#<短哈希>]`。同时更新该条的 `sentCount` 与 `lastSentAt`，已记下的 `mface` 不会被这次计数清掉。
+- **四字段齐全就发 OneBot `mface`**：`emoji_package_id`（数字）、`emoji_id`、`key`、`summary`。QQ 里显示的是原生表情包，不是一张图。这种发送不读本地图片文件。
+- **缺任何一项就发图片**：本体用 `base64://`，不用本地路径。NapCat 的 `enableLocalFile2Url` 是 false，本地路径读不到。
+- 图片落盘时，商城表情字段写在同一目录的 `<hash>.mface.json`（`$DSH_HOME/qq-bridge-images/`）。唤醒成功后缓冲会清掉，`save` 靠这份旁路文件找回字段。图片被缓存淘汰时，旁边的文件一起删。
+- 该工具**不受 `debugTools` 限制**：表情包是产品的玩法，不是调试工具。没有新增设置项。
 
 **缓存命中省 token**：`describeImage()` 先查登记表。命中且有 `description` 时直接返回这条描述，
 不调用多模态模型 —— 反复出现的图只描述一次。日志只记短哈希，不记图片 URL。
@@ -426,7 +431,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 |---|---|
 | 入站格式 | 入站消息格式、未唤醒摘要、“[图片#<短哈希>]：<描述>”（就地填回，可能不准）、被戳显示成“[戳一戳]（戳的是我）” |
 | 回复方式 | 按 `replyMode` 分叉：标记块怎么写、该调用哪个工具、非 QQ 轮的 2 步确认 |
-| 表情包 | 用 `qq_bridge_sticker` 的 `list` / `send` 发表情包；用 `save` 收藏群友发的图 |
+| 表情包 | 用 `qq_bridge_sticker` 的 `list` / `send` 发表情包；用 `save` 收藏群友发的图。`[表情包#短哈希]` 是商城表情，发出去是原生表情包；`[图片#短哈希]` 发出去仍是图片 |
 | 群聊礼仪 | 1–2 句话；默认不超过 40 字；不刷屏；不放路径、代码、日志、提交号；不汇报过程。系统表情写 `[笑哭]`、`[挥手]` 或 `[表情182]` |
 | 无人值守 | 不碰特权操作，见下一节 |
 | 会话跟随（监听模式） | 何时开窗；默认 5 分钟、上限 60 分钟；只对同一目的地生效；答完主动关 |
@@ -472,7 +477,7 @@ QQ 侧没有人能点击“同意”，因此：
 | `qq_bridge_transport` | `debugTools` | 查看连接状态（含 token 是否解析到），或 `action: 'reconnect'` 强制重连 |
 | `qq_bridge_simulate` | `debugTools` | 模拟一条入站消息走完整策略；可带 `groupName`（群名，用来写 perGroup 会话标题）；`dryRun: true` 只看决策，不注入 |
 | `qq_bridge_send` | 始终 | 出站。正文里的 `[笑哭]` 会变成系统表情。`replyMode: 'tool'` 时该工具**就是唯一的出站方式**，因此不能藏在调试开关后面 |
-| `qq_bridge_sticker` | 始终 | 表情包：`list` / `save` / `send`。图片以 base64 出站，与 `qq_bridge_send` 共用来源闸门，见[表情包](#表情包) |
+| `qq_bridge_sticker` | 始终 | 表情包：`list` / `save` / `send`。登记项带齐商城表情字段时发 `mface`，否则图片以 base64 出站。与 `qq_bridge_send` 共用来源闸门，见[表情包](#表情包) |
 | `qq_bridge_listen` | 始终 | 会话跟随窗口的开启与关闭。这是产品的使用方式，不是调试工具 |
 | `qq_bridge_napcat` | 始终 | NapCat 自助托管（下载 / 配置 / 启停） |
 
@@ -488,6 +493,7 @@ QQ 侧没有人能点击“同意”，因此：
   （NapCat 官方 release 推荐 **40768–44343**），或等 NapCat 跟上 QQ 的更新节奏。
 - **图片描述依赖一个支持图片输入的多模态模型**：目标会话的模型看不了图时，这是目标会话“看见”图的唯一途径；
   一次唤醒最多描述 3 张（成本考虑）。
+- **没有商城表情 id 的图发不成原生表情包**：本地保存的图、普通图片、只带简介的图、收藏表情（图片 `sub_type` 表示表情，但没有 `emoji_id` / `key`）都走图片。只收到 `mface` 段、却没有可下载地址时，占位符里没有短哈希，`save` 找不到文件，也就不能再发出去。四字段里缺 `key` 或 id 时同样退回图片。表情下架或 `key` 失效时，NapCat 可能直接拒发，插件不会自动改成图片再发一次。
 - **NapCat 是第三方 QQ 客户端**，存在账号风控风险；`NapCatInstaller.exe` 与 QQ 首次登录都需要人在场。
 - **测试套件需要 Node >= 22**（用到内置的全局 `WebSocket`）。
 - README / CHANGELOG 里的真机结论都来自 **Windows 10 + NapCat Shell + OneBot v11** 这一套；
@@ -497,13 +503,13 @@ QQ 侧没有人能点击“同意”，因此：
 
 改用法、设置或运行行为时，同一次提交里更新本文件。约定见 [`AGENTS.md`](./AGENTS.md)。
 
-4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **648 条断言**：
+4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **679 条断言**：
 
 ```powershell
-node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具 + 系统表情分段 + 设置卡片字段（假 ctx，纯离线）
+node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具（含 mface）+ 系统表情分段 + 设置卡片字段（假 ctx，纯离线）
 node test-onebot.mjs    # M2 端到端：内置最小 OneBot WS 服务器，验证收发全链路
 node test-napcat.mjs    # M5：ZIP 解包 / sha256 校验 / 发行包选择 / 配置写入
-node test-stickers.mjs  # 表情包登记表：哈希 / 读写 / 查找 / 原子写 / importSticker 复制文件
+node test-stickers.mjs  # 表情包登记表：哈希 / 读写 / 查找 / 原子写 / importSticker / mface 字段
 ```
 
 ## 路线
