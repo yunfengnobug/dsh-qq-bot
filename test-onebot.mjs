@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { apply } from './index.js'
+import { createOneBotTransport } from './onebot.js'
 
 // ── 最小 WebSocket 服务器 ────────────────────────────────────────────────────
 
@@ -519,6 +520,87 @@ check(
 for (const d of state.disposers) await d()
 check('dispose 后连接已关闭', await waitFor(() => mock.connected === false, 2000))
 await mock.close()
+
+// 11) connect() 重叠：后返回的旧调用不能拆掉新 socket，也不能再留一个。
+{
+  const savedWebSocket = globalThis.WebSocket
+  const opened = []
+  globalThis.WebSocket = class {
+    constructor(url) {
+      this.url = String(url)
+      this.readyState = 0
+      this.sent = []
+      opened.push(this)
+      queueMicrotask(() => {
+        if (this.onopen) {
+          this.readyState = 1
+          this.onopen()
+        }
+      })
+    }
+    send(text) {
+      this.sent.push(String(text))
+    }
+    close() {
+      this.readyState = 3
+      const onclose = this.onclose
+      this.onopen = this.onmessage = this.onclose = this.onerror = null
+      onclose?.({ code: 1000, reason: 'test' })
+    }
+  }
+  let tokenCalls = 0
+  let releaseFirst
+  let releaseSecond
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve
+  })
+  const secondGate = new Promise((resolve) => {
+    releaseSecond = resolve
+  })
+  const transport = createOneBotTransport({
+    getUrl: () => 'ws://127.0.0.1:9/onebot',
+    getToken: async () => {
+      tokenCalls += 1
+      if (tokenCalls === 1) await firstGate
+      else await secondGate
+      return 'secret-token'
+    },
+    onEvent() {},
+    logger: { info() {}, warn() {} },
+    reconnectMinMs: 60000,
+    reconnectMaxMs: 60000,
+    heartbeatTimeoutMs: 60000,
+    echoTimeoutMs: 50,
+  })
+  try {
+    transport.start()
+    transport.reconnectNow()
+    releaseSecond()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    releaseFirst()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const live = opened.filter((socket) => socket.readyState === 1)
+    check(
+      '重叠 connect：只留下后一次连接',
+      opened.length === 1 && live.length === 1 && transport.isOpen(),
+      JSON.stringify({ opened: opened.length, live: live.length, state: transport.status().state }),
+    )
+    check('重叠 connect：状态里没有 token', !JSON.stringify(transport.status()).includes('secret-token'))
+    check('重叠 connect：地址查询串里的 token 不进状态', !String(transport.status().url).includes('secret-token'))
+    const first = opened[0]
+    transport.reconnectNow()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const liveAfter = opened.filter((socket) => socket.readyState === 1)
+    check(
+      '再次重连：旧 socket 关掉，只留新的',
+      first.readyState === 3 && opened.length === 2 && liveAfter.length === 1 && transport.isOpen(),
+      JSON.stringify({ first: first.readyState, opened: opened.length, live: liveAfter.length }),
+    )
+  } finally {
+    transport.dispose()
+    globalThis.WebSocket = savedWebSocket
+  }
+}
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 if (state.warnings.length) console.log('warnings:', state.warnings.slice(0, 5))
