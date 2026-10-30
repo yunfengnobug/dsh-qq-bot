@@ -2784,6 +2784,39 @@ export function apply(ctx, config) {
   //      同一轮里再调一次才真的发。`nonQQConfirmPending` 按轮清零，不跨轮泄漏。
   // 返回**字符串**时调用方必须原样 return 它；返回 null = 放行。
   /**
+   * 显式 groupId / userId 必须落在对应白名单里。留空等于不允许。
+   * 没写这两个参数时不查：钉住的目的地在入站时已经通过白名单。
+   * 不允许时返回给工具的结果；允许时返回 null。
+   */
+  function explicitOutboundBlock(args) {
+    const s = readSettings()
+    if (args?.groupId) {
+      const id = String(args.groupId)
+      const list = (s.groupWhitelist ?? []).map(String)
+      if (!list.includes(id)) {
+        return {
+          sent: 0,
+          dropped: true,
+          reason: 'not-allowlisted',
+          error: `群 ${id} 不在 groupWhitelist 里，没有发出去。白名单留空等于全部不允许。`,
+        }
+      }
+    } else if (args?.userId) {
+      const id = String(args.userId)
+      const list = (s.whitelist ?? []).map(String)
+      if (!list.includes(id)) {
+        return {
+          sent: 0,
+          dropped: true,
+          reason: 'not-allowlisted',
+          error: `私聊 ${id} 不在 whitelist 里，没有发出去。白名单留空等于全部不允许。`,
+        }
+      }
+    }
+    return null
+  }
+
+  /**
    * 工具出站的目的地：显式 groupId / userId 优先，且不引用别的群的消息。
    * 否则用这个会话钉住的目的地，再没有用当前轮，最后才是 lastDestination。
    */
@@ -2829,6 +2862,7 @@ export function apply(ctx, config) {
       '"本轮不是 QQ 发起的，确认要发吗"，同一轮里再调一次才真的发出去。' +
       'replyMode=tool 时这是唯一的出站方式；marker 模式下它是「直接发这一条」的旁路。' +
       '文本超过出站字数上限时**一条都不发**，返回 `reason: "too-long"` 与 `limit`、`length` —— 请缩短后重发。' +
+      '显式 groupId / userId 必须在对应白名单里，否则 `reason: "not-allowlisted"`，一条都不发。' +
       '发出去的内容会记进 outbox（via: tool）。',
     parameters: {
       text: { type: 'string', required: true, description: '要发送的文本；超过出站字数上限时不会发出。' },
@@ -2841,6 +2875,18 @@ export function apply(ctx, config) {
       // 不是 QQ 唤醒的那一轮，第一次调用只回一句“确认要发吗”、**一个字都不发**；
       // 同一轮里再调一次才真的发出去。DSH 侧依然不会误发（多跨一道有意识的动作），
       // 但同时保住了“我确实想让你发到 QQ”这条能力 —— 以前是彻底发不出去。
+      const denied = explicitOutboundBlock(args)
+      if (denied) {
+        recordDropped({
+          via: 'tool',
+          reason: denied.reason,
+          destination: args.groupId
+            ? { kind: 'group', groupId: String(args.groupId) }
+            : { kind: 'private', userId: String(args.userId) },
+          sessionId: 'tool:qq_bridge_send',
+        })
+        return JSON.stringify(denied, null, 2)
+      }
       const blocked = outboundGate('qq_bridge_send', sessionIdOf(exec?.agent))
       if (blocked !== null) return blocked
       const resolved = resolveOutboundDest(args, exec)
@@ -2945,7 +2991,8 @@ export function apply(ctx, config) {
       'action:"save" 把某张图存成表情包（给 hash，或 fromLast:true 取缓冲区里最近一张；mood 与 description 必填）；' +
       'action:"send" 发一张（给 hash 精确发，或只给 mood 在该情绪里随机挑一张）。' +
       '图片本体以 base64 发送，不依赖本地路径。' +
-      '发送与 qq_bridge_send 共用同一道来源闸门：不是 QQ 唤醒的那一轮，第一次调用只会回一句确认。',
+      '发送与 qq_bridge_send 共用同一道来源闸门：不是 QQ 唤醒的那一轮，第一次调用只会回一句确认。' +
+      '显式 groupId / userId 还必须在对应白名单里，否则不会发出去。',
     parameters: {
       action: { type: 'string', required: true, description: 'list / save / send。' },
       hash: { type: 'string', description: '短哈希或完整哈希；入站正文里的 [图片#xxxxxx] 就是它。' },
@@ -3028,7 +3075,20 @@ export function apply(ctx, config) {
         }
 
         if (action === 'send') {
-          // 与 qq_bridge_send 同一道闸门：非 QQ 轮第一次调用只回确认、一个字都不发。
+          // 显式目的地先过白名单，再走与 qq_bridge_send 同一道来源闸门。
+          const denied = explicitOutboundBlock(args)
+          if (denied) {
+            recordDropped({
+              via: 'tool',
+              reason: denied.reason,
+              destination: args.groupId
+                ? { kind: 'group', groupId: String(args.groupId) }
+                : { kind: 'private', userId: String(args.userId) },
+              sessionId: 'tool:qq_bridge_sticker',
+            })
+            return JSON.stringify(denied, null, 2)
+          }
+          // 非 QQ 轮第一次调用只回确认、一个字都不发。
           const blocked = outboundGate('qq_bridge_sticker', sessionIdOf(exec?.agent))
           if (blocked !== null) return blocked
 

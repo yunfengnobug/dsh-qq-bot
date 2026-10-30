@@ -2397,8 +2397,8 @@ function sawSentText(s) {
     onebotUrl: 'ws://127.0.0.1:9/', // 假 WebSocket 会立刻把它当连上
     wakeProbability: 0, // 只记录：save 要从缓冲里取图
     nicknames: ['244'],
-    whitelist: ['test-user'],
-    groupWhitelist: [],
+    whitelist: ['test-user', '1001'],
+    groupWhitelist: ['12345678'],
     napcatInstallDir: join(dir, 'no-napcat'),
   })
   await new Promise((r) => setTimeout(r, 20))
@@ -2469,6 +2469,18 @@ function sawSentText(s) {
 
     const sent = JSON.parse(await stickerTool.execute({ action: 'send', hash, groupId: '12345678' }))
     check('send：按 hash 发送成功', sent.ok === true && sent.hash === shortHash(hash), JSON.stringify(sent))
+    const offGroup = JSON.parse(await stickerTool.execute({ action: 'send', hash, groupId: '999' }))
+    check(
+      'send：显式群号不在 groupWhitelist 里不发送',
+      offGroup.sent === 0 && offGroup.reason === 'not-allowlisted',
+      JSON.stringify(offGroup),
+    )
+    const offUser = JSON.parse(await stickerTool.execute({ action: 'send', hash, userId: '888' }))
+    check(
+      'send：显式 QQ 号不在 whitelist 里不发送',
+      offUser.sent === 0 && offUser.reason === 'not-allowlisted',
+      JSON.stringify(offUser),
+    )
 
     const socket = sockets.find((s) => s.readyState === 1)
     const call = socket?.sent.find((m) => m.action === 'send_group_msg')
@@ -3913,6 +3925,32 @@ function sawSentText(s) {
         explicitFrame.params.message?.[0]?.type === 'text',
       JSON.stringify(explicitFrame?.params),
     )
+    const offList = JSON.parse(await sendTool.execute({ text: '不该去丙群', groupId: '333' }))
+    check(
+      '显式群号不在 groupWhitelist 里不发送',
+      offList.sent === 0 && offList.dropped === true && offList.reason === 'not-allowlisted' && framesWith('不该去丙群').length === 0,
+      JSON.stringify(offList),
+    )
+    const offUser = JSON.parse(await sendTool.execute({ text: '不该去这个私聊', userId: '999000' }))
+    check(
+      '显式 QQ 号不在 whitelist 里不发送',
+      offUser.sent === 0 && offUser.reason === 'not-allowlisted' && framesWith('不该去这个私聊').length === 0,
+      JSON.stringify(offUser),
+    )
+    resolvedSettings.groupWhitelist = []
+    const pinnedStill = JSON.parse(await sendTool.execute({ text: '钉住的仍可发' }))
+    check(
+      '钉住的目的地不因事后清空白名单被拦',
+      pinnedStill.sent === 1 && String(framesWith('钉住的仍可发').at(-1)?.params?.group_id) === '111',
+      JSON.stringify(pinnedStill),
+    )
+    const emptyList = JSON.parse(await sendTool.execute({ text: '空白名单显式', groupId: '111' }))
+    check(
+      '空白名单下显式群号不发送',
+      emptyList.sent === 0 && emptyList.reason === 'not-allowlisted' && framesWith('空白名单显式').length === 0,
+      JSON.stringify(emptyList),
+    )
+    resolvedSettings.groupWhitelist = ['111', '222']
     mainSessionHandler(
       { id: 'session-smoke' },
       { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '[QQ]标记块回甲群[/QQ]' }] } } },

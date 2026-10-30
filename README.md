@@ -231,7 +231,7 @@ QQ 路径与 `NapCatWinBootHook.dll`；此时 QQ 路径取不到会明确报错�
 - **字数上限**：出站文本超过 `replyMaxChars` 时**一条都不发**，调用方拿到 `reason: 'too-long'`，
   应按提示缩短后重发；未超长时 `replyWithQuote: true` 让消息带上引用；
   `stripMarkdown: true`（默认）时先去掉 Markdown 标记（QQ 不渲染）。
-- **目的地钉在唤醒那一刻**。这一轮的标记块、`qq_bridge_send`、`qq_bridge_sticker` 和 `qq_bridge_listen` 都发回把这一轮叫醒的那个群或私聊，不会被同一时间另一条只记录下来的消息改掉。显式传入 `groupId` 或 `userId` 时发到那里，并且不引用别的会话里的原消息。同一会话后面没有新唤醒的轮次，仍回落到最后一次非丢弃的入站。
+- **目的地钉在唤醒那一刻**。这一轮的标记块、`qq_bridge_send`、`qq_bridge_sticker` 和 `qq_bridge_listen` 都发回把这一轮叫醒的那个群或私聊，不会被同一时间另一条只记录下来的消息改掉。显式传入 `groupId` 或 `userId` 时发到那里，并且不引用别的会话里的原消息；这个群号必须在 `groupWhitelist` 里，这个 QQ 号必须在 `whitelist` 里，对不上就一条都不发（`reason: "not-allowlisted"`）。白名单留空等于不允许。钉住的目的地不再查一遍，它在入站时已经通过了白名单。同一会话后面没有新唤醒的轮次，仍回落到最后一次非丢弃的入站。
 - **连不上或还没有目的地时丢弃并记日志**，不静默排队堆积。
 - 入站消息会自动附一行提示，说明目标会话的回复方式。
 
