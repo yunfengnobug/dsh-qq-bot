@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "type": "module",
   "main": "index.js",
-  "description": "DSH plugin that bridges QQ (OneBot/NapCat) to DSH sessions. Fork of sj244/dsh-qq-bridge: fail-closed whitelist, @/nickname wake, configurable-probability wake. 把 DSH 会话接到 QQ（OneBot/NapCat）的插件，fork 自 sj244/dsh-qq-bridge。",
+  "description": "把 DSH 会话接到 QQ（OneBot/NapCat）的插件。白名单默认全关；被 @、叫到昵称或被戳一定叫醒，其余消息按可调概率抽样。Fork 自 sj244/dsh-qq-bridge（MIT）。",
   "license": "MIT",
   "author": "yunfengnobug",
   "contributors": [

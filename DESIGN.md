@@ -1,6 +1,6 @@
 # dsh-qq-bot 设计草案
 
-> 本文是上游 sj244/dsh-qq-bridge 的设计记录。Fork 的包名是 dsh-qq-bot，Cordis id 仍是 `qq-bridge`。下文里的旧包名指的是同一插件。
+> 本文记录上游 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge) 的设计。本 fork 的包名是 dsh-qq-bot，Cordis 插件 id 仍是 `qq-bridge`。文中的 `qq-bridge` 是插件 id，不是包名。上游许可证为 MIT，版权归 sj244。
 
 > 目标：把 **一个指定的、已存在的 DSH 会话**（当前目标：
 > `<TARGET_SESSION_ID>`，<TARGET_WORKSPACE> 工作区）
@@ -10,7 +10,7 @@
 
 ## 1. 与现有 QQ 插件的根本区别
 
-| | 现有 QQ 插件（官方 / community / qqchat） | dsh-qq-bridge |
+| | 现有 QQ 插件（官方 / community / qqchat） | dsh-qq-bot（id 仍是 `qq-bridge`） |
 |---|---|---|
 | 会话模型 | 每个 QQ 私聊/群 → **新建**一个独立会话 | **固定指向一个已存在的 sessionId** |
 | 上下文 | 从零开始 | **原样继承**（会话日志即上下文） |

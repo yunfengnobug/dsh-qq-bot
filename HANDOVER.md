@@ -1,4 +1,4 @@
-# HANDOVER —— 上游 dsh-qq-bridge 交接说明
+# 交接说明
 
 > 这份交接说明来自上游 sj244/dsh-qq-bridge。本 fork 的包名是 **dsh-qq-bot**，Cordis 插件 id 仍是 `qq-bridge`。文中的本机路径、会话 id 若出现占位符，不要换成真实环境。
 
@@ -56,7 +56,7 @@
 | `stickers.js` | 6.5 KB | **表情包登记表**：内容哈希、读写、查找、原子写、复制图片本体（见 §13.9） |
 | `cordis.patch.yml` | 3.3 KB | bundle 挂载声明 + 安装期默认配置（composition base，含 M2/M5 键） |
 | `client\client.js` | 42.7 KB | **M3 浏览器半**：设置页里那张“QQ 桥接”卡片（手写 `__ModuleLoader__` bundle，见 §15） |
-| `package.json` | 1.6 KB | 包声明：`name=dsh-qq-bridge`、`type=module`、`dsh.bundle.patch`、**`dsh.client`** |
+| `package.json` | 1.6 KB | 包声明：`name=dsh-qq-bot`、`type=module`、`dsh.bundle.patch`、**`dsh.client`**。Cordis id 仍是 `qq-bridge` |
 | `DESIGN.md` | 12.9 KB | 设计草案：与现有 QQ 插件的区别、唤醒策略、接口表、设置项、里程碑、安全注意 |
 | `README.md` | 31.6 KB | 安装/使用说明，含 OneBot 接入、access_token 配置、NapCat 一键托管、依赖解析坑与解法 |
 | `CHANGELOG.md` | 23.1 KB | 逐版本变更记录，最新版本在最前面 |
@@ -67,7 +67,7 @@
 | `screenshots.json` | 0.0 KB | 市场详情页截图声明（指向 `assets\market-cover.jpg`，见 §16） |
 | `assets\` | 197.1 KB | 仓库内静态资源：市场封面 `market-cover.jpg`（见 §16） |
 | `docs\` | 16.5 KB | 仓库内文档：市场条目 yml、DSH 0.2.0 迁移说明、v0.1.2 与 v0.1.3 发行说明 |
-| `LICENSE` | 1.0 KB | MIT，Copyright (c) 2026 sj244 |
+| `LICENSE` | 1.0 KB | MIT。上游版权 Copyright (c) 2026 sj244；本 fork 版权 yunfengnobug。须保留上游许可声明 |
 | `node_modules\@deepseek-ai` | junction | 本地安装时让 `import '@deepseek-ai/...'` 能解析（见 §7 坑 1）；**已 gitignore** |
 | `HANDOVER.local.md` | — | **未脱敏**的原始交接文档（含真实会话 id / 本机路径 / 群号），**只在本机，已 gitignore** |
 
@@ -400,12 +400,12 @@ node test-napcat.mjs           # M5：自造 zip 验证解包/CRC/zip-slip/摘�
 
 # 3) 从 profile 里做加载检查
 cd "$env:USERPROFILE\.dsh\profiles\web"
-node -e "import('dsh-qq-bridge').then(m=>console.log(m.name, JSON.stringify(m.inject))).catch(e=>{console.error(e.message);process.exit(1)})"
-# 期望：qq-bridge ["agents","tools","settings"]
+node -e "import('dsh-qq-bot').then(m=>console.log(m.name, JSON.stringify(m.inject))).catch(e=>{console.error(e.message);process.exit(1)})"
+# 期望：qq-bridge ["agents","tools","settings"]（导出的 name 是 Cordis id，包名是 dsh-qq-bot）
 
 # 4) 安装 + 组合检查
 dsh plugin --profile web add "<REPO>"          # ⚠️ 用 dsh.cmd，别用 dsh（见 §7 坑 8）
-dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 # == dsh-qq-bridge
+dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 id qq-bridge、name dsh-qq-bot
 # 5) 重启 dsh web 后，在会话里调用调试工具：
 #    qq_bridge_status                    → 设置 / 目标会话 / OneBot 连接状态
 #    qq_bridge_transport                 → 连接状态 + token 是否解析到
@@ -862,7 +862,7 @@ window.__ModuleLoader__.load({
 ## 16. 上架插件市场（awesome-dsh-plugin）
 
 规范：<https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/main/contributing.md>
-条目文件：`docs/awesome-dsh-plugin-entry.yml`（复制成 `data/plugins/sj244__dsh-qq-bridge.yml` 后开 PR）。
+条目文件：`docs/awesome-dsh-plugin-entry.yml`。本 fork 若单独上架，复制成 `data/plugins/yunfengnobug__dsh-qq-bot.yml` 再开 PR。上游 sj244/dsh-qq-bridge 若已有条目，保留原文件，不要覆盖。
 
 **要求对照**：
 
@@ -897,8 +897,9 @@ window.__ModuleLoader__.load({
   `test-smoke.mjs` 会校验路径规格 + **文件真实存在** —— 规范点名过“路径写错只会在市场里静默 404”。
 - ⏳ 发布到 npm（可选，预构建安装可跳过构建授权）；要发的话 `repository` 必须指回本仓库（已经是了）。
 
-**提交方式**：把 `docs/awesome-dsh-plugin-entry.yml` 复制成 `data/plugins/sj244__dsh-qq-bridge.yml`，
-推到 fork 的分支后开 PR。一个 PR 最多 3 条（本项目 1 条），README 由脚本生成、别手改。
+**提交方式**：把 `docs/awesome-dsh-plugin-entry.yml` 复制成 `data/plugins/yunfengnobug__dsh-qq-bot.yml`，
+推到本仓库 fork 的分支后开 PR。一个 PR 最多 3 条（本项目 1 条），市场 README 由脚本生成、别手改。
+中文用户看条目里的 `description.zh`；`description.en` 是目录规范要求的英文字段。
 
 ## 17. 出站闸门按**来源**生效（2026-09-30 用户报“agent 分不清是在 QQ 还是 DSH 里”）
 
