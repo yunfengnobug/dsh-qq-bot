@@ -327,10 +327,10 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 出站方式、OneBot 地址、视觉模型等都在这里修改，**保存即生效**（写入 `settings.yaml` 的用户层，不用重启）。
 
 > **DSH 0.2.0 上**：宿主不再给第三方插件可写的设置命名空间（DSH #677 的迁移未完成，生态里所有走这条路的
-> 插件都一样）。本插件因此**自己挂了一条只服务本机的设置接口**：`GET/POST /api/qq-bridge/settings`。
+> 插件都一样）。本插件因此**自己挂了一条设置接口**：`GET/POST /api/qq-bridge/settings`。
 > 值存 `$DSH_HOME/qq-bridge-settings.json`，优先级为 **设置文件 > composition config**。
 > 卡片照常可以使用；`cordis.patch.yml` 也仍然可以修改（改完重启生效，且会被上面的设置文件覆盖）。
-> 接口只接受本机请求（非 loopback 一律 403），且只写 schema 白名单里的键。
+> 本机回环请求可以直接改（命令行、SSH 隧道、本机打开的面板）。经反向代理进来时，认 DSH 面板已经通过的登录会话，**不必再配 `trustedHosts`**。没有会话的外网请求仍然 403。打到本机 `127.0.0.1`、但来源是别的网站的请求也仍然拒绝。接口只写 schema 白名单里的键。
 
 卡片展开后还有 3 个操作按钮（0.1.5 与 0.2.0 上都有）：
 
@@ -343,8 +343,8 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 - **打开文件夹**：用系统文件管理器打开 NapCat 安装目录（Windows 用 `explorer.exe`，macOS 用 `open`，
   Linux 用 `xdg-open`）。
 
-这 3 个按钮走本机接口 `GET /api/qq-bridge/napcat`、`POST /api/qq-bridge/napcat/launch`、
-`POST /api/qq-bridge/napcat/reveal`：非本机请求一律 403，请求进行中按钮禁用，token 只拼进 URL 不写日志。
+这 3 个按钮走 `GET /api/qq-bridge/napcat`、`POST /api/qq-bridge/napcat/launch`、
+`POST /api/qq-bridge/napcat/reveal`，准入与设置接口相同：本机可以直接用，反向代理要带已登录的面板会话。没有会话的外网请求 403。请求进行中按钮禁用，token 只拼进 URL 不写日志。
 
 修改**出站方式**会立刻重挂注入给目标会话的用法说明：提示词正文按模式分叉，
 不重挂时模型会按本部署里已经不生效的做法回话。
@@ -476,7 +476,7 @@ QQ 侧没有人能点击“同意”，因此：
 
 改用法、设置或运行行为时，同一次提交里更新本文件。约定见 [`AGENTS.md`](./AGENTS.md)。
 
-4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **504 条断言**：
+4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **516 条断言**：
 
 ```powershell
 node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具 + 设置卡片字段（假 ctx，纯离线）

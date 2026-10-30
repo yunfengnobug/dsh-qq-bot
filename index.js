@@ -333,7 +333,7 @@ export function apply(ctx, config) {
   /**
    * 用户设置的落盘位置（0.2.0 专用）。
    * 0.2.0 的宿主设置桥不给第三方插件可写域（见 docs/dsh-0.2.0-migration.md），
-   * 所以照抄 @linxin666/dsh-client-ui-skin-center 的做法：自己挂一条**只服务本机**的接口，
+   * 所以照抄 @linxin666/dsh-client-ui-skin-center 的做法：自己挂一条设置接口（本机可直接用，反向代理认面板会话），
    * 值写在自己的文件里。优先级：本文件 > composition config（见 readSettings）。
    * 放在 statePath 同一个目录，测试里天然落在临时目录。
    */
@@ -523,36 +523,80 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 本机接口的准入判定：对端回环地址 + 请求来源 + 带体 POST 的 `content-type`。
+   * 设置接口与 NapCat 按钮的准入。
    *
-   * ⚠️ 只查对端地址不够。用户浏览器里的任意网页都能用无预检的 `fetch`
-   * （`mode: 'no-cors'`）打到 `http://127.0.0.1:<port>`：响应读不到，但副作用照发生 ——
-   * 改 `whitelist` / `targetSessionId`、POST `/api/qq-bridge/napcat/launch` 启动 NapCat。
-   * 对端地址挡不住这条路：请求确实发自本机，发起者是**浏览器里的别的页面**。
+   * 本机回环照旧放行（命令行、SSH 隧道、本机面板）。本机上若 Origin/Referer 指向别的网站，
+   * 仍然拒绝：浏览器里的任意网页都能对 `127.0.0.1` 发无预检请求，会话也不能拿来盖过这条。
    *
-   * `content-type` 只在请求体非空时要求 `application/json`，理由有两条：
-   * ① 跨站 `fetch` 用 `mode: 'no-cors'` 时，`content-type` 只能是 CORS 安全列表里的值
-   * （`text/plain`、`application/x-www-form-urlencoded`、`multipart/form-data`），
-   * 所以“带体的 POST 必须声明 JSON”已经把这条攻击挡住；
-   * ② 空体的 POST 改不了任何东西：设置接口没有请求体就没有 `set` / `unset`，
-   * NapCat 的三个动作只由 URL 决定。来源判定对所有请求都生效，那才是主防线。
+   * 不是回环地址时，不再要求 trustedHosts。DSH 面板自己的登录已经挡住了未授权访问：
+   * `connection.requestRejection` 为空表示宿主已经放行；它因主机围栏返回 403 时，
+   * 再看会话是否已登录。没有可确认的会话就拒绝，避免把接口开成公网。
    *
-   * 判定顺序固定：地址 → 来源 → 带体 POST 的 `content-type`。放行返回 `null`，拒绝返回中文原因。
+   * 带体 POST 仍必须声明 JSON。放行返回 `null`，拒绝返回中文原因。
    */
+  function rejectionStatus(rejection) {
+    if (rejection == null || rejection === false || rejection === 0 || rejection === '') return 0
+    if (typeof rejection === 'number') return rejection
+    if (typeof rejection === 'object') {
+      const status = rejection.status ?? rejection.statusCode
+      if (typeof status === 'number') return status
+    }
+    return 403
+  }
+
+  function panelHttps() {
+    const protocol = ctx.webServer?.protocol ?? ctx.get?.('webServer')?.protocol
+    return String(protocol ?? '') === 'https:'
+  }
+
+  function authSaysYes(fn, thisArg, req) {
+    if (typeof fn !== 'function') return false
+    const secure = panelHttps()
+    try {
+      const result = fn.length >= 2 ? fn.call(thisArg, req, secure) : fn.length === 1 ? fn.call(thisArg, req) : fn.call(thisArg)
+      return result === true
+    } catch {
+      return false
+    }
+  }
+
+  /** 宿主已经认出这是一次登录过的 DSH 面板请求。认不出就当没有。 */
+  function panelSessionAllows(req) {
+    const connection = ctx.get?.('connection')
+    if (!connection || typeof connection !== 'object') return false
+    if (typeof connection.requestRejection === 'function') {
+      let rejection
+      try {
+        rejection = connection.requestRejection(req)
+      } catch {
+        return false
+      }
+      const status = rejectionStatus(rejection)
+      if (status === 0) return true
+      if (status === 401 || status !== 403) return false
+    }
+    return (
+      authSaysYes(connection.isAuthenticated, connection, req) ||
+      authSaysYes(connection.browserAuth?.isAuthenticated, connection.browserAuth, req) ||
+      authSaysYes(connection.auth?.isAuthenticated, connection.auth, req)
+    )
+  }
+
   function checkLocalRequest(req) {
     const addr = String(req?.socket?.remoteAddress ?? '')
-    if (!isLoopbackAddress(addr)) {
-      return `只接受本机请求（对端地址 ${addr === '' ? '未知' : addr}）。这个接口能改设置、也能启动 NapCat，不对外网或局域网开放。`
-    }
-    // 有 Origin 就只认它；没有 Origin 才看 Referer。两者都没有 = 命令行工具或卡片同源请求，放行。
+    const loopback = isLoopbackAddress(addr)
     const origin = String(req?.headers?.origin ?? '').trim()
     const referer = String(req?.headers?.referer ?? '').trim()
     const source = origin !== '' ? origin : referer
-    if (source !== '') {
+    if (loopback && source !== '') {
       const host = originHostOf(source)
       if (host === null || !isLoopbackHost(host)) {
         return `只接受本机页面发来的请求（来源 ${source} 不是本机）。请在本机打开的 DSH 界面里操作。`
       }
+    }
+    if (!loopback && !panelSessionAllows(req)) {
+      const who = addr === '' ? '未知' : addr
+      return `这个接口不按回环地址拦截。对端 ${who} 不是本机，且没有已通过的 DSH 面板会话。请用带登录 token 的面板打开后再改设置（不需要再配 trustedHosts）。`
     }
     if (String(req?.method ?? '').toUpperCase() === 'POST' && requestHasBody(req) && !isJsonContentType(req)) {
       const got = String(req?.headers?.['content-type'] ?? '')
@@ -2010,7 +2054,8 @@ export function apply(ctx, config) {
     applySettingChanges()
   }))
 
-  // 0.2.0：宿主设置桥写不了 → 自己挂一条**只服务本机**的设置接口（范本：皮肤中心的 /api/skin-center/...）。
+  // 0.2.0：宿主设置桥写不了 → 自己挂设置接口（范本：皮肤中心的 /api/skin-center/...）。
+  // 本机回环直接可用；经反向代理时认 DSH 面板会话，不要求 trustedHosts。
   // 可选注入：没有 webServer 服务的部署照常工作（只是卡片仍拿不到可写域）。
   // ⚠️ **只在非老模型（0.2.0 那类）宿主上挂**：老模型（0.1.5）读的是 settings 命名空间、不读这个文件，
   // 挂上去只会是个“改了不生效”的死接口。（`ctx.inject` 是 Cordis 核心 API，真实宿主一定有，
@@ -2031,7 +2076,7 @@ export function apply(ctx, config) {
           // 卸载时路由可能已经不在了，忽略
         }
       })
-      logger.info('设置接口已挂载：/api/qq-bridge/settings（仅本机）')
+      logger.info('设置接口已挂载：/api/qq-bridge/settings（本机，或已登录的 DSH 面板）')
     } catch (error) {
       logger.warn(`设置接口挂载失败（可能同路径已被占用）：${error?.message ?? error}`)
     }
@@ -3100,7 +3145,7 @@ export function apply(ctx, config) {
   // ── 卡片上的三个操作按钮（打开 WebUI / 启动 NapCat / 打开文件夹）─────────────
   //
   // ⚠️ 这三条路由**不受 legacySettings 门控**：它们只管启动与打开，跟“设置值存在哪”无关，
-  //    两代宿主都要挂。仍然只服务本机 —— 它们能启动进程、能开文件管理器。
+  //    两代宿主都要挂。准入与设置接口相同：本机可以直接用，反向代理要带已登录的面板会话。
 
   /**
    * 读 NapCat 的 WebUI 地址（`<configDir>/webui.json`）。
@@ -3215,7 +3260,7 @@ export function apply(ctx, config) {
           }
         }
       })
-      logger.info('NapCat 操作接口已挂载：/api/qq-bridge/napcat{,/launch,/reveal}（仅本机）')
+      logger.info('NapCat 操作接口已挂载：/api/qq-bridge/napcat{,/launch,/reveal}（本机，或已登录的 DSH 面板）')
     } catch (error) {
       for (const dispose of disposes) {
         try {

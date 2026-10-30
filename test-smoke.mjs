@@ -1697,6 +1697,73 @@ function sawSentText(s) {
       await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.4 } } }), resRemote)
       check('S1：对端非回环地址的 POST → 403（回归）', resRemote.out.status === 403, `${resRemote.out.status} ${errOf(resRemote)}`)
       check('S1：对端非回环的文案说明只接受本机请求', errOf(resRemote).includes('本机'), errOf(resRemote))
+      check(
+        'S1：非本机被拒时说明不必再配 trustedHosts',
+        errOf(resRemote).includes('不需要再配 trustedHosts') && !/请(设置|配置|填写)\s*trustedHosts/.test(errOf(resRemote)),
+        errOf(resRemote),
+      )
+
+      // ⑨ 反向代理：宿主已经认出面板会话时放行；认不出就仍然拒绝。本机上的站外 Origin 不能靠会话翻案。
+      const baseGet = apiCtx.get.bind(apiCtx)
+      let panelConnection = null
+      apiCtx.get = (name) => (name === 'connection' ? panelConnection : baseGet(name))
+      try {
+        const beforePanel = fileValues()
+        panelConnection = { requestRejection() { return undefined } }
+        const resOk = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.41 } } }), resOk)
+        check('S1：非本机 + 面板会话已通过 → 200', resOk.out.status === 200, `${resOk.out.status} ${errOf(resOk)}`)
+        check('S1：非本机 + 面板会话已通过 → 设置写进去了', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+
+        panelConnection = { requestRejection() { return 401 } }
+        const res401 = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.77 } } }), res401)
+        check('S1：非本机 + 未登录（401）→ 403', res401.out.status === 403 && errOf(res401).includes('本机'), errOf(res401))
+        check('S1：未登录的非本机 POST 不改设置', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+
+        panelConnection = { requestRejection() { return 403 } }
+        const res403 = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.78 } } }), res403)
+        check('S1：非本机 + 主机围栏 403 且没有会话助手 → 拒绝', res403.out.status === 403, errOf(res403))
+        check('S1：没有会话助手时不改设置', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+
+        panelConnection = {
+          requestRejection() { return 403 },
+          isAuthenticated() { return true },
+        }
+        const resHelper = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.42 } } }), resHelper)
+        check('S1：非本机 + 403 但 isAuthenticated 为真 → 通过', resHelper.out.status === 200, errOf(resHelper))
+        check('S1：会话助手放行后写进设置', fileValues().wakeProbability === 0.42, JSON.stringify(fileValues()))
+
+        panelConnection = {
+          requestRejection() { return { status: 403 } },
+          browserAuth: { isAuthenticated() { return true } },
+        }
+        const resBrowser = makeRes()
+        await route.handler(req('GET', { addr: '10.0.0.8' }), resBrowser)
+        check('S1：非本机 GET + browserAuth.isAuthenticated → 200', resBrowser.out.status === 200, errOf(resBrowser))
+
+        panelConnection = { requestRejection() { return undefined } }
+        const resEvilSession = makeRes()
+        await route.handler(
+          req('POST', { headers: { origin: 'https://evil.example' }, body: { set: { wakeProbability: 0.99 } } }),
+          resEvilSession,
+        )
+        check(
+          'S1：本机上的站外 Origin 不能靠面板会话翻案',
+          resEvilSession.out.status === 403 && errOf(resEvilSession).includes('evil.example'),
+          errOf(resEvilSession),
+        )
+        check(
+          'S1：站外 Origin 翻案失败时设置不变',
+          fileValues().wakeProbability === 0.42 && JSON.stringify(fileValues()) !== JSON.stringify(beforePanel),
+          JSON.stringify(fileValues()),
+        )
+      } finally {
+        panelConnection = null
+        apiCtx.get = baseGet
+      }
 
       // ⑧ 其余报错码也要说清发生了什么（用户看得懂才有下一步）。
       const resBadJson = makeRes()
