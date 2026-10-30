@@ -862,7 +862,7 @@ window.__ModuleLoader__.load({
         ),
         h('div', { style: S.hint }, '先问 npm 上有没有新版本。这里只检查，不会安装。'),
         updateOffer
-          ? h('div', { style: S.hint }, '优先从 npm 安装 @fengye_nobug/dsh-qq-bot 的这一版并重启面板。这一版还没发到 npm 时，会改从 GitHub 下载。设置还在，不改 NapCat。重启后请刷新，登录口令可能会变。')
+          ? h('div', { style: S.hint }, '优先从 npm 安装 @fengye_nobug/dsh-qq-bot 的这一版并重启面板。这一版还没发到 npm 时，会改从 GitHub 下载。设置还在，不改 NapCat。重启后请刷新，登录口令可能会变。安装如果超过三分钟没有动静，会停掉卡住的进程，并用白话说明。')
           : null,
         updateNote
           ? h('div', { style: { ...(updateIsError ? S.err : S.note), whiteSpace: 'pre-wrap' } }, updateNote)

@@ -1,6 +1,8 @@
 // 检查更新和一键安装。不连真 GitHub、不调真 dsh：fetch 和命令都由用例自己提供。
 // 运行：node test-updates.mjs
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import {
   applyPluginUpdate,
@@ -19,8 +21,16 @@ import {
   npmPackageUrl,
   NPM_REGISTRY,
   normalizeRegistry,
+  alignCordisNames,
+  clearStaleRunRecord,
+  parseRunRecord,
   parseSemver,
+  profileDirectory,
   queryNpmVersions,
+  rewriteCordisPackageName,
+  runPluginAdd,
+  runRecordPath,
+  stopProcessTree,
   planPanelRestart,
   RESTART_HELPER,
   repackReleaseTarball,
@@ -328,7 +338,7 @@ const systemdOk = await schedulePanelRestart({
     return laterClose(0)(command, args, options)
   },
 })
-check('systemd-run 成功就认为重启已安排', systemdOk.ok === true && systemdOk.mode === 'systemd' && systemdSpawned[0]?.command === 'systemd-run')
+check('systemd-run 成功就认为重启已安排', systemdOk.ok === true && systemdOk.mode === 'systemd' && systemdSpawned[0]?.command === 'systemd-run' && systemdSpawned[0]?.options?.detached !== true)
 const systemdFail = await schedulePanelRestart({
   plan: systemdPlan,
   spawnImpl: (command, args, options) => laterClose(1)(command, args, options),
@@ -886,6 +896,464 @@ const redirectedRegistry = await queryNpmVersions({
   },
 })
 check('registry 跳到别的网站就不跟', redirectedRegistry.ok === false && redirectedRegistry.code === 'network')
+
+const profileSample = [
+  '# 用户覆盖',
+  '- id: qq-bridge',
+  '  name: dsh-qq-bot  # 旧包名',
+  '  config:',
+  "    onebotUrl: 'ws://127.0.0.1:3001'",
+  "    nicknames: ['244', '小助手']",
+  '- id: other-plugin',
+  '  name: dsh-qq-bot',
+  '  config:',
+  '    keep: true',
+].join('\n') + '\n'
+const rewritten = rewriteCordisPackageName(profileSample, '@fengye_nobug/dsh-qq-bot')
+check(
+  '只改 qq-bridge 的旧包名，config 和别的插件不动',
+  rewritten.changed === true &&
+    rewritten.text.includes("name: '@fengye_nobug/dsh-qq-bot' # 旧包名") &&
+    rewritten.text.includes("onebotUrl: 'ws://127.0.0.1:3001'") &&
+    rewritten.text.includes("nicknames: ['244', '小助手']") &&
+    rewritten.text.includes('- id: other-plugin\n  name: dsh-qq-bot'),
+  rewritten.text,
+)
+const keptDev = rewriteCordisPackageName('- id: qq-bridge\n  name: ./local-dev\n  config:\n    keep: 1\n', '@fengye_nobug/dsh-qq-bot')
+check('qq-bridge 上不是我们的包名时不改', keptDev.changed === false && keptDev.text.includes('name: ./local-dev'))
+const alreadyScoped = "- id: qq-bridge\n  name: '@fengye_nobug/dsh-qq-bot'\n"
+check('已经是作用域包名时原样返回', rewriteCordisPackageName(alreadyScoped, '@fengye_nobug/dsh-qq-bot').changed === false)
+check('不把别的字符串写进 name', rewriteCordisPackageName(profileSample, 'not a package').changed === false)
+check(
+  'profile 目录只拼合法的 profile 名',
+  profileDirectory('/dsh', 'web').endsWith('/profiles/web') && profileDirectory('/dsh', '../web') === '' && profileDirectory('', 'web') === '',
+)
+
+const alignRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-align-'))
+const alignProfile = profileDirectory(alignRoot, 'web')
+const alignPkg = join(alignProfile, 'node_modules', '@fengye_nobug', 'dsh-qq-bot')
+mkdirSync(alignPkg, { recursive: true })
+writeFileSync(
+  join(alignPkg, 'package.json'),
+  JSON.stringify({
+    name: '@fengye_nobug/dsh-qq-bot',
+    version: '9.9.9',
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }),
+)
+const pluginPatch = "- insert:\n    - id: qq-bridge\n      name: dsh-qq-bridge\n      config:\n        targetSessionId: ''\n"
+writeFileSync(join(alignPkg, 'cordis.patch.yml'), pluginPatch)
+writeFileSync(join(alignProfile, 'cordis.patch.yml'), profileSample)
+writeFileSync(join(alignRoot, 'cordis.patch.yml'), '- id: qq-bridge\n  name: "dsh-qq-bot"\n  config:\n    statePath: \'\'\n')
+const aligned = alignCordisNames({ profileDir: alignProfile, home: alignRoot })
+const pluginAfter = readFileSync(join(alignPkg, 'cordis.patch.yml'), 'utf8')
+const profileAfter = readFileSync(join(alignProfile, 'cordis.patch.yml'), 'utf8')
+const homeAfter = readFileSync(join(alignRoot, 'cordis.patch.yml'), 'utf8')
+check(
+  '安装目录、profile 和 home 三处都改成实际包名',
+  aligned.ok === true &&
+    aligned.name === '@fengye_nobug/dsh-qq-bot' &&
+    aligned.changed.length === 3 &&
+    pluginAfter.includes("name: '@fengye_nobug/dsh-qq-bot'") &&
+    pluginAfter.includes("targetSessionId: ''") &&
+    profileAfter.includes("name: '@fengye_nobug/dsh-qq-bot' # 旧包名") &&
+    profileAfter.includes('name: dsh-qq-bot', profileAfter.indexOf('other-plugin')) &&
+    homeAfter.includes("name: '@fengye_nobug/dsh-qq-bot'"),
+  JSON.stringify({ changed: aligned.changed.length, pluginAfter, homeAfter }),
+)
+const untouched = alignCordisNames({ profileDir: alignProfile, home: alignRoot })
+check('包名已经对齐时不再改文件', untouched.changed.length === 0 && readFileSync(join(alignPkg, 'cordis.patch.yml'), 'utf8') === pluginAfter)
+
+const legacyRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-legacy-'))
+const legacyProfile = profileDirectory(legacyRoot, 'web')
+const legacyPkg = join(legacyProfile, 'node_modules', 'dsh-qq-bot')
+mkdirSync(legacyPkg, { recursive: true })
+writeFileSync(join(legacyPkg, 'package.json'), JSON.stringify({ name: 'dsh-qq-bot', version: '0.2.3' }))
+writeFileSync(join(legacyPkg, 'cordis.patch.yml'), "- insert:\n    - id: qq-bridge\n      name: '@fengye_nobug/dsh-qq-bot'\n")
+writeFileSync(join(legacyProfile, 'cordis.patch.yml'), '- id: qq-bridge\n  name: \'@fengye_nobug/dsh-qq-bot\'\n')
+const legacyAligned = alignCordisNames({ profileDir: legacyProfile, expectedVersion: '0.2.3' })
+check(
+  '磁盘上仍是无作用域包时，name 改回那个包名',
+  legacyAligned.name === 'dsh-qq-bot' &&
+    readFileSync(join(legacyPkg, 'cordis.patch.yml'), 'utf8').includes("name: 'dsh-qq-bot'") &&
+    readFileSync(join(legacyProfile, 'cordis.patch.yml'), 'utf8').includes("name: 'dsh-qq-bot'"),
+)
+const versionMiss = alignCordisNames({ profileDir: legacyProfile, expectedVersion: '9.9.9' })
+check('版本对不上就不改包名', versionMiss.reason === 'version' && versionMiss.changed.length === 0)
+
+writeFileSync(join(alignPkg, 'cordis.patch.yml'), pluginPatch)
+writeFileSync(join(alignProfile, 'cordis.patch.yml'), profileSample)
+writeFileSync(join(alignRoot, 'cordis.patch.yml'), '- id: qq-bridge\n  name: "dsh-qq-bot"\n  config:\n    statePath: \'\'\n')
+const appliedAlign = await applyWith({
+  current: '0.2.3',
+  onFetch: (url) => {
+    if (url === npmPackageUrl()) {
+      return { ok: true, status: 200, json: async () => ({ versions: { '9.9.9': { version: '9.9.9' } } }) }
+    }
+    throw new Error(`不该访问 ${url}`)
+  },
+  runCommand: async (spec) => {
+    if (spec.packageSpec !== '@fengye_nobug/dsh-qq-bot@9.9.9') return { ok: false, code: 'error' }
+    return { ok: true, code: 0 }
+  },
+})
+const appliedWithHome = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  home: alignRoot,
+  profile: 'web',
+  fetchImpl: async (url) => {
+    if (String(url) === npmPackageUrl()) {
+      return { ok: true, status: 200, json: async () => ({ versions: { '9.9.9': { version: '9.9.9' } } }) }
+    }
+    throw new Error(`不该访问 ${url}`)
+  },
+  runCommand: async () => ({ ok: true, code: 0 }),
+  scheduleRestart: async () => ({ ok: true, mode: 'reexec' }),
+})
+check(
+  '一键安装成功后说明 Cordis 包名已改成实际安装的包',
+  appliedWithHome.ok === true &&
+    appliedWithHome.channel === 'npm' &&
+    /已经装上 v9.9.9/.test(appliedWithHome.message) &&
+    /Cordis 里 qq-bridge 的包名已经改成实际安装的 @fengye_nobug\/dsh-qq-bot/.test(appliedWithHome.message) &&
+    /没有改动 NapCat/.test(appliedWithHome.message) &&
+    appliedAlign.result.ok === true &&
+    !/Cordis 里 qq-bridge/.test(appliedAlign.result.message),
+  appliedWithHome.message,
+)
+rmSync(alignRoot, { recursive: true, force: true })
+rmSync(legacyRoot, { recursive: true, force: true })
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function npmReady(version = '9.9.9') {
+  return async (url) => {
+    if (String(url) === npmPackageUrl()) {
+      return { ok: true, status: 200, json: async () => ({ versions: { [version]: { version } } }) }
+    }
+    throw new Error(`不该访问 ${url}`)
+  }
+}
+
+function plantScoped(root, version) {
+  const profile = profileDirectory(root, 'web')
+  const pkgDir = join(profile, 'node_modules', '@fengye_nobug', 'dsh-qq-bot')
+  mkdirSync(pkgDir, { recursive: true })
+  writeFileSync(
+    join(pkgDir, 'package.json'),
+    JSON.stringify({ name: '@fengye_nobug/dsh-qq-bot', version, dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+  )
+  const patch = "- insert:\n    - id: qq-bridge\n      name: dsh-qq-bot\n      config:\n        targetSessionId: ''\n"
+  writeFileSync(join(pkgDir, 'cordis.patch.yml'), patch)
+  writeFileSync(join(profile, 'cordis.patch.yml'), "- id: qq-bridge\n  name: dsh-qq-bot\n  config:\n    keep: 1\n")
+  writeFileSync(join(root, 'cordis.patch.yml'), '- id: qq-bridge\n  name: "dsh-qq-bot"\n  config:\n    statePath: \'\'\n')
+  return profile
+}
+
+function writeRunRecord(profile, pid, grouped = false) {
+  const dir = join(profile, '.plugin-manager')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(runRecordPath(profile), `${JSON.stringify({ pid, grouped })}\n`)
+}
+
+function hangSpawn(pid, sink = {}) {
+  return (command, args, options) => {
+    const handlers = {}
+    const child = {
+      pid,
+      stdout: { on() {} },
+      stderr: { on() {} },
+      on(name, fn) {
+        handlers[name] = fn
+        return child
+      },
+      kill() {},
+      unref() {},
+    }
+    sink.handlers = handlers
+    sink.options = options
+    sink.calls = (sink.calls || 0) + 1
+    sink.command = command
+    sink.args = args
+    return child
+  }
+}
+
+check('安装记录只认整数 pid 和 grouped', parseRunRecord('{"pid":4242,"grouped":false}\n')?.pid === 4242 && parseRunRecord('{"pid":1,"grouped":true}') === null && parseRunRecord('{') === null)
+
+const recordRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-run-'))
+const recordProfile = profileDirectory(recordRoot, 'web')
+mkdirSync(join(recordProfile, '.plugin-manager'), { recursive: true })
+writeFileSync(runRecordPath(recordProfile), '{not-json')
+const badCleared = clearStaleRunRecord(recordProfile, {
+  alive() {
+    throw new Error('读不懂的记录不该探测进程')
+  },
+})
+check(
+  '读不懂的安装记录会删掉，而且不去探测进程',
+  badCleared.invalid === true && badCleared.removed === true && !existsSync(runRecordPath(recordProfile)),
+)
+writeRunRecord(recordProfile, 4242, true)
+let seenAtSpawn = null
+const deadAdded = await runPluginAdd({
+  packageSpec: '@fengye_nobug/dsh-qq-bot@9.9.9',
+  platform: 'linux',
+  profile: 'web',
+  profileDir: recordProfile,
+  timeoutMs: 1000,
+  alive: () => false,
+  kill() {},
+  spawnImpl: () => {
+    seenAtSpawn = existsSync(runRecordPath(recordProfile))
+    return laterClose(0)()
+  },
+})
+check('已经退出的安装记录会先删掉再启动安装', deadAdded.ok === true && seenAtSpawn === false)
+
+writeRunRecord(recordProfile, 4242, false)
+const busySink = {}
+let busyRestarted = false
+const busyUpdate = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  home: recordRoot,
+  profile: 'web',
+  timeoutMs: 80,
+  fetchImpl: npmReady(),
+  alive: () => true,
+  kill() {
+    throw new Error('还在跑的安装不该被发信号')
+  },
+  spawnImpl: hangSpawn(4242, busySink),
+  scheduleRestart: async () => {
+    busyRestarted = true
+    return { ok: true }
+  },
+})
+check(
+  '已有安装进程还在跑时不再开第二个，记录留着',
+  busyUpdate.ok === false &&
+    busyUpdate.restarting !== true &&
+    busyRestarted === false &&
+    busySink.calls == null &&
+    existsSync(runRecordPath(recordProfile)) &&
+    /已经有一个安装进程还在跑（进程 4242）/.test(busyUpdate.message) &&
+    /再点「更新」/.test(busyUpdate.message) &&
+    !busyUpdate.message.includes(recordRoot) &&
+    !/Error|at\s/.test(busyUpdate.message),
+  busyUpdate.message,
+)
+
+const treeSignals = []
+const tree = stopProcessTree(
+  { pid: 4242 },
+  {
+    platform: 'linux',
+    graceMs: 30,
+    kill(target, signal) {
+      treeSignals.push([target, signal])
+    },
+  },
+)
+await delay(80)
+tree.stop()
+check(
+  '超时先停进程组，宽限后再强制停',
+  treeSignals[0]?.[0] === -4242 &&
+    treeSignals[0]?.[1] === 'SIGTERM' &&
+    treeSignals[1]?.[0] === 4242 &&
+    treeSignals[1]?.[1] === 'SIGTERM' &&
+    treeSignals.some(([target, signal]) => target === -4242 && signal === 'SIGKILL') &&
+    treeSignals.some(([target, signal]) => target === 4242 && signal === 'SIGKILL'),
+  JSON.stringify(treeSignals),
+)
+const winSignals = []
+stopProcessTree(
+  { pid: 4242, kill(signal) { winSignals.push(['child', signal]) } },
+  {
+    platform: 'win32',
+    graceMs: 20,
+    taskkill(pid) {
+      winSignals.push(['taskkill', pid])
+    },
+  },
+)
+await delay(50)
+check(
+  'Windows 上强制停用 taskkill 结束整棵进程，不用负 pid',
+  winSignals.some(([kind, signal]) => kind === 'child' && signal === 'SIGTERM') &&
+    winSignals.some(([kind, pid]) => kind === 'taskkill' && pid === 4242) &&
+    !winSignals.some(([target]) => typeof target === 'number' && target < 0),
+  JSON.stringify(winSignals),
+)
+
+const hungRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-hang-'))
+const hungProfile = plantScoped(hungRoot, '9.9.9')
+const hungSignals = []
+const hungSink = {}
+let hungRestarted = false
+const hung = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  home: hungRoot,
+  profile: 'web',
+  timeoutMs: 40,
+  killGraceMs: 20,
+  fetchImpl: npmReady(),
+  alive: () => false,
+  kill(target, signal) {
+    hungSignals.push([target, signal])
+  },
+  spawnImpl: hangSpawn(4242, hungSink),
+  scheduleRestart: async () => {
+    hungRestarted = true
+    return { ok: true }
+  },
+})
+const hungPatch = readFileSync(join(hungProfile, 'cordis.patch.yml'), 'utf8')
+const hungPlugin = readFileSync(join(hungProfile, 'node_modules', '@fengye_nobug', 'dsh-qq-bot', 'cordis.patch.yml'), 'utf8')
+check(
+  '安装超时但目标版本已经在磁盘上时改包名，不自动重启',
+  hung.ok === false &&
+    hung.restarting !== true &&
+    hungRestarted === false &&
+    hungSink.options?.detached === true &&
+    hungSignals.some(([target, signal]) => target === -4242 && signal === 'SIGTERM') &&
+    hungSignals.some(([target, signal]) => target === 4242 && signal === 'SIGTERM') &&
+    hungSignals.some(([target, signal]) => target === -4242 && signal === 'SIGKILL') &&
+    /包名也改成了 @fengye_nobug\/dsh-qq-bot/.test(hung.message) &&
+    /请重启 dsh-web/.test(hung.message) &&
+    hungPatch.includes("name: '@fengye_nobug/dsh-qq-bot'") &&
+    hungPatch.includes('keep: 1') &&
+    hungPlugin.includes("targetSessionId: ''") &&
+    !hung.message.includes(hungRoot) &&
+    !/Error|at\s|ENOENT/.test(hung.message),
+  `${hung.message} ${JSON.stringify(hungSignals)}`,
+)
+
+const missRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-miss-'))
+const missProfile = plantScoped(missRoot, '0.2.3')
+const missed = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  home: missRoot,
+  profile: 'web',
+  timeoutMs: 40,
+  killGraceMs: 20,
+  fetchImpl: npmReady(),
+  alive: () => false,
+  kill() {},
+  spawnImpl: hangSpawn(4242),
+  scheduleRestart: async () => ({ ok: true }),
+})
+const missedPatch = readFileSync(join(missProfile, 'cordis.patch.yml'), 'utf8')
+check(
+  '超时且磁盘上还不是目标版本时不改包名，并说明没有装上',
+  missed.ok === false &&
+    missed.restarting !== true &&
+    /没有确认装上/.test(missed.message) &&
+    /清掉这次留下的安装记录/.test(missed.message) &&
+    missedPatch.includes('name: dsh-qq-bot') &&
+    !/包名也改成了/.test(missed.message) &&
+    !missed.message.includes(missRoot),
+  missed.message,
+)
+
+const leftRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-left-'))
+const leftProfile = plantScoped(leftRoot, '9.9.9')
+const leftBehind = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  home: leftRoot,
+  profile: 'web',
+  timeoutMs: 40,
+  killGraceMs: 20,
+  fetchImpl: npmReady(),
+  alive: () => true,
+  kill() {},
+  spawnImpl: (command, args, options) => {
+    writeRunRecord(leftProfile, 4242, false)
+    return hangSpawn(4242)(command, args, options)
+  },
+  scheduleRestart: async () => ({ ok: true }),
+})
+check(
+  '停不干净时留下安装记录，并请人先停掉 dsh 和 pnpm',
+  leftBehind.ok === false &&
+    /还没停干净/.test(leftBehind.message) &&
+    /请先停掉 dsh 和 pnpm/.test(leftBehind.message) &&
+    existsSync(runRecordPath(leftProfile)) &&
+    readFileSync(join(leftProfile, 'cordis.patch.yml'), 'utf8').includes('name: dsh-qq-bot') &&
+    !leftBehind.message.includes(leftRoot),
+  leftBehind.message,
+)
+
+const otherRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-other-'))
+const otherProfile = profileDirectory(otherRoot, 'web')
+mkdirSync(otherProfile, { recursive: true })
+const otherSignals = []
+const otherAdded = await runPluginAdd({
+  packageSpec: '@fengye_nobug/dsh-qq-bot@9.9.9',
+  platform: 'linux',
+  profile: 'web',
+  profileDir: otherProfile,
+  timeoutMs: 40,
+  killGraceMs: 20,
+  alive: () => false,
+  kill(target, signal) {
+    otherSignals.push([target, signal])
+  },
+  spawnImpl: (command, args, options) => {
+    writeRunRecord(otherProfile, 5252, false)
+    return hangSpawn(4242)(command, args, options)
+  },
+})
+await delay(30)
+check(
+  '超时后如果记录里是另一个进程，也会停掉，死记录会删掉',
+  otherAdded.ok === false &&
+    otherAdded.code === 'timeout' &&
+    otherAdded.leftover !== true &&
+    otherSignals.some(([target, signal]) => target === 5252 && signal === 'SIGTERM') &&
+    otherSignals.some(([target, signal]) => target === 5252 && signal === 'SIGKILL') &&
+    !otherSignals.some(([target]) => target === -5252) &&
+    !existsSync(runRecordPath(otherProfile)),
+  JSON.stringify(otherSignals),
+)
+
+const quickSink = {}
+let quickRestarted = false
+const quick = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  timeoutMs: 40,
+  killGraceMs: 200,
+  fetchImpl: npmReady(),
+  alive: () => false,
+  kill(target, signal) {
+    if (signal === 'SIGTERM') quickSink.handlers?.close?.(0)
+  },
+  spawnImpl: hangSpawn(4242, quickSink),
+  scheduleRestart: async () => {
+    quickRestarted = true
+    return { ok: true, mode: 'reexec' }
+  },
+})
+check(
+  '宽限期内安装进程以 0 退出仍算装上，并安排重启',
+  quick.ok === true && quick.restarting === true && quickRestarted === true && /已经装上 v9.9.9/.test(quick.message),
+  quick.message,
+)
+
+rmSync(recordRoot, { recursive: true, force: true })
+rmSync(hungRoot, { recursive: true, force: true })
+rmSync(missRoot, { recursive: true, force: true })
+rmSync(leftRoot, { recursive: true, force: true })
+rmSync(otherRoot, { recursive: true, force: true })
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)

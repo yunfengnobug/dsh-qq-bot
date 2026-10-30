@@ -1,10 +1,13 @@
 # dsh-qq-bot bundle patch: one insert row carrying the whole plugin config.
-# Cordis 插件 id 仍是 qq-bridge（与上游兼容）。显示名是 dsh-qq-bot。
+# Cordis 插件 id 仍是 qq-bridge（与上游兼容）。界面显示名仍是 dsh-qq-bot。
+# name 是 Node 用来加载插件的包名，必须等于实际安装的 npm 包。
+# 无作用域的 dsh-qq-bot 发不出去；写成那个名字时 Cordis 解析不到模块，
+# qq-bridge 不会挂上，/api/qq-bridge/settings 就是 HTTP 404。
 # 用户在 profile 的 cordis.patch.yml 里按 id 覆盖这一行；patch 会替换整份 config，
-# 所以要保留的键请全部重述。
+# 所以要保留的键请全部重述。覆盖里如果写了 name，也要写成同一个包名。
 - insert:
     - id: qq-bridge
-      name: dsh-qq-bot
+      name: '@fengye_nobug/dsh-qq-bot'
       config:
         # 固定目标会话：QQ 的一切都注入这一个会话（保留其上下文）。
         # 留空表示不驱动任何会话。

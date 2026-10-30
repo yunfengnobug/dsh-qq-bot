@@ -3971,6 +3971,8 @@ export function apply(ctx, config) {
         version: typeof payload.version === 'string' ? payload.version : '',
         force: payload.force === true,
         proxy: proxyFor(readSettings()),
+        home: process.env.DSH_HOME || join(homedir(), '.dsh'),
+        profile: 'web',
       })
     } catch {
       return sendJson(res, 200, { ok: false, stage: 'install', error: '更新没有完成。稍后再试。' })

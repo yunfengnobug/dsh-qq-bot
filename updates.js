@@ -7,11 +7,15 @@
 // 插件不写死第三方镜像。包还没发到 npm，或 registry 里没有这个版本时，才改从 GitHub 下载：
 // 先要 github.com 上的官方源码包，连不上再试同一标签的 codeload。只跟随仍指向同一标签的
 // github.com、api.github.com 或 codeload.github.com。不用 git 协议。
+// 安装成功后，若 profile、home 或插件自己的 cordis.patch.yml 里 qq-bridge 的 name
+// 仍是旧的无作用域名，会改成磁盘上 package.json 里的包名。不改 config，不改设置，不改 NapCat。
+// 安装超过三分钟还没结束时，停掉这次拉起的进程组，并清掉已经退出的安装记录。
+// 超时后若磁盘上已是目标版本，仍改包名，但不自动重启。
 
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { gunzipSync, gzipSync } from 'node:zlib'
 
 export const UPDATE_REPO = 'yunfengnobug/dsh-qq-bot'
@@ -27,6 +31,8 @@ const MAX_TARBALL_BYTES = 20 * 1024 * 1024
 const MAX_UNPACKED_BYTES = 40 * 1024 * 1024
 const MAX_TAR_ENTRIES = 4000
 const INSTALL_TIMEOUT_MS = 180000
+/** 先劝退，再强制停。给子进程一点时间自己退出。 */
+const KILL_GRACE_MS = 1500
 const DOWNLOAD_TIMEOUT_MS = 60000
 /** 先把 HTTP 响应发出去，再重启，避免面板还没回答就被掐掉。 */
 const RESTART_DELAY_MS = 2500
@@ -613,14 +619,29 @@ function downloadError(code) {
   return '连不上 GitHub，这次没有把新版本下下来。稍后再试。'
 }
 
-function installError(code, command) {
+function installError(code, command, extra = {}) {
   const hint = command ? `也可以自己执行：${command}` : '也可以按卡片上的安装命令自己装。'
   if (code === 'ENOENT') return `没找到 dsh 命令，没有安装。${hint}`
-  if (code === 'timeout') return `安装超时，没有确认装上。${hint}`
+  if (code === 'busy') {
+    const pid = Number(extra.pid)
+    const which = Number.isSafeInteger(pid) && pid > 1 ? `（进程 ${pid}）` : ''
+    return `已经有一个安装进程还在跑${which}，这次没有再启动。等它结束再点「更新」。如果确认它已经卡死，先停掉那个进程，再点一次。`
+  }
+  if (code === 'timeout' && extra.packageName) {
+    return `安装超时，已经停掉卡住的进程。新版本的文件已经在磁盘上，qq-bridge 的包名也改成了 ${extra.packageName}。请重启 dsh-web，设置页才会出来。`
+  }
+  if (code === 'timeout' && extra.leftover) {
+    return `安装超时，卡住的安装进程还没停干净。请先停掉 dsh 和 pnpm，再点一次「更新」。${hint}`
+  }
+  if (code === 'timeout') {
+    return `安装超时，已经停掉卡住的安装进程，并清掉这次留下的安装记录。没有确认装上。可以再点一次「更新」。${hint}`
+  }
   if (code === 'wrong-name') return '下到的安装包不是这个插件，没有安装。'
   if (code === 'wrong-version') return '下到的版本和发布标签对不上，没有安装。'
   if (code === 'bad-package') return '下到的安装包读不懂，没有安装。'
-  return `安装没有成功。${hint}`
+  const base = `安装没有成功。${hint}`
+  if (extra.packageName) return `${base}Cordis 里 qq-bridge 的包名已经改成实际安装的 ${extra.packageName}。请重启 dsh-web，设置页才会出来。`
+  return base
 }
 
 function restartError() {
@@ -1167,16 +1188,147 @@ export function dshPluginAddSpec(spec) {
   return { command: 'dsh', args: pluginArgs, shell: false }
 }
 
+function defaultAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
+function defaultKill(target, signal, child) {
+  if (typeof target === 'number' && target < 0) {
+    process.kill(target, signal)
+    return
+  }
+  if (child && typeof child.kill === 'function') {
+    child.kill(signal)
+    return
+  }
+  process.kill(target, signal)
+}
+
+function defaultTaskkill(pid) {
+  const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+  killer.on?.('error', () => {})
+  killer.unref?.()
+}
+
+/**
+ * 停掉安装进程，以及它在 POSIX 上拉起来的进程组。
+ * 测试要传入 kill，避免对一个碰巧存在的 pid 发信号。
+ * @param {{ pid?: number, kill?: (signal: string) => void }} child
+ * @param {{ platform?: string, graceMs?: number, kill?: (target: number, signal: string) => void, taskkill?: (pid: number) => void, group?: boolean }} [options]
+ */
+export function stopProcessTree(child, options = {}) {
+  const pid = Number(child?.pid)
+  const known = Number.isSafeInteger(pid) && pid > 1
+  const platform = options.platform || process.platform
+  const graceMs = options.graceMs ?? KILL_GRACE_MS
+  const group = options.group !== false && platform !== 'win32'
+  const kill = options.kill || ((target, signal) => defaultKill(target, signal, child))
+  const targets = []
+  if (known && group) targets.push(-pid)
+  if (known) targets.push(pid)
+  const send = (signal) => {
+    if (platform === 'win32' && signal === 'SIGKILL') {
+      if (!known) return
+      const taskkill = options.taskkill || defaultTaskkill
+      try { taskkill(pid) } catch { /* 停不掉时由调用方再看进程还在不在 */ }
+      return
+    }
+    for (const target of targets) {
+      try { kill(target, signal) } catch { /* 进程已经退出 */ }
+    }
+  }
+  send('SIGTERM')
+  const timer = setTimeout(() => send('SIGKILL'), graceMs)
+  if (typeof timer.unref === 'function') timer.unref()
+  return {
+    pid: known ? pid : 0,
+    stop() { clearTimeout(timer) },
+  }
+}
+
+/** DSH 把正在跑的 pnpm 记在 profile 的这个文件里。 */
+export function runRecordPath(profileDir) {
+  return join(profileDir, '.plugin-manager', 'run.json')
+}
+
+/** 只认 `{ pid, grouped }`。pid 必须是大于 1 的整数，避免把 1 号进程当成安装进程。 */
+export function parseRunRecord(text) {
+  let value
+  try {
+    value = JSON.parse(String(text ?? ''))
+  } catch {
+    return null
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const pid = value.pid
+  if (!Number.isSafeInteger(pid) || pid <= 1 || typeof value.grouped !== 'boolean') return null
+  return { pid, grouped: value.grouped }
+}
+
+/**
+ * 安装记录里的进程已经不在，或记录本身读不懂时，把文件删掉。
+ * 进程还活着就不删，免得下一次安装和还在写目录的 pnpm 抢在一起。
+ * 测试要传入 alive。默认探测会向真实 pid 发 0 信号。
+ * @param {string} profileDir
+ * @param {{ alive?: (pid: number) => boolean }} [options]
+ */
+export function clearStaleRunRecord(profileDir, options = {}) {
+  const path = runRecordPath(profileDir)
+  let text
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { removed: false, alive: false, missing: true }
+    throw error
+  }
+  const record = parseRunRecord(text)
+  if (!record) {
+    try {
+      rmSync(path, { force: true })
+    } catch {
+      return { removed: false, invalid: true, alive: false }
+    }
+    return { removed: true, invalid: true, alive: false }
+  }
+  const probe = options.alive || defaultAlive
+  let living = false
+  try {
+    living = probe(record.pid) === true
+  } catch {
+    // 看不出来就当成还在跑，避免删掉记录后再开一个安装。
+    living = true
+  }
+  if (living) return { removed: false, alive: true, pid: record.pid, grouped: record.grouped }
+  try {
+    rmSync(path, { force: true })
+  } catch {
+    return { removed: false, alive: false, pid: record.pid }
+  }
+  return { removed: true, alive: false, pid: record.pid }
+}
+
 function runChild(spawnImpl, command, args, options = {}) {
   return new Promise((resolve) => {
     let settled = false
     let timer
+    let graceTimer
+    let stopper = null
+    let timedOut = false
     const finish = (value) => {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
+      if (graceTimer) clearTimeout(graceTimer)
+      stopper?.stop()
       resolve(value)
     }
+    const platform = options.platform || process.platform
+    const detached = options.detached === true && platform !== 'win32'
     let child
     try {
       child = spawnImpl(command, args, {
@@ -1185,6 +1337,7 @@ function runChild(spawnImpl, command, args, options = {}) {
         windowsHide: true,
         shell: false,
         stdio: options.stdio || ['ignore', 'pipe', 'pipe'],
+        detached,
       })
     } catch (error) {
       finish({ ok: false, code: error?.code === 'ENOENT' ? 'ENOENT' : 'error' })
@@ -1204,27 +1357,118 @@ function runChild(spawnImpl, command, args, options = {}) {
       if (stderr.length >= 4000) return
       stderr += chunk.toString().slice(0, 4000 - stderr.length)
     })
-    child.on('error', (error) => finish({ ok: false, code: error?.code === 'ENOENT' ? 'ENOENT' : 'error', stdout, stderr }))
+    child.on('error', (error) => {
+      if (timedOut) return
+      finish({ ok: false, code: error?.code === 'ENOENT' ? 'ENOENT' : 'error', stdout, stderr })
+    })
+    const graceMs = options.killGraceMs ?? KILL_GRACE_MS
     timer = setTimeout(() => {
-      try { child.kill('SIGTERM') } catch { /* 超时就停 */ }
-      finish({ ok: false, code: 'timeout' })
+      timedOut = true
+      stopper = stopProcessTree(child, {
+        platform,
+        graceMs,
+        kill: options.kill,
+        taskkill: options.taskkill,
+        group: detached,
+      })
+      if (settled) {
+        stopper.stop()
+        return
+      }
+      graceTimer = setTimeout(() => {
+        const pid = Number(child.pid)
+        const known = Number.isSafeInteger(pid) && pid > 1
+        let leftover = false
+        if (known) {
+          const probe = options.alive || defaultAlive
+          try { leftover = probe(pid) === true } catch { leftover = true }
+        }
+        finish({ ok: false, code: 'timeout', leftover, pid: known ? pid : 0, stdout, stderr })
+      }, graceMs + 50)
     }, options.timeoutMs ?? INSTALL_TIMEOUT_MS)
-    child.on('close', (code) => finish({ ok: code === 0, code: code === 0 ? 0 : 'exit', stdout, stderr }))
+    child.on('close', (code) => {
+      if (timedOut && code === 0) {
+        finish({ ok: true, code: 0, stdout, stderr })
+        return
+      }
+      if (timedOut) {
+        finish({ ok: false, code: 'timeout', leftover: false, stdout, stderr, pid: Number.isSafeInteger(Number(child.pid)) ? Number(child.pid) : 0 })
+        return
+      }
+      finish({ ok: code === 0, code: code === 0 ? 0 : 'exit', stdout, stderr })
+    })
   })
 }
 
-async function defaultRunCommand(spec) {
+/**
+ * 执行 `dsh plugin add`。开始前清掉已经退出的安装记录；记录里的进程还在就不再开一次。
+ * 超时后停掉进程组。记录里如果是另一个还活着的 pid，也停掉，但活着的记录文件留着。
+ * @param {{ packageSpec?: string, tarballPath?: string, platform?: string, profile?: string, profileDir?: string, cwd?: string, env?: NodeJS.ProcessEnv, spawnImpl?: typeof spawn, timeoutMs?: number, killGraceMs?: number, kill?: (target: number, signal: string) => void, alive?: (pid: number) => boolean, taskkill?: (pid: number) => void }} spec
+ */
+export async function runPluginAdd(spec) {
+  const profileDir = typeof spec.profileDir === 'string' ? spec.profileDir : ''
+  const platform = spec.platform || process.platform
+  if (profileDir !== '') {
+    let stale = null
+    try {
+      stale = clearStaleRunRecord(profileDir, { alive: spec.alive })
+    } catch {
+      stale = null
+    }
+    if (stale?.alive) return { ok: false, code: 'busy', pid: stale.pid }
+  }
   const planned = dshPluginAddSpec(spec)
   const ran = await runChild(spec.spawnImpl || spawn, planned.command, planned.args, {
     cwd: spec.cwd || process.cwd(),
     env: spec.env || process.env,
     timeoutMs: spec.timeoutMs ?? INSTALL_TIMEOUT_MS,
     capture: true,
+    detached: platform !== 'win32',
+    platform,
+    kill: spec.kill,
+    alive: spec.alive,
+    taskkill: spec.taskkill,
+    killGraceMs: spec.killGraceMs,
   })
   if (ran.ok) return { ok: true, code: 0 }
+  if (ran.code === 'timeout') {
+    let leftover = ran.leftover === true
+    let pid = ran.pid
+    if (profileDir !== '') {
+      try {
+        const record = parseRunRecord(readFileSync(runRecordPath(profileDir), 'utf8'))
+        if (record && record.pid !== ran.pid) {
+          // 记录里的 grouped 为真时，这个 pid 才是进程组负责人。CLI 安装记的是 false，只停这个进程。
+          stopProcessTree({ pid: record.pid }, {
+            platform,
+            graceMs: 0,
+            kill: spec.kill,
+            taskkill: spec.taskkill,
+            group: record.grouped === true,
+          })
+        }
+      } catch {
+        // 没有留下记录，或记录读不懂。下面再按进程是否还在决定删不删。
+      }
+      try {
+        const again = clearStaleRunRecord(profileDir, { alive: spec.alive })
+        if (again.alive) {
+          leftover = true
+          pid = again.pid
+        }
+      } catch {
+        // 清不掉就按超时说明，不把路径写进给用户的句子。
+      }
+    }
+    return { ok: false, code: 'timeout', leftover, pid }
+  }
+  if (ran.code === 'ENOENT') return { ok: false, code: 'ENOENT' }
   if (spec.packageSpec && isRegistryMiss(ran.stderr)) return { ok: false, code: 'unpublished' }
-  if (ran.code === 'ENOENT' || ran.code === 'timeout') return { ok: false, code: ran.code }
   return { ok: false, code: 'error' }
+}
+
+function defaultRunCommand(spec) {
+  return runPluginAdd(spec)
 }
 
 function readOwnCgroup() {
@@ -1363,16 +1607,239 @@ export async function schedulePanelRestart(input = {}) {
   return { ok: true, mode: 'reexec' }
 }
 
-function successMessage(tag, channel) {
+const CORDIS_ID = 'qq-bridge'
+
+function isWritablePackageName(name) {
+  return name === PACKAGE_NAME || name === LEGACY_UNSCOPED_NAME || name === 'dsh-qq-bridge'
+}
+
+/** profile 目录。profile 名只接受 dsh 自己的那一档，避免把 `..` 拼进路径。 */
+export function profileDirectory(home, profile = 'web') {
+  const root = String(home ?? '')
+  if (root === '' || root.includes('\0')) return ''
+  const name = String(profile || 'web')
+  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) return ''
+  return join(root, 'profiles', name)
+}
+
+function profileDirOf(input) {
+  if (input && typeof input.profileDir === 'string' && input.profileDir !== '') return input.profileDir
+  if (input && typeof input.home === 'string' && input.home !== '') return profileDirectory(input.home, input.profile || 'web')
+  return ''
+}
+
+function bundlePatchPath(dir, manifest) {
+  const raw = manifest?.dsh?.bundle?.patch
+  const rel = typeof raw === 'string' && raw !== '' ? raw : 'cordis.patch.yml'
+  if (isAbsolute(rel) || rel.split(/[\\/]/).includes('..')) return ''
+  return join(dir, rel)
+}
+
+function readInstalledManifest(dir) {
+  let manifest
+  try {
+    manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+  } catch {
+    return null
+  }
+  if (!manifest || typeof manifest !== 'object' || !isWritablePackageName(manifest.name)) return null
+  return {
+    dir,
+    name: manifest.name,
+    version: String(manifest.version ?? ''),
+    patchFile: bundlePatchPath(dir, manifest),
+  }
+}
+
+/**
+ * 只改 `qq-bridge` 这一行的 `name`。config 和别的插件保持原样，包括注释和空行。
+ * 只认我们自己的三个包名；别人写的路径或别的包不动。
+ * @param {string} text
+ * @param {string} packageName
+ * @param {string} [pluginId]
+ */
+export function rewriteCordisPackageName(text, packageName, pluginId = CORDIS_ID) {
+  const source = String(text ?? '')
+  if (!isWritablePackageName(packageName) || !/^[A-Za-z0-9_-]+$/.test(pluginId)) return { text: source, changed: false }
+  const newline = source.includes('\r\n') ? '\r\n' : '\n'
+  const endsWithNewline = /\n$/.test(source)
+  const lines = source.split(/\r?\n/)
+  if (endsWithNewline && lines[lines.length - 1] === '') lines.pop()
+  let changed = false
+  for (let i = 0; i < lines.length; i++) {
+    const idMatch = lines[i].match(/^(\s*)(?:-\s+)?id:\s*(['"]?)([A-Za-z0-9_-]+)\2\s*(#.*)?$/)
+    if (!idMatch || idMatch[3] !== pluginId) continue
+    const entryIndent = idMatch[1].length
+    let keyIndent = -1
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j]
+      if (line.includes('\t')) break
+      if (line.trim() === '' || /^\s*#/.test(line)) continue
+      const indent = line.match(/^ */)?.[0].length ?? 0
+      if (indent <= entryIndent) break
+      if (keyIndent < 0) keyIndent = indent
+      if (indent !== keyIndent) continue
+      if (!/^\s*name:/.test(line)) continue
+      const nameMatch = line.match(/^(\s*)name:\s*(['"]?)([^'"\s#]+)\2\s*(#.*)?$/)
+      if (!nameMatch) break
+      const current = nameMatch[3]
+      if (isWritablePackageName(current) && current !== packageName) {
+        const comment = nameMatch[4] ? ` ${nameMatch[4]}` : ''
+        lines[j] = `${nameMatch[1]}name: '${packageName}'${comment}`
+        changed = true
+      }
+      break
+    }
+  }
+  if (!changed) return { text: source, changed: false }
+  let next = lines.join(newline)
+  if (endsWithNewline) next += newline
+  return { text: next, changed: true }
+}
+
+function writeTextAtomic(file, text) {
+  const tmp = `${file}.tmp-${process.pid}`
+  writeFileSync(tmp, text)
+  try {
+    chmodSync(tmp, statSync(file).mode)
+  } catch {
+    // 读不到原权限就按这次写入的默认权限留下。
+  }
+  try {
+    renameSync(tmp, file)
+  } catch (error) {
+    try { rmSync(tmp, { force: true }) } catch { /* 临时文件清不掉时，仍把写入失败抛回去 */ }
+    throw error
+  }
+}
+
+/**
+ * 把 profile、home（有这份文件才改）和已安装插件自己的补丁里，
+ * `qq-bridge` 的 `name` 改成磁盘上 package.json 的包名。
+ * 传入 expectedVersion 时，只有版本对得上才改，避免把半截安装写成错误的包名。
+ * @param {{ profileDir?: string, home?: string, expectedVersion?: string }} input
+ */
+export function alignCordisNames(input = {}) {
+  const profileDir = String(input.profileDir ?? '')
+  if (profileDir === '') return { ok: false, reason: 'no-profile', changed: [], name: '' }
+  const scoped = readInstalledManifest(join(profileDir, 'node_modules', '@fengye_nobug', 'dsh-qq-bot'))
+  const legacy = readInstalledManifest(join(profileDir, 'node_modules', 'dsh-qq-bot'))
+  const candidates = [scoped, legacy].filter(Boolean)
+  let installed = null
+  if (input.expectedVersion) {
+    installed = candidates.find((item) => compareSemver(item.version, input.expectedVersion) === 0) || null
+    if (!installed) return { ok: false, reason: 'version', changed: [], name: '' }
+  } else {
+    installed = scoped || legacy
+  }
+  if (!installed) return { ok: false, reason: 'missing', changed: [], name: '' }
+  const files = []
+  if (installed.patchFile) files.push(installed.patchFile)
+  files.push(join(profileDir, 'cordis.patch.yml'))
+  if (typeof input.home === 'string' && input.home !== '') files.push(join(input.home, 'cordis.patch.yml'))
+  const changed = []
+  let failed = false
+  for (const file of files) {
+    let text
+    try {
+      text = readFileSync(file, 'utf8')
+    } catch {
+      continue
+    }
+    const next = rewriteCordisPackageName(text, installed.name)
+    if (!next.changed) continue
+    try {
+      writeTextAtomic(file, next.text)
+      changed.push(file)
+    } catch {
+      failed = true
+    }
+  }
+  return {
+    ok: !failed,
+    failed,
+    reason: failed ? 'write' : 'ok',
+    changed,
+    name: installed.name,
+    version: installed.version,
+  }
+}
+
+function alignNote(input, expectedVersion) {
+  const profileDir = profileDirOf(input)
+  if (profileDir === '') return ''
+  try {
+    const result = alignCordisNames({
+      profileDir,
+      home: typeof input?.home === 'string' ? input.home : '',
+      expectedVersion,
+    })
+    if (result.failed) return '没能改 Cordis 的包名。若重启后设置页打不开，把 qq-bridge 的 name 改成实际安装的包名再重启。'
+    if (result.changed.length > 0) return `Cordis 里 qq-bridge 的包名已经改成实际安装的 ${result.name}。`
+    return ''
+  } catch {
+    return '没能改 Cordis 的包名。若重启后设置页打不开，把 qq-bridge 的 name 改成实际安装的包名再重启。'
+  }
+}
+
+function successMessage(tag, channel, note = '') {
   const via = channel === 'npm'
     ? '这次是从 npm 装的。'
     : '这一版在 npm 上还没有，所以从 GitHub 装上。'
-  return `已经装上 ${tag}，面板即将重启。请刷新页面；登录口令可能会变，用新的面板地址再打开。${via}现有设置还在，没有改动 NapCat。`
+  const base = `已经装上 ${tag}，面板即将重启。请刷新页面；登录口令可能会变，用新的面板地址再打开。${via}现有设置还在，没有改动 NapCat。`
+  return note ? `${base}${note}` : base
 }
 
 function shownInstall(channel, version, repo) {
   if (channel === 'npm') return { install: npmInstallSpec(version), command: npmInstallCommand(version) }
   return { install: installSpec(version, repo), command: installCommand(version, repo) }
+}
+
+function installRunSpec(input, extra) {
+  return {
+    ...extra,
+    platform: input.platform,
+    profile: input.profile || 'web',
+    profileDir: profileDirOf(input),
+    spawnImpl: input.spawnImpl,
+    timeoutMs: input.timeoutMs,
+    killGraceMs: input.killGraceMs,
+    kill: input.kill,
+    alive: input.alive,
+    taskkill: input.taskkill,
+  }
+}
+
+/** 安装失败时，只有目标版本已经在磁盘上、并且进程已经停干净，才改包名。不在这里重启。 */
+function failInstall(input, decision, ran, command, install) {
+  const code = ran?.code
+  const leftover = ran?.leftover === true
+  let packageName = ''
+  const profileDir = profileDirOf(input)
+  if (!leftover && (code === 'timeout' || code === 'exit' || code === 'error') && profileDir !== '') {
+    try {
+      const aligned = alignCordisNames({
+        profileDir,
+        home: typeof input.home === 'string' ? input.home : '',
+        expectedVersion: decision.version,
+      })
+      if (aligned.changed.length > 0) packageName = aligned.name
+    } catch {
+      // 对不齐就只说明安装失败。
+    }
+  }
+  const message = installError(code, command, { packageName, leftover, pid: ran?.pid })
+  return {
+    ok: false,
+    stage: 'install',
+    current: decision.current,
+    error: message,
+    message,
+    tag: decision.tag,
+    version: decision.version,
+    command,
+    install: install || decision.install,
+  }
 }
 
 /**
@@ -1405,36 +1872,26 @@ export async function applyPluginUpdate(input = {}) {
       updateAvailable: false,
     }
   }
+  const profileDir = profileDirOf(input)
+  if (profileDir !== '') {
+    try {
+      const stale = clearStaleRunRecord(profileDir, { alive: input.alive })
+      if (stale.alive) return failInstall(input, decision, { ok: false, code: 'busy', pid: stale.pid }, decision.command, decision.install)
+    } catch {
+      // 记录读不出来就继续，安装命令自己会再看一遍。
+    }
+  }
   let channel = decision.channel
   if (channel === 'npm') {
     let ran
     try {
       const run = input.runCommand || defaultRunCommand
-      ran = await run({
-        packageSpec: decision.install,
-        platform: input.platform,
-        profile: 'web',
-        spawnImpl: input.spawnImpl,
-        timeoutMs: input.timeoutMs,
-      })
+      ran = await run(installRunSpec(input, { packageSpec: decision.install }))
     } catch {
       ran = { ok: false, code: 'error' }
     }
     if (ran?.ok === true) return finishApply(input, decision, 'npm')
-    if (ran?.code !== 'unpublished') {
-      const message = installError(ran?.code, decision.command)
-      return {
-        ok: false,
-        stage: 'install',
-        current: decision.current,
-        error: message,
-        message,
-        tag: decision.tag,
-        version: decision.version,
-        command: decision.command,
-        install: decision.install,
-      }
-    }
+    if (ran?.code !== 'unpublished') return failInstall(input, decision, ran, decision.command, decision.install)
     channel = 'github'
   }
   const shown = shownInstall(channel, decision.version, repo)
@@ -1469,26 +1926,20 @@ export async function applyPluginUpdate(input = {}) {
   try {
     writeFileSync(tarballPath, packed)
     const run = input.runCommand || defaultRunCommand
-    ran = await run({
-      tarballPath,
-      platform: input.platform,
-      profile: 'web',
-      spawnImpl: input.spawnImpl,
-      timeoutMs: input.timeoutMs,
-    })
+    ran = await run(installRunSpec(input, { tarballPath }))
   } catch {
     ran = { ok: false, code: 'error' }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
   if (!ran || ran.ok !== true) {
-    const message = installError(ran?.code, shown.command)
-    return { ok: false, stage: 'install', current: decision.current, error: message, message, tag: decision.tag, version: decision.version, command: shown.command, install: shown.install }
+    return failInstall(input, { ...decision, install: shown.install, command: shown.command }, ran, shown.command, shown.install)
   }
   return finishApply(input, { ...decision, install: shown.install, command: shown.command }, 'github')
 }
 
 async function finishApply(input, decision, channel) {
+  const note = alignNote(input)
   let restart
   try {
     const schedule = input.scheduleRestart || schedulePanelRestart
@@ -1497,7 +1948,7 @@ async function finishApply(input, decision, channel) {
     restart = { ok: false, error: restartError() }
   }
   if (!restart || restart.ok !== true) {
-    const message = restart?.error || restartError()
+    const message = `${restart?.error || restartError()}${note}`
     return {
       ok: false,
       stage: 'restart',
@@ -1512,7 +1963,7 @@ async function finishApply(input, decision, channel) {
       message,
     }
   }
-  const message = successMessage(decision.tag, channel)
+  const message = successMessage(decision.tag, channel, note)
   return {
     ok: true,
     applied: true,

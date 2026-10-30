@@ -405,7 +405,7 @@ node -e "import('@fengye_nobug/dsh-qq-bot').then(m=>console.log(m.name, JSON.str
 
 # 4) 安装 + 组合检查
 dsh plugin --profile web add "<REPO>"          # ⚠️ 用 dsh.cmd，别用 dsh（见 §7 坑 8）
-dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 id qq-bridge、name dsh-qq-bot
+dsh --profile web --dump-config | Select-String "qq-bridge"     # 应看到 id qq-bridge、name @fengye_nobug/dsh-qq-bot
 # 5) 重启 dsh web 后，在会话里调用调试工具：
 #    qq_bridge_status                    → 设置 / 目标会话 / OneBot 连接状态
 #    qq_bridge_transport                 → 连接状态 + token 是否解析到
