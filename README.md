@@ -1,8 +1,12 @@
 # dsh-qq-bot
 
-**DSH 插件**（不是独立服务）。把 DSH 会话接到 QQ（OneBot / NapCat 个人号）。需要已安装的 `@deepseek-ai/dsh`，以及一个 OneBot 实现（常用 NapCat）。
+> **一句话简介。** 下面这句与 `package.json` 的 `description` 相同。GitHub 仓库 About 不能随 git 更新，需要在网站上手动粘贴同一句：
+>
+> 把 DSH 会话接到 QQ（OneBot/NapCat）的插件。白名单默认全关；被 @、叫到昵称或被戳一定叫醒，其余消息按可调概率抽样。Fork 自 sj244/dsh-qq-bridge（MIT）。
 
-这是 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge) 的 fork，上游许可证为 MIT，版权归 sj244。安装和更新都走 `dsh plugin`，不要在服务器上打补丁脚本。
+这是装在 `@deepseek-ai/dsh` 里的插件，把已经在用的 DSH 会话接到 QQ 个人号。协议是 OneBot，常用实现是 NapCat。
+
+本仓库 fork 自 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge)。上游许可证为 MIT，版权归 sj244；本 fork 的版权声明见 [`LICENSE`](./LICENSE)。安装和更新都走 `dsh plugin`，不要在服务器上打补丁脚本。
 
 **Cordis 插件 id 仍是 `qq-bridge`**（`cordis.patch.yml` 里的 `id`）。包名和界面显示名是 **dsh-qq-bot**。已有 profile 里按 `id: qq-bridge` 写的覆盖继续生效。设置命名空间、状态文件和 `/api/qq-bridge/...` 也沿用这个 id，避免升级时对不上。
 
@@ -15,8 +19,6 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
 ```sh
 dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
 ```
-
-**English** · A DSH plugin that connects DSH sessions to QQ (OneBot / NapCat). Fail-closed whitelist; @-mentions, nicknames and pokes always wake the model; everything else is only recorded until a configurable probability hits. Fork of sj244/dsh-qq-bridge (MIT).
 
 > 上游由 DSH 写成。本 fork 的改动见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
@@ -82,7 +84,7 @@ dsh plugin --profile web add "<REPO>"   # <REPO> = 本仓库在你机器上的�
 ## 唤醒策略
 
 ```
-QQ 消息 ─┬─ 不在白名单 ─────────────────→ 丢弃（fail-closed）
+QQ 消息 ─┬─ 不在白名单 ─────────────────→ 丢弃（白名单为空则全部拒绝）
          ├─ 在会话跟随窗口内 ───────────→ 唤醒（reason: listening）
          ├─ 群里 + atOnlyInGroup + 没 @ ─→ 丢弃
          ├─ 被 @ / 命中昵称 / 被戳我 ───→ 唤醒
@@ -90,7 +92,7 @@ QQ 消息 ─┬─ 不在白名单 ──────────────�
          └─ 其余 ──────────────────────→ 只记录（零模型调用）
 ```
 
-- **白名单 fail-closed**：`whitelist`（私聊）、`groupWhitelist`（群）为空数组时，任何来源都不能唤醒会话。
+- **白名单默认全关**：`whitelist`（私聊）、`groupWhitelist`（群）为空数组时，任何来源都不能唤醒会话。
 - **必须唤醒**：被 @、正文命中 `nicknames`、被戳一戳（`[戳一戳]（戳的是我）`）。
 - **概率唤醒**：`wakeProbability`，默认 `0.05`。
 - **只记录**：未唤醒的消息进入“最近聊天缓冲”，不调用模型。缓冲最多保留 200 条。
@@ -331,7 +333,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 > **DSH 0.2.0 上**：宿主不再给第三方插件可写的设置命名空间（DSH #677 的迁移未完成，生态里所有走这条路的
 > 插件都一样）。本插件因此**自己挂了一条设置接口**：`GET/POST /api/qq-bridge/settings`。
-> 值存 `$DSH_HOME/qq-bridge-settings.json`，优先级为 **设置文件 > composition config**。
+> 值存 `$DSH_HOME/qq-bridge-settings.json`，优先级为 **设置文件 > `cordis.patch.yml` 里的安装配置**（composition config）。
 > 卡片照常可以使用；`cordis.patch.yml` 也仍然可以修改（改完重启生效，且会被上面的设置文件覆盖）。
 > 本机回环请求可以直接改（命令行、SSH 隧道、本机打开的面板）。经反向代理进来时，认 DSH 面板已经通过的登录会话，**不必再配 `trustedHosts`**。卡片上的读取和保存会带上面板登录 cookie（`credentials: 'include'`）。没有会话的外网请求仍然 403。打到本机 `127.0.0.1`、但来源是别的网站的请求也仍然拒绝。接口只写 schema 白名单里的键。
 
@@ -385,10 +387,10 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `onebotPort` | `3001` | OneBot 端口。自己另外部署的 NapCat 要和这边一致 |
 | `qqNumber` | `''` | 快速登录用的 QQ 号（需先手动登录过一次） |
 
-这些值优先从设置界面 / `settings.yaml` 取，未设置时回落到 `cordis.patch.yml` 里的 composition base。
+这些值优先从设置界面 / `settings.yaml` 取，未设置时回落到 `cordis.patch.yml` 里的安装配置（composition base）。
 
 > 字段旁带 “·已覆盖” 时，该键在设置文件里有本机覆盖。点该字段旁的 “撤销覆盖” 可清掉这一项。
-> 该键随即回落到 composition config 的值，“·已覆盖” 标记消失。
+> 该键随即回落到 `cordis.patch.yml` 里的安装配置，“·已覆盖” 标记消失。
 
 **看不到卡片**（或修改 `client/` 之后看不到变化）时，按顺序确认 4 件事：
 
