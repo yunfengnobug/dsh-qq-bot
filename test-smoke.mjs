@@ -2813,6 +2813,7 @@ function sawSentText(s) {
   // M4：`boom: true` 的 provider 列举时抛错 —— 用来盯“失败被静默吞掉”。
   let providersV = [{ id: 'prov-a' }]
   const streamedV = []
+  const visionSources = []
   const llmV = {
     listProviders: () => providersV,
     listModels: async (providerId) => {
@@ -2824,6 +2825,7 @@ function sawSentText(s) {
     },
     stream: async function* (opts) {
       streamedV.push(`${opts.provider}/${opts.model}`)
+      visionSources.push(opts.messages?.[0]?.source ?? null)
       yield { type: 'text-delta', text: '图里写着“测试”' }
       yield { type: 'finish', reason: { kind: 'stop' } }
     },
@@ -2963,6 +2965,11 @@ function sawSentText(s) {
       '视觉模型：描述路径用的是新模型（多模态调用的 provider/model 可观测）',
       streamedV[streamedV.length - 1] === 'prov-b/smoke-vision-b',
       JSON.stringify(streamedV),
+    )
+    check(
+      '视觉模型：0.2.0 的描述请求用 producer-owned source',
+      visionSources.at(-1)?.kind === 'plugin:dsh-qq-bot',
+      JSON.stringify(visionSources.at(-1)),
     )
     const textV = String(injectedV?.content?.[0]?.text ?? '')
     check(

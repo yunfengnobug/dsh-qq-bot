@@ -1582,7 +1582,7 @@ export function apply(ctx, config) {
           },
           { type: 'image', attachment: ref },
         ],
-        source: { kind: 'plugin', plugin: PLUGIN_TAG },
+        source: injectedMessageSource(legacySettings),
       })
       let lastReason = '未知原因'
       // 多模态调用**有几率失败**（网络/限流/偶发空回复），一次失败就不发描述太亏了 ——

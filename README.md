@@ -274,6 +274,8 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 - 选择模型：优先使用设置里的 `visionModel`（`provider/model`）；未设置时自动查找，
   名字带 `vision` 的优先，其次是第一个支持图片输入的模型。
+- 发给视觉模型的那条消息，来源和注入 QQ 消息一样：DSH 0.2.0 用 `plugin:dsh-qq-bot`，
+  0.1.5 仍用原来的 `{ kind: 'plugin', plugin: 'qq-bridge' }`。0.2.0 不接受旧的 `kind: 'plugin'`。
 - 解析结果会缓存：成功的解析按 `visionModel` 的值缓存，值没变就不再枚举模型列表。
   自动查找失败的结果也会缓存，但只用于同一次设置内的去重 —— 设置一改就丢掉并重试，
   所以之后补上视觉模型不必改动 `visionModel`。
