@@ -23,7 +23,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
 > 上游由 DSH 写成。本 fork 的改动见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
-- 当前版本 **v0.2.0**（按目的地分会话、出站目的地钉在唤醒那一轮、设置可经已登录的面板访问。见 [`CHANGELOG.md`](./CHANGELOG.md)）
+- 当前版本 **v0.2.1**（已登录面板的设置接口不再变成空的 HTTP 400；按群新建的会话带工作目录和标题。见 [`CHANGELOG.md`](./CHANGELOG.md)）
 - **M1–M8 全部完成**，已在**真实 NapCat + 真实 QQ** 上端到端跑通（Windows 真机）
 
 ## 目录
@@ -37,7 +37,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
 
 - **注入固定会话**：`sessionScope` 默认 `single`。`targetSessionId` 指向哪个会话，QQ 的消息就注入哪个会话，该会话原有的上下文继续使用。
   目标会话由插件显式加载（`agents.get(id)`，取不到时用 `agents.resume({ resumeSessionId })`），不回退到别的会话。
-- **也可以按群分会话**：把 `sessionScope` 设成 `perGroup` 后，每个群、每个私聊各用一条 DSH 会话，对应关系写在状态文件的 `sessionByDest`（键是 `group:<群号>` / `private:<QQ号>`）。这种模式下 `targetSessionId` 可以留空，新建会话用宿主当前的默认模型；填了则沿用那个会话的模型。同时握着的会话句柄超过 48 个时，最久没用的会被放开，`sessionByDest` 里的对应关系还在，下次该群或该私聊再来消息会再恢复，不会另开一条。`maxRecentTurns` 默认 40，QQ 驱动的一轮结束后尽量把更早的轮次压到这个上限，`0` 表示不限制。有会话投影时按投影里的轮数判断；没有投影才数历史事件。压完一轮如果轮数没降下来，就停，不会连着再压。各记各的不只是上下文：这一轮算不算 QQ 唤醒、正在攒的回复、二次确认，都按会话分开。两个会话同时在跑，不会把甲群的回复发到乙群，也不会因为其中一路结束就把另一路的归属清掉。
+- **也可以按群分会话**：把 `sessionScope` 设成 `perGroup` 后，每个群、每个私聊各用一条 DSH 会话，对应关系写在状态文件的 `sessionByDest`（键是 `group:<群号>` / `private:<QQ号>`）。这种模式下 `targetSessionId` 可以留空，新建会话用宿主当前的默认模型；填了则沿用那个会话的模型。同时握着的会话句柄超过 48 个时，最久没用的会被放开，`sessionByDest` 里的对应关系还在，下次该群或该私聊再来消息会再恢复，不会另开一条。新建会话会带上工作目录：优先用宿主 `workingDirectory.defaultDirectory`，没有这项、或它不是绝对路径时，用进程当前工作目录。这样会话不会落到 `_no-cwd`，面板里可以打开，轨迹也读得到。标题写成「QQ群 <群名或群号>」或「QQ私聊 <昵称或 QQ 号>」：先调用宿主的会话改名；改名服务不可用或失败时，直接写入 `session/title`。升级前已经建好、当时没有工作目录的旧会话不会自动修好。把状态文件里对应的 `sessionByDest` 删掉，再在那个群或私聊里 @ 一次，才会按新规则新建。`maxRecentTurns` 默认 40，QQ 驱动的一轮结束后尽量把更早的轮次压到这个上限，`0` 表示不限制。有会话投影时按投影里的轮数判断；没有投影才数历史事件。压完一轮如果轮数没降下来，就停，不会连着再压。各记各的不只是上下文：这一轮算不算 QQ 唤醒、正在攒的回复、二次确认，都按会话分开。两个会话同时在跑，不会把甲群的回复发到乙群，也不会因为其中一路结束就把另一路的归属清掉。
 - **按概率唤醒，节省 token**：被 @、命中昵称、被戳时会话必须唤醒。其余消息按概率抽样（默认 5%）。
   没有抽中的消息只记录，不调用模型。详见[唤醒策略](#唤醒策略)。
 - **出站受来源闸门限制**：出站有标记块和工具 2 种方式，由 `replyMode` 切换。2 种方式都只对“被 QQ 唤醒的那一轮”生效。
@@ -346,6 +346,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 > 卡片照常可以使用；`cordis.patch.yml` 也仍然可以修改（改完重启生效，且会被上面的设置文件覆盖）。
 > 本机回环、且没有外来源（命令行、SSH 隧道）或来源也是本机时，可以直接改。经反向代理进来时，对端常常仍是 `127.0.0.1`，来源却是公网面板地址：这时必须是**已经登录**的面板会话，并且来源主机名和这次请求的 `Host` 一致，设置才能保存。卡片上的读取和保存会带上面板登录 cookie（`credentials: 'include'`）。**不必再配 `trustedHosts`**。
 > 宿主 `requestRejection()` 返回空、`undefined` 或 `0` **不算**已登录。已登录只认宿主明确给出的结果：`isAuthenticated`、浏览器会话，或 `admit()` 交回的身份。没有这个结果的外网请求是 403。来源是别的网站、和 `Host` 对不上的请求也是 403，就算带着 cookie 也不行。接口只写 schema 白名单里的键。
+> 判断面板监听器是不是 HTTPS 时，只通过 `ctx.get('webServer')` 读协议，不读 `ctx.webServer`。插件没有把 `webServer` 放进 inject。直接读这个属性会抛错，宿主会把这次请求收成**没有正文的 HTTP 400**，卡片诊断就显示本机接口不可用，即使浏览器里已经登录。读不到这项服务、或读取失败时，按 HTTP 继续做登录判定。
 
 卡片展开后还有 3 个操作按钮（0.1.5 与 0.2.0 上都有）：
 
@@ -372,7 +373,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `targetSessionId` | `''` | 接到哪个会话。`single` 时**空 = 不接到任何会话**。`perGroup` 时可以留空（新建会话用宿主当前默认模型）；填了则新建会话沿用该会话的模型 |
-| `sessionScope` | `single` | 会话怎么分。`single` = 所有群共用一个会话；`perGroup` = 每个群、每个私聊各记各的，映射写在状态文件的 `sessionByDest`（键为 `group:<群号>` / `private:<QQ号>`） |
+| `sessionScope` | `single` | 会话怎么分。`single` = 所有群共用一个会话；`perGroup` = 每个群、每个私聊各记各的，映射写在状态文件的 `sessionByDest`（键为 `group:<群号>` / `private:<QQ号>`）。新建会话带工作目录和「QQ群 / QQ私聊」标题，见[功能](#功能) |
 | `maxRecentTurns` | `40` | 每个会话最多留几轮。超出后调用宿主 `compaction.compactNow` 尽量压缩。有投影时看投影轮数。压完没变短就停。`0` = 不限制 |
 | `nicknames` | `['244','小助手']` | 听到这些名字就回应 |
 | `wakeProbability` | `0.05` | 没点名时的回应概率 |
@@ -465,7 +466,7 @@ QQ 侧没有人能点击“同意”，因此：
 |---|---|---|
 | `qq_bridge_status` | `debugTools` | 设置、目标会话是否已加载、连接状态、目的地、缓冲条数、最近日志，以及**最近观测到的 `user/message` 来源**（`recentInboundSources`）。排查“哑火”先看这个工具：`ours: false` = 没有认出那条是插件灌入的 QQ 消息；`ours: true` 但工具仍被拒 = 标记被别的事件清掉了 |
 | `qq_bridge_transport` | `debugTools` | 查看连接状态（含 token 是否解析到），或 `action: 'reconnect'` 强制重连 |
-| `qq_bridge_simulate` | `debugTools` | 模拟一条入站消息走完整策略；`dryRun: true` 只看决策，不注入 |
+| `qq_bridge_simulate` | `debugTools` | 模拟一条入站消息走完整策略；可带 `groupName`（群名，用来写 perGroup 会话标题）；`dryRun: true` 只看决策，不注入 |
 | `qq_bridge_send` | 始终 | 出站。`replyMode: 'tool'` 时该工具**就是唯一的出站方式**，因此不能藏在调试开关后面 |
 | `qq_bridge_sticker` | 始终 | 表情包：`list` / `save` / `send`。图片以 base64 出站，与 `qq_bridge_send` 共用来源闸门，见[表情包](#表情包) |
 | `qq_bridge_listen` | 始终 | 会话跟随窗口的开启与关闭。这是产品的使用方式，不是调试工具 |
@@ -492,7 +493,7 @@ QQ 侧没有人能点击“同意”，因此：
 
 改用法、设置或运行行为时，同一次提交里更新本文件。约定见 [`AGENTS.md`](./AGENTS.md)。
 
-4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **532 条断言**：
+4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **636 条断言**：
 
 ```powershell
 node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具 + 设置卡片字段（假 ctx，纯离线）

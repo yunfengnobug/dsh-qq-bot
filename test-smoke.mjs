@@ -2013,6 +2013,106 @@ function sawSentText(s) {
       const resClean = makeRes()
       await route.handler(req('POST', { body: { unset: ['wakeProbability'] } }), resClean)
     }
+
+    // 已登录的反向代理请求会读监听器协议。插件 fiber 没 inject webServer 时，
+    // 直接读 ctx.webServer 会抛，宿主把它收成空 HTTP 400。这里钉住：不读那个属性，接口仍返回 JSON。
+    {
+      const previousGet = apiCtx.get
+      const previousDescriptor = Object.getOwnPropertyDescriptor(apiCtx, 'webServer')
+      let propertyReads = 0
+      Object.defineProperty(apiCtx, 'webServer', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          propertyReads += 1
+          throw new Error('cannot get property "webServer" without inject')
+        },
+      })
+      let secureArg = null
+      const loggedIn = {
+        requestRejection() {
+          return undefined
+        },
+        isAuthenticated(_req, secure) {
+          secureArg = secure
+          return true
+        },
+      }
+      const run = async (getImpl) => {
+        propertyReads = 0
+        secureArg = null
+        apiCtx.get = getImpl
+        const res = makeRes()
+        let threw = null
+        try {
+          await route.handler(
+            req('GET', {
+              headers: {
+                origin: 'https://panel.example',
+                host: 'panel.example',
+                cookie: 'session=present',
+              },
+            }),
+            res,
+          )
+        } catch (error) {
+          threw = error
+        }
+        return { res, threw, propertyReads, secureArg }
+      }
+      try {
+        const https = await run((name) => {
+          if (name === 'webServer') return { protocol: 'https:' }
+          if (name === 'connection') return loggedIn
+          return previousGet(name)
+        })
+        check(
+          'S1：未 inject webServer 时已登录请求不抛、返回 200',
+          https.threw === null && https.res.out.status === 200,
+          https.threw ? String(https.threw) : `${https.res.out.status} ${https.res.out.body.slice(0, 80)}`,
+        )
+        check(
+          'S1：协议只走 ctx.get，不读会抛错的 ctx.webServer',
+          https.propertyReads === 0,
+          String(https.propertyReads),
+        )
+        check(
+          'S1：ctx.get(webServer).protocol 为 https: 时，isAuthenticated 收到 secure=true',
+          https.secureArg === true,
+          JSON.stringify(https.secureArg),
+        )
+
+        const missing = await run((name) => {
+          if (name === 'webServer') return undefined
+          if (name === 'connection') return loggedIn
+          return previousGet(name)
+        })
+        check(
+          'S1：get(webServer) 为空时按 HTTP，已登录请求仍 200',
+          missing.threw === null &&
+            missing.res.out.status === 200 &&
+            missing.secureArg === false &&
+            missing.propertyReads === 0,
+          missing.threw
+            ? String(missing.threw)
+            : JSON.stringify({ status: missing.res.out.status, secureArg: missing.secureArg, reads: missing.propertyReads }),
+        )
+
+        const boom = await run((name) => {
+          if (name === 'webServer') throw new Error('get webServer failed')
+          if (name === 'connection') return loggedIn
+          return previousGet(name)
+        })
+        check(
+          'S1：get(webServer) 抛错时不变成空 400，已登录请求仍 200',
+          boom.threw === null && boom.res.out.status === 200 && boom.secureArg === false,
+          boom.threw ? String(boom.threw) : `${boom.res.out.status} secure=${boom.secureArg}`,
+        )
+      } finally {
+        apiCtx.get = previousGet
+        if (previousDescriptor) Object.defineProperty(apiCtx, 'webServer', previousDescriptor)
+      }
+    }
   }
 }
 
@@ -3774,6 +3874,246 @@ function sawSentText(s) {
   localHandlers['session/event']({ id: first.decision.sessionId }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
   await new Promise((resolve) => setTimeout(resolve, 20))
   check('maxRecentTurns：投影还超限就再压一次，降下来就停', compacts === 4 && outlineLen === 0, JSON.stringify({ compacts, outlineLen }))
+  rmSync(dir, { recursive: true, force: true })
+}
+
+// perGroup 新建会话必须带绝对 cwd，并写上标题。
+// 没有 cwd 时面板打开报 session/not-found；标题只打日志的话列表一直是「未命名」。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-dest-session-'))
+  const workspace = join(dir, 'workspace')
+  mkdirSync(workspace)
+  const stateFile = join(dir, 'state.json')
+  const createdOpts = []
+  const renamed = []
+  const appended = []
+  const warns = []
+  const agents = new Map()
+  let cwdMode = 'default'
+  let titleMode = 'rename'
+  let wdReads = 0
+  let titleReads = 0
+  const scopeSettings = {
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 0,
+    nicknames: ['小助手'],
+    wakeProbability: 0,
+    whitelist: ['10000002'],
+    groupWhitelist: ['12345678', '87654321', '11112222'],
+    agentPreset: '',
+    replyMode: 'marker',
+    delivery: 'followup',
+  }
+  const iso = {
+    logger: {
+      info() {},
+      warn: (message) => warns.push(String(message)),
+    },
+    settings: { register: () => {}, get: () => scopeSettings },
+    agents: {
+      get: (id) => agents.get(id),
+      resume: async () => {
+        throw new Error('should create')
+      },
+      create: async (opts) => {
+        createdOpts.push(opts)
+        const session = {
+          id: opts.sessionId,
+          events: () => [],
+          append(type, data) {
+            appended.push({ id: opts.sessionId, type, data })
+          },
+        }
+        const agent = {
+          id: opts.sessionId,
+          session,
+          status: 'idle',
+          followup() {},
+          ctx: { get: () => undefined, effect: () => () => {} },
+        }
+        agents.set(opts.sessionId, agent)
+        return { agent, dispose: async () => {} }
+      },
+      withInitiator: (_agent, fn) => fn(),
+    },
+    tools: { register: () => {} },
+    on: () => () => {},
+    effect: () => {},
+    get(name) {
+      if (name === 'workingDirectory') {
+        if (cwdMode === 'throw') throw new Error('workingDirectory get failed')
+        if (cwdMode === 'missing') return undefined
+        if (cwdMode === 'relative') return { defaultDirectory: 'relative/workspace' }
+        if (cwdMode === 'blank') return { defaultDirectory: '   ' }
+        if (cwdMode === 'padded') return { defaultDirectory: `  ${workspace}  ` }
+        return { defaultDirectory: workspace }
+      }
+      if (name === 'sessionTitle') {
+        if (titleMode === 'throw-get') throw new Error('sessionTitle get failed')
+        if (titleMode === 'missing') return undefined
+        if (titleMode === 'no-rename') return {}
+        return {
+          rename(session, title) {
+            if (titleMode === 'throw-rename') throw new Error('session is not live')
+            renamed.push({ id: session.id, title })
+            return { title }
+          },
+        }
+      }
+      return undefined
+    },
+    inject: () => {},
+  }
+  Object.defineProperty(iso, 'workingDirectory', {
+    configurable: true,
+    get() {
+      wdReads += 1
+      throw new Error('cannot get property "workingDirectory" without inject')
+    },
+  })
+  Object.defineProperty(iso, 'sessionTitle', {
+    configurable: true,
+    get() {
+      titleReads += 1
+      throw new Error('cannot get property "sessionTitle" without inject')
+    },
+  })
+  const tools = []
+  iso.tools = { register: (def) => tools.push(def) }
+  apply(iso, {
+    statePath: stateFile,
+    debugTools: true,
+    onebotUrl: '',
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 0,
+    nicknames: ['小助手'],
+    whitelist: [],
+    groupWhitelist: [],
+    agentPreset: '',
+    napcatInstallDir: join(dir, 'no-napcat'),
+  })
+  const sim = tools.find((t) => t.name === 'qq_bridge_simulate')
+  const wake = (extra) => sim.execute({ text: '小助手在吗', userId: '10000002', nickname: '甲', ...extra })
+  const lastOpts = () => createdOpts.at(-1)
+
+  const group = JSON.parse(await wake({ groupId: '12345678', groupName: '示例群' }))
+  check('perGroup 新建：群会话带上 defaultDirectory 作为 cwd', lastOpts()?.meta?.cwd === workspace, JSON.stringify(lastOpts()?.meta))
+  check(
+    'perGroup 新建：没有人设时 meta 不含 agentPreset，也不挂 setup',
+    lastOpts()?.meta?.agentPreset === undefined && lastOpts()?.setup === undefined,
+    JSON.stringify({ preset: lastOpts()?.meta?.agentPreset, setup: typeof lastOpts()?.setup }),
+  )
+  check(
+    'perGroup 新建：群标题走 sessionTitle.rename，有群名时用群名',
+    renamed.length === 1 && renamed[0].title === 'QQ群 示例群' && renamed[0].id === group?.decision?.sessionId,
+    JSON.stringify(renamed),
+  )
+  check('perGroup 新建：rename 成功时不再直接 append', appended.length === 0, JSON.stringify(appended))
+  check(
+    'perGroup 新建：不读未注入的 workingDirectory / sessionTitle 属性',
+    wdReads === 0 && titleReads === 0,
+    JSON.stringify({ wdReads, titleReads }),
+  )
+
+  const priv = JSON.parse(await wake({}))
+  check(
+    'perGroup 新建：私聊标题用昵称',
+    renamed.at(-1)?.title === 'QQ私聊 甲' && priv?.decision?.sessionId === renamed.at(-1)?.id,
+    JSON.stringify(renamed.at(-1)),
+  )
+
+  cwdMode = 'padded'
+  await wake({ groupId: '87654321' })
+  check('perGroup 新建：defaultDirectory 前后空白会去掉', lastOpts()?.meta?.cwd === workspace, JSON.stringify(lastOpts()?.meta))
+  check('perGroup 新建：另一个群的标题也用群号', renamed.at(-1)?.title === 'QQ群 87654321', renamed.at(-1)?.title)
+
+  titleMode = 'throw-rename'
+  const beforeAppend = appended.length
+  const beforeWarn = warns.length
+  const failedRename = JSON.parse(await wake({ groupId: '11112222' }))
+  check(
+    'perGroup 新建：rename 失败仍投递成功，并改走 session/title',
+    failedRename?.decision?.delivered === true &&
+      appended.length === beforeAppend + 1 &&
+      appended.at(-1)?.type === 'session/title' &&
+      appended.at(-1)?.data?.title === 'QQ群 11112222' &&
+      appended.at(-1)?.data?.source?.kind === 'user' &&
+      Array.isArray(appended.at(-1)?.data?.messageSeqs) &&
+      warns.slice(beforeWarn).some((line) => line.includes('改为直接写入 session/title')),
+    JSON.stringify({ appended: appended.at(-1), warns: warns.slice(beforeWarn) }),
+  )
+
+  titleMode = 'missing'
+  const anon = JSON.parse(await wake({ userId: '10000002' }))
+  // 同一个私聊已经建过，不会再 create。换一个白名单里的号。
+  scopeSettings.whitelist = ['10000002', '10000003']
+  const anon2 = JSON.parse(await wake({ userId: '10000003', nickname: '' }))
+  check(
+    'perGroup 新建：没有 sessionTitle 时直接 append，没昵称就用 QQ 号',
+    anon?.decision?.sessionId === priv?.decision?.sessionId &&
+      anon2?.decision?.delivered === true &&
+      appended.at(-1)?.data?.title === 'QQ私聊 10000003',
+    JSON.stringify({ anon: anon?.decision?.sessionId, title: appended.at(-1)?.data?.title }),
+  )
+
+  titleMode = 'throw-get'
+  scopeSettings.whitelist = ['10000002', '10000003', '10000004']
+  const threwGet = JSON.parse(await wake({ userId: '10000004', nickname: '乙' }))
+  check(
+    'perGroup 新建：sessionTitle 读取失败时仍写入标题',
+    threwGet?.decision?.delivered === true && appended.at(-1)?.data?.title === 'QQ私聊 乙',
+    JSON.stringify(appended.at(-1)),
+  )
+
+  titleMode = 'no-rename'
+  scopeSettings.groupWhitelist = ['12345678', '87654321', '11112222', '13572468']
+  await wake({ groupId: '13572468' })
+  check(
+    'perGroup 新建：sessionTitle 没有 rename 时直接 append',
+    appended.at(-1)?.data?.title === 'QQ群 13572468',
+    JSON.stringify(appended.at(-1)),
+  )
+
+  cwdMode = 'relative'
+  scopeSettings.groupWhitelist = [...scopeSettings.groupWhitelist, '24681357']
+  await wake({ groupId: '24681357' })
+  check('perGroup 新建：相对 defaultDirectory 退回进程工作目录', lastOpts()?.meta?.cwd === process.cwd(), JSON.stringify(lastOpts()?.meta))
+
+  cwdMode = 'blank'
+  scopeSettings.groupWhitelist = [...scopeSettings.groupWhitelist, '11223344']
+  await wake({ groupId: '11223344' })
+  check('perGroup 新建：空白 defaultDirectory 退回进程工作目录', lastOpts()?.meta?.cwd === process.cwd(), JSON.stringify(lastOpts()?.meta))
+
+  cwdMode = 'missing'
+  scopeSettings.groupWhitelist = [...scopeSettings.groupWhitelist, '55667788']
+  await wake({ groupId: '55667788' })
+  check('perGroup 新建：没有 workingDirectory 时 cwd 用进程工作目录', lastOpts()?.meta?.cwd === process.cwd(), JSON.stringify(lastOpts()?.meta))
+
+  cwdMode = 'throw'
+  scopeSettings.groupWhitelist = [...scopeSettings.groupWhitelist, '99887766']
+  const threwCwd = JSON.parse(await wake({ groupId: '99887766' }))
+  check(
+    'perGroup 新建：读取工作目录失败仍创建，cwd 用进程工作目录',
+    threwCwd?.decision?.delivered === true && lastOpts()?.meta?.cwd === process.cwd(),
+    JSON.stringify({ decision: threwCwd?.decision, meta: lastOpts()?.meta }),
+  )
+
+  cwdMode = 'default'
+  titleMode = 'rename'
+  scopeSettings.agentPreset = 'qq-helper'
+  scopeSettings.groupWhitelist = [...scopeSettings.groupWhitelist, '12121212']
+  await wake({ groupId: '12121212' })
+  check(
+    'perGroup 新建：人设和 cwd 一起放进 meta，并挂上 setup',
+    lastOpts()?.meta?.cwd === workspace &&
+      lastOpts()?.meta?.agentPreset === 'qq-helper' &&
+      typeof lastOpts()?.setup === 'function',
+    JSON.stringify({ cwd: lastOpts()?.meta?.cwd, preset: lastOpts()?.meta?.agentPreset, setup: typeof lastOpts()?.setup }),
+  )
+  check('perGroup 新建：有人设时标题仍然改名', renamed.at(-1)?.title === 'QQ群 12121212', renamed.at(-1)?.title)
+
   rmSync(dir, { recursive: true, force: true })
 }
 

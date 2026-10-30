@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 
 import Schema from '@deepseek-ai/schemastery'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -556,9 +556,23 @@ export function apply(ctx, config) {
     return null
   }
 
+  /**
+   * 监听器是不是 HTTPS（`'https:'`）。
+   *
+   * 设置路由挂在 `inject(['webServer'])` 的子上下文上，处理函数闭包用的却是插件自己的 ctx。
+   * 插件的 inject 里没有 webServer。Cordis 对没注入的属性会抛
+   * `cannot get property "webServer" without inject`，`ctx.webServer?.protocol` 也挡不住：
+   * 可选链仍然会走属性读取。已登录的面板请求会走到这里；抛错被宿主 webserver 收成空的 HTTP 400，
+   * 卡片诊断就显示本机接口不可用。`ctx.get` 不要求 inject，没有这项服务时返回 undefined。
+   * 取不到、或读取失败时按 HTTP 处理，请求继续走登录判定，而不是变成空 400。
+   */
   function panelHttps() {
-    const protocol = ctx.webServer?.protocol ?? ctx.get?.('webServer')?.protocol
-    return String(protocol ?? '') === 'https:'
+    try {
+      const server = typeof ctx.get === 'function' ? ctx.get('webServer') : undefined
+      return String(server?.protocol ?? '') === 'https:'
+    } catch {
+      return false
+    }
   }
 
   function authSaysYes(fn, thisArg, req) {
@@ -1292,6 +1306,65 @@ export function apply(ctx, config) {
     return undefined
   }
 
+  /**
+   * perGroup 新建会话用的绝对工作目录。
+   *
+   * 不带 cwd 时宿主把会话写到 `sessions/_no-cwd/`，`header.cwd` 是空的。
+   * 面板的会话接口把空 cwd 当成 session/not-found，对话打不开，轨迹也是空的。
+   * 优先用宿主 `workingDirectory.defaultDirectory`（部署给“没有原项目目录的会话”的兜底）。
+   * 这项服务不在插件 inject 里，不能读 `ctx.workingDirectory`。没有、不是绝对路径、或读取失败时，
+   * 用进程当前工作目录（与宿主这项服务自己的默认一致）。
+   */
+  function destSessionCwd() {
+    try {
+      const directory = typeof ctx.get === 'function' ? ctx.get('workingDirectory')?.defaultDirectory : undefined
+      if (typeof directory === 'string' && isAbsolute(directory.trim())) return directory.trim()
+    } catch (error) {
+      logger.warn(`读取默认工作目录失败，改用进程工作目录：${error?.message ?? error}`)
+    }
+    return process.cwd()
+  }
+
+  /**
+   * 把「QQ群 … / QQ私聊 …」写进会话标题。只打日志的话，面板列表一直是「未命名」。
+   * 优先走 `sessionTitle.rename`（会写 `session/title`，并钉住标题）。
+   * 服务不在、或 rename 失败（例如会话还没进宿主的 sessions 表）时，直接 append 同一条事件。
+   * 标题写失败不挡会话创建：会话已经带了 cwd，至少能打开。
+   */
+  function nameDestSession(agent, label) {
+    const session = agent?.session
+    const title = String(label ?? '').trim()
+    if (!session || title === '') return
+    let titles
+    try {
+      titles = typeof ctx.get === 'function' ? ctx.get('sessionTitle') : undefined
+    } catch (error) {
+      logger.warn(`读取 sessionTitle 失败，改为直接写入标题：${error?.message ?? error}`)
+      titles = undefined
+    }
+    if (typeof titles?.rename === 'function') {
+      try {
+        titles.rename(session, title)
+        return
+      } catch (error) {
+        logger.warn(`会话标题 rename 失败，改为直接写入 session/title：${error?.message ?? error}`)
+      }
+    }
+    if (typeof session.append !== 'function') {
+      logger.warn(`会话 ${session.id ?? agent?.id ?? ''} 无法写入标题，面板上仍会显示未命名`)
+      return
+    }
+    try {
+      session.append('session/title', {
+        title,
+        messageSeqs: [],
+        source: { kind: 'user' },
+      })
+    } catch (error) {
+      logger.warn(`写入会话标题失败：${error?.message ?? error}`)
+    }
+  }
+
   async function createDestSession(msg, s) {
     const key = destinationKeyOf(msg)
     if (!key) throw new Error('无法为该消息确定会话目的地')
@@ -1308,12 +1381,17 @@ export function apply(ctx, config) {
     const handle = await ctx.agents.create({
       sessionId,
       ...(agentOptions ? { agentOptions } : {}),
-      ...(s.agentPreset ? { setup: mountPreset, meta: { agentPreset: s.agentPreset } } : {}),
+      ...(s.agentPreset ? { setup: mountPreset } : {}),
+      meta: {
+        cwd: destSessionCwd(),
+        ...(s.agentPreset ? { agentPreset: s.agentPreset } : {}),
+      },
     })
     state.sessionByDest[key] = sessionId
     saveState()
     rememberHandle(sessionId, handle)
     mountUsagePrompt(handle.agent)
+    nameDestSession(handle.agent, label)
     logger.info(`created per-dest session ${sessionId} for ${key} (${label})`)
     return handle.agent
   }
@@ -2858,6 +2936,7 @@ export function apply(ctx, config) {
         userId: { type: 'string', description: '私聊发送者 id（需在白名单内）。' },
         groupId: { type: 'string', description: '群 id（需在群白名单内）。' },
         nickname: { type: 'string', description: '发送者昵称（仅用于渲染与记录）。' },
+        groupName: { type: 'string', description: '群名。perGroup 新建会话时，标题用它；不填则用群号。' },
         atSelf: { type: 'boolean', description: '是否 @ 了机器人。' },
         messageId: { type: 'string', description: '原消息 id。出站引用时用它，不跟后来的入站混。' },
         dryRun: { type: 'boolean', description: 'true 时只返回决策、不注入。' },
@@ -2870,6 +2949,7 @@ export function apply(ctx, config) {
           userId: args.userId ?? null,
           groupId: args.groupId ?? null,
           nickname: args.nickname ?? null,
+          groupName: args.groupName ?? null,
           atSelf: args.atSelf === true,
           messageId: args.messageId ?? null,
         }
