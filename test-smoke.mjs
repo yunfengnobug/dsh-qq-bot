@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeReplyMode, NS, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotNotice, normalizeDelivery, normalizeMaxRecentTurns, normalizeReplyMode, normalizeSessionScope, NS, truncateText } from './index.js'
 import { hashOfBuffer, loadStickers, saveStickers, shortHash, upsertSticker } from './stickers.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
@@ -1009,7 +1009,7 @@ function sawSentText(s) {
   check('注册了 settings 命名空间 qq-bridge', registeredSettings.length === 1 && reg?.ns === 'qq-bridge', String(reg?.ns))
   const dict = reg?.schema?.dict ?? {}
   const keys = Object.keys(dict)
-  check('settings 键数量符合预期（23）', keys.length === 23, `实际 ${keys.length}`)
+  check('settings 键数量符合预期（26）', keys.length === 26, `实际 ${keys.length}`)
   const missing = keys.filter((k) => String(dict[k]?.meta?.description ?? '').trim() === '')
   check('每个 settings 键都有说明（设置界面里能看懂）', missing.length === 0, missing.join(', '))
   // readSettings() 会读到的键必须都在 Schema 里，否则用户在界面上改不到它
@@ -1093,13 +1093,24 @@ function sawSentText(s) {
     vm.runInNewContext(src, sandbox)
     check('bundle 被 __ModuleLoader__ 装载', def?.id === pkg.name, String(def?.id))
 
+    const stateInits = []
     const fakeReact = {
       createElement: (...args) => ({ args }),
       useCallback: (fn) => fn,
       useMemo: (fn) => fn(),
-      useState: () => [null, () => {}],
+      useState: (init) => {
+        stateInits.push(init)
+        return [init, () => {}]
+      },
       useEffect: () => {},
-      useSyncExternalStore: () => undefined,
+      useSyncExternalStore: (_subscribe, get) => {
+        try {
+          const snap = typeof get === 'function' ? get() : undefined
+          return snap && typeof snap === 'object' ? snap : { status: 'loading' }
+        } catch {
+          return { status: 'loading' }
+        }
+      },
     }
     const mod = def.factory((name) => {
       if (name === 'react') return fakeReact
@@ -1132,11 +1143,13 @@ function sawSentText(s) {
     //   0.2.0 改成了 settings.plugins.tab（插件自己是一个 tab）。
     //   真的 slots.inject 只在那个 slot 存在时才跑 factory，所以两个都注入是安全的。
     check(
-      '同时向新旧两个 slot 注入（兼容 0.1.5-rc.3 与 0.2.0）',
-      slotInjects.includes('settings.plugin.item') && slotInjects.includes('settings.plugins.tab'),
+      '同时向设置页和插件页的 slot 注入',
+      ['settings.plugin.item', 'settings.plugins.tab', 'plugins.tab', 'plugins.detail.section'].every((name) =>
+        slotInjects.includes(name),
+      ),
       JSON.stringify(slotInjects),
     )
-    check('两个 slot 各自的卡片都注册了', cards.length === 2, String(cards.length))
+    check('四个 slot 各自的卡片都注册了', cards.length === 4, String(cards.length))
     const oldCard = cards.find((c) => c.options.name === 'settings.plugin.item')
     const newCard = cards.find((c) => c.options.name === 'settings.plugins.tab')
     check(
@@ -1153,6 +1166,9 @@ function sawSentText(s) {
       JSON.stringify(newCard?.options),
     )
     check('卡片渲染函数可调用', cards.every((c) => typeof c.cell === 'function' && Boolean(c.cell())))
+    const rendered = newCard.cell()
+    if (typeof rendered?.args?.[0] === 'function') rendered.args[0](rendered.args[1])
+    check('卡片默认展开', stateInits.includes(true), JSON.stringify(stateInits))
 
     // ★ 第三个变化轴（2026-10-01 桌面端真机）：**可写设置域的 key 也换了**。
     //   0.1.5 用 settings 命名空间 `qq-bridge`；0.2.0 用 profile entry id `include:qq-bridge`
@@ -1196,7 +1212,12 @@ function sawSentText(s) {
         {
           const calls = []
           sandbox.fetch = async (url, init) => {
-            calls.push({ url: String(url), method: init?.method ?? 'GET', body: init?.body })
+            calls.push({
+              url: String(url),
+              method: init?.method ?? 'GET',
+              body: init?.body,
+              credentials: init?.credentials,
+            })
             const values = { nicknames: init?.method === 'POST' ? ['y'] : ['x'] }
             return { ok: true, status: 200, json: async () => ({ ok: true, values, overridden: ['nicknames'] }) }
           }
@@ -1235,6 +1256,11 @@ function sawSentText(s) {
               unsetCall.url.includes('/api/qq-bridge/settings') &&
               String(unsetCall.body) === JSON.stringify({ unset: ['nicknames'] }),
             JSON.stringify(unsetCall),
+          )
+          check(
+            '设置接口的请求带上面板登录 cookie',
+            calls.length >= 3 && calls.every((c) => c.credentials === 'include'),
+            JSON.stringify(calls.map((c) => c.credentials)),
           )
           check(
             '接口不可用（没有 fetch）时如实报 unavailable，不炸',
@@ -1280,11 +1306,50 @@ function sawSentText(s) {
         },
       }
       mod.apply(fakeCtx2)
-      check('只有 webUiSettings 时也能注册（0.2.0 的服务名）', cards2.length === 2, String(cards2.length))
+      check('只有 webUiSettings 时也能注册（0.2.0 的服务名）', cards2.length === 4, String(cards2.length))
       check(
         '两个服务都在时只注册一次（不重复挂卡片）',
-        cards.length === 2 && cards2.length === 2,
+        cards.length === 4 && cards2.length === 4,
         `旧 ctx=${cards.length} 新 ctx=${cards2.length}`,
+      )
+    }
+
+    // 部分 0.2.x 上 settingsScope / webUiSettings 不存在，inject 回调永远不跑。卡片仍要挂上。
+    {
+      const cards3 = []
+      const slotNames = []
+      const fakeCtx3 = {
+        get: () => undefined,
+        inject: () => {},
+        slots: {
+          inject: (name, cb) => {
+            slotNames.push(name)
+            return cb()
+          },
+          register: (options, cell) => {
+            cards3.push({ options, cell })
+            return () => {}
+          },
+        },
+      }
+      mod.apply(fakeCtx3)
+      check('没有设置服务、inject 不回调时也立刻挂上卡片', cards3.length === 4, String(cards3.length))
+      const detail = cards3.find((c) => c.options.name === 'plugins.detail.section')
+      check('插件详情：没带 subject 时仍给出卡片', typeof detail?.cell === 'function' && Boolean(detail.cell()))
+      check(
+        '插件详情：别的插件不显示这张卡片',
+        detail.cell({ subject: { kind: 'bundle', pkg: { name: 'other-plugin' } } }) == null,
+      )
+      check(
+        '插件详情：本包和旧包名、以及 qq-bridge 这个 id 才显示',
+        Boolean(detail.cell({ subject: { kind: 'bundle', pkg: { name: 'dsh-qq-bot' } } })) &&
+          Boolean(detail.cell({ subject: { kind: 'bundle', pkg: { name: 'dsh-qq-bridge' } } })) &&
+          Boolean(detail.cell({ subject: { kind: 'item', id: 'qq-bridge' } })),
+      )
+      check(
+        '没有设置服务时仍注入插件页 slot',
+        slotNames.includes('plugins.tab') && slotNames.includes('plugins.detail.section'),
+        JSON.stringify(slotNames),
       )
     }
 
@@ -1294,6 +1359,26 @@ function sawSentText(s) {
       const cardKeys = (mod.__test?.fields ?? []).map((x) => x.key)
       const schemaKeys = Object.keys(registeredSettings[0]?.schema?.dict ?? {})
       const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k))
+      const replyModeField = (mod.__test?.fields ?? []).find((x) => x.key === 'replyMode')
+      const deliveryField = (mod.__test?.fields ?? []).find((x) => x.key === 'delivery')
+      const webuiField = (mod.__test?.fields ?? []).find((x) => x.key === 'napcatWebuiUrl')
+      check(
+        'NapCat 网页管理地址：白话说明，键仍是英文',
+        webuiField?.label === 'NapCat 网页管理地址' && /127\.0\.0\.1/.test(String(webuiField?.hint ?? '')),
+        JSON.stringify(webuiField),
+      )
+      check(
+        '群里发出去的是哪一段：三个选项是白话',
+        replyModeField?.label === '群里发出去的是哪一段' &&
+          replyModeField.options.map((o) => o[1]).join('|') === '只发「发给群」里的那段|用发消息工具|整段回答都进群（慎用）',
+        JSON.stringify(replyModeField?.options),
+      )
+      check(
+        '忙的时候怎么插话：三个选项是白话',
+        deliveryField?.label === '忙的时候怎么插话' &&
+          deliveryField.options.map((o) => o[1]).join('|') === '能插就插，不能就排队（推荐）|一律新开一轮|不管忙不忙都插',
+        JSON.stringify(deliveryField?.options),
+      )
       check('每个 settings 键在卡片上都有输入框', notOnCard.length === 0, `缺：${notOnCard.join(', ')}（卡片共 ${cardKeys.length} 项）`)
       check('卡片上的键都真实存在于 Schema（没写错名字）', cardKeys.every((k) => schemaKeys.includes(k)), cardKeys.filter((k) => !schemaKeys.includes(k)).join(', '))
     }
@@ -1306,7 +1391,7 @@ function sawSentText(s) {
       byId: { s1: { displayTitle: '甲' }, s2: { displayTitle: '乙', running: true }, s3: { displayTitle: '丙' } },
     }
     const opts = so(list, 's1', ['s3'])
-    check('第一项是「不驱动任何会话」', opts[0]?.value === '', JSON.stringify(opts[0]))
+    check('第一项是「不接到任何会话」', opts[0]?.value === '' && String(opts[0]?.label).includes('不接到任何会话'), JSON.stringify(opts[0]))
     check('归档的会话不出现在下拉里', !opts.some((o) => o.value === 's3'), JSON.stringify(opts.map((o) => o.value)))
     check('运行中的会话有标注', String(opts.find((o) => o.value === 's2')?.label ?? '').includes('运行中'))
     const keep = so(list, 's3', ['s3'])
@@ -1408,7 +1493,7 @@ function sawSentText(s) {
   check('0.1.5 注入 source 用老的 plugin 包装', injectedMessageSource(true).kind === 'plugin')
   check(
     '0.2.0 注入 source 用 producer-owned（plugin:包名）',
-    injectedMessageSource(false).kind === 'plugin:dsh-qq-bridge',
+    injectedMessageSource(false).kind === 'plugin:dsh-qq-bot',
     JSON.stringify(injectedMessageSource(false)),
   )
   check('0.2.0 的 source.kind 不是已废弃的 plugin', injectedMessageSource(false).kind !== 'plugin')
@@ -1697,6 +1782,73 @@ function sawSentText(s) {
       await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.4 } } }), resRemote)
       check('S1：对端非回环地址的 POST → 403（回归）', resRemote.out.status === 403, `${resRemote.out.status} ${errOf(resRemote)}`)
       check('S1：对端非回环的文案说明只接受本机请求', errOf(resRemote).includes('本机'), errOf(resRemote))
+      check(
+        'S1：非本机被拒时说明不必再配 trustedHosts',
+        errOf(resRemote).includes('不需要再配 trustedHosts') && !/请(设置|配置|填写)\s*trustedHosts/.test(errOf(resRemote)),
+        errOf(resRemote),
+      )
+
+      // ⑨ 反向代理：宿主已经认出面板会话时放行；认不出就仍然拒绝。本机上的站外 Origin 不能靠会话翻案。
+      const baseGet = apiCtx.get.bind(apiCtx)
+      let panelConnection = null
+      apiCtx.get = (name) => (name === 'connection' ? panelConnection : baseGet(name))
+      try {
+        const beforePanel = fileValues()
+        panelConnection = { requestRejection() { return undefined } }
+        const resOk = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.41 } } }), resOk)
+        check('S1：非本机 + 面板会话已通过 → 200', resOk.out.status === 200, `${resOk.out.status} ${errOf(resOk)}`)
+        check('S1：非本机 + 面板会话已通过 → 设置写进去了', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+
+        panelConnection = { requestRejection() { return 401 } }
+        const res401 = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.77 } } }), res401)
+        check('S1：非本机 + 未登录（401）→ 403', res401.out.status === 403 && errOf(res401).includes('本机'), errOf(res401))
+        check('S1：未登录的非本机 POST 不改设置', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+
+        panelConnection = { requestRejection() { return 403 } }
+        const res403 = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.78 } } }), res403)
+        check('S1：非本机 + 主机围栏 403 且没有会话助手 → 拒绝', res403.out.status === 403, errOf(res403))
+        check('S1：没有会话助手时不改设置', fileValues().wakeProbability === 0.41, JSON.stringify(fileValues()))
+
+        panelConnection = {
+          requestRejection() { return 403 },
+          isAuthenticated() { return true },
+        }
+        const resHelper = makeRes()
+        await route.handler(req('POST', { addr: '10.0.0.9', body: { set: { wakeProbability: 0.42 } } }), resHelper)
+        check('S1：非本机 + 403 但 isAuthenticated 为真 → 通过', resHelper.out.status === 200, errOf(resHelper))
+        check('S1：会话助手放行后写进设置', fileValues().wakeProbability === 0.42, JSON.stringify(fileValues()))
+
+        panelConnection = {
+          requestRejection() { return { status: 403 } },
+          browserAuth: { isAuthenticated() { return true } },
+        }
+        const resBrowser = makeRes()
+        await route.handler(req('GET', { addr: '10.0.0.8' }), resBrowser)
+        check('S1：非本机 GET + browserAuth.isAuthenticated → 200', resBrowser.out.status === 200, errOf(resBrowser))
+
+        panelConnection = { requestRejection() { return undefined } }
+        const resEvilSession = makeRes()
+        await route.handler(
+          req('POST', { headers: { origin: 'https://evil.example' }, body: { set: { wakeProbability: 0.99 } } }),
+          resEvilSession,
+        )
+        check(
+          'S1：本机上的站外 Origin 不能靠面板会话翻案',
+          resEvilSession.out.status === 403 && errOf(resEvilSession).includes('evil.example'),
+          errOf(resEvilSession),
+        )
+        check(
+          'S1：站外 Origin 翻案失败时设置不变',
+          fileValues().wakeProbability === 0.42 && JSON.stringify(fileValues()) !== JSON.stringify(beforePanel),
+          JSON.stringify(fileValues()),
+        )
+      } finally {
+        panelConnection = null
+        apiCtx.get = baseGet
+      }
 
       // ⑧ 其余报错码也要说清发生了什么（用户看得懂才有下一步）。
       const resBadJson = makeRes()
@@ -1813,6 +1965,16 @@ function sawSentText(s) {
     'GET /napcat：installed 按同一个 installDir 判定（空目录 = false）',
     got.installed === false,
     String(got.installed),
+  )
+  check(
+    'GET /napcat：回环地址仍可打开，并标明只有本机能用',
+    got.webuiLoopbackOnly === true && String(got.webuiHint).includes('127.0.0.1') && String(got.webuiUrl).includes('127.0.0.1'),
+    JSON.stringify({ webuiLoopbackOnly: got.webuiLoopbackOnly, hint: got.webuiHint, url: got.webuiUrl }),
+  )
+  check(
+    'GET /napcat：安装目录存在时不提示缺失',
+    got.installDirExists === true && got.installDirMissingHint === undefined,
+    JSON.stringify({ installDirExists: got.installDirExists, hint: got.installDirMissingHint }),
   )
   check(
     'GET /napcat：running / startedByPlugin 都是布尔量',
@@ -1940,6 +2102,47 @@ function sawSentText(s) {
     `${resMethodMiss.out.status} ${errOf(resMethodMiss)}`,
   )
 
+  // 填了对外地址就用它。webui.json 里的 token 只在地址自己没带 token 时补上。不使用真实域名。
+  const mountNapcat = (extra) => {
+    const localRoutes = []
+    const localCtx = {
+      ...ctx,
+      settings: { describe: () => [], update: async () => {}, configure: () => () => {} },
+      webServer: { register: (route) => { localRoutes.push(route); return () => {} } },
+    }
+    localCtx.inject = (_deps, cb) => cb(localCtx)
+    apply(localCtx, {
+      ...config,
+      statePath: process.env.TEMP + `/qq-bridge-smoke-webui-${extra.napcatWebuiUrl.length}.json`,
+      napcatInstallDir: installDir,
+      napcatWebuiUrl: extra.napcatWebuiUrl,
+    })
+    return localRoutes.find((r) => r.path === '/api/qq-bridge/napcat')?.handler
+  }
+  const resPublic = makeRes()
+  await mountNapcat({ napcatWebuiUrl: 'https://example.invalid/webui' })(req('GET', { url: '/api/qq-bridge/napcat' }), resPublic)
+  const pub = JSON.parse(resPublic.out.body)
+  check(
+    'GET /napcat：填写了网页管理地址就用它，并补上 webui.json 里的 token',
+    resPublic.out.status === 200 &&
+      String(pub.webuiUrl).startsWith('https://example.invalid/webui') &&
+      String(pub.webuiUrl).includes('token=tok123') &&
+      pub.webuiLoopbackOnly === false &&
+      pub.webuiHint === '',
+    String(pub.webuiUrl),
+  )
+  const resKept = makeRes()
+  await mountNapcat({ napcatWebuiUrl: 'https://example.invalid/webui?token=keep-me' })(
+    req('GET', { url: '/api/qq-bridge/napcat' }),
+    resKept,
+  )
+  const kept = JSON.parse(resKept.out.body)
+  check(
+    'GET /napcat：地址里已有 token 时不换成 webui.json 的 token',
+    String(kept.webuiUrl).includes('token=keep-me') && !String(kept.webuiUrl).includes('tok123'),
+    String(kept.webuiUrl),
+  )
+
   // launch / reveal 在测试机上必然失败（没有 NapCat，也不该真去开文件管理器），
   // 但必须**回 JSON 而不是抛** —— 抛出去会让宿主那条请求挂死。
   // 这里用 legacy 那份路由：它的 installDir 是不存在的目录，所以 reveal 不会真的启动进程。
@@ -1960,6 +2163,29 @@ function sawSentText(s) {
       `${res.out.status} ${String(res.out.body).slice(0, 120)}`,
     )
   }
+
+  const legacyGet = capturedRoutes.find((r) => r.path === '/api/qq-bridge/napcat')?.handler
+  const resMissing = makeRes()
+  await legacyGet(req('GET', { url: '/api/qq-bridge/napcat' }), resMissing)
+  const missing = JSON.parse(resMissing.out.body)
+  check(
+    'GET /napcat：安装目录不存在时说明自己部署要另填路径',
+    missing.installDirExists === false &&
+      /自己部署或 Docker/.test(String(missing.installDirMissingHint)) &&
+      /不会猜/.test(String(missing.installDirMissingHint)),
+    String(missing.installDirMissingHint),
+  )
+  const resRevealMissing = makeRes()
+  await legacyReveal(req('POST', { url: '/api/qq-bridge/napcat/reveal' }), resRevealMissing)
+  const revealMissing = JSON.parse(resRevealMissing.out.body)
+  check(
+    'POST /napcat/reveal：目录不存在时说明原因，且不打开文件管理器',
+    resRevealMissing.out.status === 200 &&
+      revealMissing.ok === false &&
+      /自己部署或 Docker/.test(String(revealMissing.error)) &&
+      /不会猜/.test(String(revealMissing.error)),
+    String(revealMissing.error),
+  )
 
   rmSync(installDir, { recursive: true, force: true })
 }
@@ -3187,6 +3413,227 @@ function sawSentText(s) {
     else resolvedSettings.whitelist = prevWhitelist
     fakeAgent = prevAgent
     fire('turn/end', { reason: { kind: 'completed' } })
+  }
+}
+
+// 默认仍是上游的单会话；轮数上限有默认值。
+{
+  const st = JSON.parse(await status.execute({}))
+  check('默认 sessionScope 是 single', st.settings?.sessionScope === 'single', JSON.stringify(st.settings?.sessionScope))
+  check('默认 maxRecentTurns 是 40', st.settings?.maxRecentTurns === 40, JSON.stringify(st.settings?.maxRecentTurns))
+  check('sessionScope 只认 perGroup，其它值回落 single', normalizeSessionScope('perGroup') === 'perGroup' && normalizeSessionScope('fixed') === 'single')
+  check('maxRecentTurns：0 保留，非法回落 40，超过 500 夹断', normalizeMaxRecentTurns(0) === 0 && normalizeMaxRecentTurns('nope') === 40 && normalizeMaxRecentTurns(900) === 500)
+}
+
+// perGroup：每个群、每个私聊各建一条会话，并记在 sessionByDest。超长会话会请求压缩。
+{
+  const dir = mkdtempSync(join(tmpdir(), 'qq-bridge-scope-'))
+  const stateFile = join(dir, 'state.json')
+  const created = []
+  const agents = new Map()
+  const localHandlers = {}
+  let compacts = 0
+  const scopeSettings = {
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 2,
+    nicknames: ['小助手'],
+    wakeProbability: 0,
+    whitelist: ['10000002'],
+    groupWhitelist: ['12345678', '87654321'],
+    replyMode: 'marker',
+    delivery: 'followup',
+  }
+  const iso = {
+    logger: { info() {}, warn() {} },
+    settings: { register: () => {}, get: () => scopeSettings },
+    agents: {
+      get: (id) => agents.get(id),
+      resume: async () => {
+        throw new Error('should create')
+      },
+      create: async ({ sessionId }) => {
+        const agent = {
+          id: sessionId,
+          session: {
+            id: sessionId,
+            events: () => Array.from({ length: 10 }, () => ({ type: 'turn/end' })),
+          },
+          status: 'idle',
+          followup(message) {
+            return message
+          },
+          ctx: { get: () => undefined, effect: (fn) => fn() },
+        }
+        agents.set(sessionId, agent)
+        created.push(sessionId)
+        return { agent, dispose: async () => {} }
+      },
+      withInitiator: (_agent, fn) => fn(),
+    },
+    tools: { register: (def) => tools.push(def) },
+    on: (name, fn) => {
+      localHandlers[name] = fn
+      return () => {}
+    },
+    effect: () => {},
+    get: (name) => (name === 'compaction' ? { compactNow: async () => { compacts += 1; return { ok: true } } } : undefined),
+    inject: () => {},
+  }
+  const tools = []
+  iso.tools = { register: (def) => tools.push(def) }
+  apply(iso, {
+    statePath: stateFile,
+    debugTools: true,
+    onebotUrl: '',
+    targetSessionId: '',
+    sessionScope: 'perGroup',
+    maxRecentTurns: 2,
+    nicknames: ['小助手'],
+    whitelist: [],
+    groupWhitelist: [],
+    napcatInstallDir: join(dir, 'no-napcat'),
+  })
+  const sim = tools.find((t) => t.name === 'qq_bridge_simulate')
+  const wake = (groupId) => sim.execute({ text: '小助手在吗', userId: '10000002', groupId, nickname: '甲' })
+  const first = JSON.parse(await wake('12345678'))
+  const again = JSON.parse(await wake('12345678'))
+  const other = JSON.parse(await wake('87654321'))
+  const priv = JSON.parse(await sim.execute({ text: '小助手在吗', userId: '10000002', nickname: '甲' }))
+  check('perGroup：群消息投递成功', first?.decision?.delivered === true, JSON.stringify(first?.decision))
+  check(
+    'perGroup：同一个群复用会话，不重复创建',
+    again?.decision?.sessionId === first?.decision?.sessionId && created.filter((id) => id === first.decision.sessionId).length === 1,
+    JSON.stringify(created),
+  )
+  check('perGroup：另一个群另开会话', other?.decision?.sessionId && other.decision.sessionId !== first.decision.sessionId, JSON.stringify(other?.decision?.sessionId))
+  check('perGroup：私聊再另开一条', priv?.decision?.sessionId && !created.slice(0, 2).includes(priv.decision.sessionId) && created.length === 3, JSON.stringify(created))
+  const saved = JSON.parse(readFileSync(stateFile, 'utf8'))
+  check(
+    'perGroup：sessionByDest 落盘为 group:/private: 键',
+    saved.sessionByDest?.['group:12345678'] === first.decision.sessionId &&
+      saved.sessionByDest?.['group:87654321'] === other.decision.sessionId &&
+      saved.sessionByDest?.['private:10000002'] === priv.decision.sessionId,
+    JSON.stringify(saved.sessionByDest),
+  )
+  localHandlers['session/event'](
+    { id: first.decision.sessionId },
+    { type: 'turn/start', data: { turn: 1 } },
+  )
+  localHandlers['session/event'](
+    { id: first.decision.sessionId },
+    { type: 'turn/end', data: { reason: { kind: 'completed' } } },
+  )
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('maxRecentTurns：超限时调用宿主 compactNow', compacts >= 1, String(compacts))
+  rmSync(dir, { recursive: true, force: true })
+}
+
+// 出站目的地钉在唤醒那一刻：之后别的群只被记录，也不能把标记块 / 工具 / 跟随带跑。
+{
+  const prevGroup = resolvedSettings.groupWhitelist
+  const prevProb = resolvedSettings.wakeProbability
+  const prevMode = resolvedSettings.replyMode
+  const prevQuote = resolvedSettings.replyWithQuote
+  const prevDelivery = resolvedSettings.delivery
+  const prevAgent = fakeAgent
+  const listen = registered.find((t) => t.name === 'qq_bridge_listen')
+  const sendTool = registered.find((t) => t.name === 'qq_bridge_send')
+  const framesWith = (needle) => {
+    const hits = []
+    for (const socket of qqSockets) {
+      for (const frame of socket.sent ?? []) {
+        if (frame.action !== 'send_group_msg' && frame.action !== 'send_private_msg') continue
+        const segs = Array.isArray(frame.params?.message) ? frame.params.message : []
+        const text = segs.filter((part) => part?.type === 'text').map((part) => String(part.data?.text ?? '')).join('')
+        if (text.includes(needle)) hits.push(frame)
+      }
+    }
+    return hits
+  }
+  try {
+    resolvedSettings.groupWhitelist = ['111', '222']
+    resolvedSettings.wakeProbability = 0
+    resolvedSettings.replyMode = 'marker'
+    resolvedSettings.replyWithQuote = true
+    resolvedSettings.delivery = 'followup'
+    mainSessionHandler({ id: 'session-smoke' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+    await new Promise((r) => setTimeout(r, 20))
+    const transport = registered.find((t) => t.name === 'qq_bridge_transport')
+    if (JSON.parse(await transport.execute({})).transport.state !== 'open') {
+      await transport.execute({ action: 'reconnect' })
+      await new Promise((r) => setTimeout(r, 30))
+    }
+    fakeAgent = {
+      id: 'session-smoke',
+      session: { id: 'session-smoke' },
+      status: 'idle',
+      ctx: { get: () => undefined, effect: () => () => {} },
+      followup(msg) {
+        mainSessionHandler({ id: 'session-smoke' }, { type: 'user/message', data: msg })
+        mainSessionHandler({ id: 'session-smoke' }, { type: 'turn/start', data: { turn: 1 } })
+      },
+    }
+    const woke = JSON.parse(await sim.execute({ text: '244 在吗', userId: '10001', groupId: '111', messageId: 'm-a' }))
+    check('目的地钉：甲群唤醒成功', woke?.decision?.delivered === true, JSON.stringify(woke?.decision))
+    await sim.execute({ text: '乙群只记一笔', userId: '10002', groupId: '222', messageId: 'm-b' })
+    const st = JSON.parse(await status.execute({}))
+    check(
+      '目的地钉：记录仍更新 lastDestination',
+      st.lastDestination?.kind === 'group' && String(st.lastDestination.groupId) === '222',
+      JSON.stringify(st.lastDestination),
+    )
+    const opened = JSON.parse(await listen.execute({ minutes: 5 }))
+    check('目的地钉：跟随窗口开在唤醒的甲群', opened.key === 'group:111', JSON.stringify(opened))
+    await listen.execute({ off: true })
+    const viaTool = JSON.parse(await sendTool.execute({ text: '工具仍回甲群' }))
+    const toolFrame = framesWith('工具仍回甲群').at(-1)
+    check(
+      '目的地钉：工具未指定群号时仍发到甲群，并引用甲群那条',
+      viaTool.sent === 1 &&
+        toolFrame?.action === 'send_group_msg' &&
+        String(toolFrame.params.group_id) === '111' &&
+        toolFrame.params.message?.[0]?.type === 'reply' &&
+        String(toolFrame.params.message[0].data.id) === 'm-a',
+      JSON.stringify(toolFrame?.params),
+    )
+    const explicit = JSON.parse(await sendTool.execute({ text: '显式去乙群', groupId: '222' }))
+    const explicitFrame = framesWith('显式去乙群').at(-1)
+    check(
+      '目的地钉：显式群号发到乙群，且不引用甲群的消息',
+      explicit.sent === 1 &&
+        explicitFrame?.action === 'send_group_msg' &&
+        String(explicitFrame.params.group_id) === '222' &&
+        explicitFrame.params.message?.[0]?.type === 'text',
+      JSON.stringify(explicitFrame?.params),
+    )
+    mainSessionHandler(
+      { id: 'session-smoke' },
+      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '[QQ]标记块回甲群[/QQ]' }] } } },
+    )
+    mainSessionHandler({ id: 'session-smoke' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+    await new Promise((r) => setTimeout(r, 30))
+    const markerFrame = framesWith('标记块回甲群').at(-1)
+    check(
+      '目的地钉：标记块发到甲群，并引用甲群那条，而不是乙群',
+      markerFrame?.action === 'send_group_msg' &&
+        String(markerFrame.params.group_id) === '111' &&
+        markerFrame.params.message?.[0]?.type === 'reply' &&
+        String(markerFrame.params.message[0].data.id) === 'm-a',
+      JSON.stringify(markerFrame?.params),
+    )
+  } finally {
+    await listen.execute({ off: true })
+    if (prevGroup === undefined) delete resolvedSettings.groupWhitelist
+    else resolvedSettings.groupWhitelist = prevGroup
+    resolvedSettings.wakeProbability = prevProb
+    resolvedSettings.replyMode = prevMode
+    if (prevQuote === undefined) delete resolvedSettings.replyWithQuote
+    else resolvedSettings.replyWithQuote = prevQuote
+    if (prevDelivery === undefined) delete resolvedSettings.delivery
+    else resolvedSettings.delivery = prevDelivery
+    fakeAgent = prevAgent
+    mainSessionHandler({ id: 'session-smoke' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
   }
 }
 

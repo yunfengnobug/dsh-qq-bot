@@ -1,22 +1,27 @@
-# dsh-qq-bridge
+# dsh-qq-bot
 
-**English** · Connect one **fixed DSH session** to QQ (OneBot / NapCat) and **keep its context** —
-no new session, no re-priming. A **fail-closed whitelist** gates who may drive it; **@-mentions,
-nicknames and pokes always wake** the model; everything else is only recorded (zero model calls)
-until a **configurable sampling probability** hits or the model opens a short **follow-up window**.
-Ships a settings card in **Settings → Plugins → Plugin configuration**, and can download, configure
-and launch **NapCat** for you.
+**DSH 插件**（不是独立服务）。把 DSH 会话接到 QQ（OneBot / NapCat 个人号）。需要已安装的 `@deepseek-ai/dsh`，以及一个 OneBot 实现（常用 NapCat）。
 
-把一个已有的 DSH 会话接到 QQ（OneBot / NapCat 个人号），提供类似 QQ 群友的交互感受。
+这是 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge) 的 fork，上游许可证为 MIT，版权归 sj244。安装和更新都走 `dsh plugin`，不要在服务器上打补丁脚本。
+
+**Cordis 插件 id 仍是 `qq-bridge`**（`cordis.patch.yml` 里的 `id`）。包名和界面显示名是 **dsh-qq-bot**。已有 profile 里按 `id: qq-bridge` 写的覆盖继续生效。设置命名空间、状态文件和 `/api/qq-bridge/...` 也沿用这个 id，避免升级时对不上。
 
 ```sh
-dsh plugin --profile web add github:sj244/dsh-qq-bridge
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
 ```
 
-> Created with DSH itself — this is a vibecoding project. / 这是个 vibecoding 项目。本项目由 DSH 写成。
+指定某次提交时：
+
+```sh
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#<commit>
+```
+
+**English** · A DSH plugin that connects DSH sessions to QQ (OneBot / NapCat). Fail-closed whitelist; @-mentions, nicknames and pokes always wake the model; everything else is only recorded until a configurable probability hits. Fork of sj244/dsh-qq-bridge (MIT).
+
+> 上游由 DSH 写成。本 fork 的改动见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
-- 当前版本 **v0.1.3**（维护性更新，见 [`CHANGELOG.md`](./CHANGELOG.md)）
+- 当前版本 **v0.2.0**（按目的地分会话、出站目的地钉在唤醒那一轮、设置可经已登录的面板访问。见 [`CHANGELOG.md`](./CHANGELOG.md)）
 - **M1–M8 全部完成**，已在**真实 NapCat + 真实 QQ** 上端到端跑通（Windows 真机）
 
 ## 目录
@@ -28,8 +33,9 @@ dsh plugin --profile web add github:sj244/dsh-qq-bridge
 
 ## 功能
 
-- **注入固定会话**：`targetSessionId` 指向哪个会话，QQ 的消息就注入哪个会话，该会话原有的上下文继续使用。
+- **注入固定会话**：`sessionScope` 默认 `single`。`targetSessionId` 指向哪个会话，QQ 的消息就注入哪个会话，该会话原有的上下文继续使用。
   目标会话由插件显式加载（`agents.get(id)`，取不到时用 `agents.resume({ resumeSessionId })`），不回退到别的会话。
+- **也可以按群分会话**：把 `sessionScope` 设成 `perGroup` 后，每个群、每个私聊各用一条 DSH 会话，对应关系写在状态文件的 `sessionByDest`（键是 `group:<群号>` / `private:<QQ号>`）。这种模式下 `targetSessionId` 可以留空，新建会话用宿主当前的默认模型；填了则沿用那个会话的模型。`maxRecentTurns` 默认 40，QQ 驱动的一轮结束后尽量把更早的轮次压到这个上限，`0` 表示不限制。
 - **按概率唤醒，节省 token**：被 @、命中昵称、被戳时会话必须唤醒。其余消息按概率抽样（默认 5%）。
   没有抽中的消息只记录，不调用模型。详见[唤醒策略](#唤醒策略)。
 - **出站受来源闸门限制**：出站有标记块和工具 2 种方式，由 `replyMode` 切换。2 种方式都只对“被 QQ 唤醒的那一轮”生效。
@@ -37,8 +43,8 @@ dsh plugin --profile web add github:sj244/dsh-qq-bridge
 - **图片可见**：图片先落盘缓存。唤醒时由多模态模型写成文字。文字填回图片原来的位置。
 - **表情包**：群友发的图可以登记成表情包，之后按情绪或哈希再发出去。登记过的图不再调用多模态模型。
   详见[表情包](#表情包)。
-- **有设置卡片**：昵称、白名单、概率、目标会话、出站方式、OneBot 地址、视觉模型等都在
-  `设置 → 插件 → 插件配置` 里修改，保存即生效。
+- **有设置卡片**：名称是白话（哪些群可以叫醒、群里发出去的是哪一段、忙的时候怎么插话等），
+  配置键仍是英文。在 `设置 → 插件 → 插件配置` 里修改，保存即生效。
 - **NapCat 自助托管**：插件可以按需下载、校验、解包、写配置、启停 NapCat。
 
 **不做的三件事**：
@@ -52,7 +58,7 @@ dsh plugin --profile web add github:sj244/dsh-qq-bridge
 **正式安装**（从 GitHub）：
 
 ```sh
-dsh plugin --profile web add github:sj244/dsh-qq-bridge
+dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
 ```
 
 **开发期**（修改本仓库代码时用 link 安装）：
@@ -146,6 +152,8 @@ QQ 消息 ─┬─ 不在白名单 ──────────────�
 
 插件可以按需从官方 GitHub Releases 下载、校验、解包、写配置、启停 NapCat，不预先打包 NapCat。
 
+**NapCat 已经自己部署好**（包括 Docker、另一台机器上的实例）时，下面的下载、解包和安装器可以整段跳过。仍要让 `onebotUrl` 和 `onebotPort` 跟那边的 OneBot 正向 WebSocket 一致，并在「NapCat 安装目录」里填实际路径。默认的 `$DSH_HOME/napcat` 在这种装法里往往不存在；目录不存在时「打开文件夹」不会去猜路径，只提示你改设置。
+
 在会话里调用 `qq_bridge_napcat` 工具，按以下顺序执行：
 
 | 步骤 | 调用 | 说明 |
@@ -218,6 +226,7 @@ QQ 路径与 `NapCatWinBootHook.dll`；此时 QQ 路径取不到会明确报错�
 - **字数上限**：出站文本超过 `replyMaxChars` 时**一条都不发**，调用方拿到 `reason: 'too-long'`，
   应按提示缩短后重发；未超长时 `replyWithQuote: true` 让消息带上引用；
   `stripMarkdown: true`（默认）时先去掉 Markdown 标记（QQ 不渲染）。
+- **目的地钉在唤醒那一刻**。这一轮的标记块、`qq_bridge_send`、`qq_bridge_sticker` 和 `qq_bridge_listen` 都发回把这一轮叫醒的那个群或私聊，不会被同一时间另一条只记录下来的消息改掉。显式传入 `groupId` 或 `userId` 时发到那里，并且不引用别的会话里的原消息。同一会话后面没有新唤醒的轮次，仍回落到最后一次非丢弃的入站。
 - **连不上或还没有目的地时丢弃并记日志**，不静默排队堆积。
 - 入站消息会自动附一行提示，说明目标会话的回复方式。
 
@@ -316,28 +325,28 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 ## 设置界面与全部设置项
 
-**设置 → 插件 → 插件配置** 里有一张 **QQ 桥接** 卡片（可折叠）。昵称、白名单、唤醒概率、目标会话、
-出站方式、OneBot 地址、视觉模型等都在这里修改，**保存即生效**（写入 `settings.yaml` 的用户层，不用重启）。
+**设置 → 插件 → 插件配置** 里有一张 **QQ 桥接** 卡片（可折叠，默认展开）。卡片上的名称是白话
+（例如「哪些群可以叫醒」「群里发出去的是哪一段」），写进配置文件的键仍是英文。
+在这里修改后**保存即生效**（写入 `settings.yaml` 的用户层，不用重启）。
 
 > **DSH 0.2.0 上**：宿主不再给第三方插件可写的设置命名空间（DSH #677 的迁移未完成，生态里所有走这条路的
-> 插件都一样）。本插件因此**自己挂了一条只服务本机的设置接口**：`GET/POST /api/qq-bridge/settings`。
+> 插件都一样）。本插件因此**自己挂了一条设置接口**：`GET/POST /api/qq-bridge/settings`。
 > 值存 `$DSH_HOME/qq-bridge-settings.json`，优先级为 **设置文件 > composition config**。
 > 卡片照常可以使用；`cordis.patch.yml` 也仍然可以修改（改完重启生效，且会被上面的设置文件覆盖）。
-> 接口只接受本机请求（非 loopback 一律 403），且只写 schema 白名单里的键。
+> 本机回环请求可以直接改（命令行、SSH 隧道、本机打开的面板）。经反向代理进来时，认 DSH 面板已经通过的登录会话，**不必再配 `trustedHosts`**。卡片上的读取和保存会带上面板登录 cookie（`credentials: 'include'`）。没有会话的外网请求仍然 403。打到本机 `127.0.0.1`、但来源是别的网站的请求也仍然拒绝。接口只写 schema 白名单里的键。
 
 卡片展开后还有 3 个操作按钮（0.1.5 与 0.2.0 上都有）：
 
-- **打开 WebUI**：用系统默认浏览器打开 NapCat 的 WebUI。地址由 `<安装目录>/config/webui.json` 里的
-  host / port / token 拼成；没读到该文件时按钮禁用，旁边显示“没读到 webui.json”。
+- **打开 WebUI**：用浏览器打开 NapCat 的 WebUI。填了 `napcatWebuiUrl` 就打开那个地址（地址本身没带 token 时，会补上 `webui.json` 里的 token）。没填则用 `<安装目录>/config/webui.json` 里的 host / port / token；文件不存在时仍按 `127.0.0.1:6099` 打开，按钮保持可点。地址是 `127.0.0.1` 或 `localhost` 时，旁边会写明只有跑着 NapCat 的那台机器能打开。
 - **启动 NapCat**：与工具 `qq_bridge_napcat` 的 `launch` 是同一个动作。目录里有官方
   `launcher-win10.bat` 时优先调用该脚本，脚本会自我提权，**可能弹出 UAC 窗口**。
   NapCat 运行中时，按钮显示“已在运行”并禁用；外部手动启动的 NapCat 也算运行中。
   卡片展开期间每 5 秒轮询一次状态，所以外部启动后按钮会自己变化。
 - **打开文件夹**：用系统文件管理器打开 NapCat 安装目录（Windows 用 `explorer.exe`，macOS 用 `open`，
-  Linux 用 `xdg-open`）。
+  Linux 用 `xdg-open`）。目录不存在时不打开，卡片上会提示：自己部署或 Docker 里的路径通常不是默认值，请填写「NapCat 安装目录」。
 
-这 3 个按钮走本机接口 `GET /api/qq-bridge/napcat`、`POST /api/qq-bridge/napcat/launch`、
-`POST /api/qq-bridge/napcat/reveal`：非本机请求一律 403，请求进行中按钮禁用，token 只拼进 URL 不写日志。
+这 3 个按钮走 `GET /api/qq-bridge/napcat`、`POST /api/qq-bridge/napcat/launch`、
+`POST /api/qq-bridge/napcat/reveal`，准入与设置接口相同：本机可以直接用，反向代理要带已登录的面板会话。没有会话的外网请求 403。请求进行中按钮禁用，token 只拼进 URL 不写日志。
 
 修改**出站方式**会立刻重挂注入给目标会话的用法说明：提示词正文按模式分叉，
 不重挂时模型会按本部署里已经不生效的做法回话。
@@ -346,30 +355,35 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 **已归档的会话不会列出**，当前选中的那个例外，会标成“（已归档）”。
 配置里的会话不在列表里时（别的工作区、宿主还没有加载完），保留成“（不在会话列表里）”的兜底项。
 
+卡片上的叫法和下面「说明」一致。第一列是配置键，不会出现在按钮上。
+
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `targetSessionId` | `''` | 固定目标会话 id；**空 = 不驱动任何会话** |
-| `nicknames` | `['244','小助手']` | 命中即唤醒 |
-| `wakeProbability` | `0.05` | 非昵称消息唤醒概率 |
-| `whitelist` / `groupWhitelist` | `[]` | 私聊 / 群白名单（**空 = 任何来源都不能唤醒**） |
-| `attachRecentChat` / `recentChatLimit` | `true` / `8` | 是否把未唤醒聊天附给下次唤醒，以及条数 |
-| `atOnlyInGroup` | `false` | 群里只有被 @ 才处理 |
-| `replyMode` | `'marker'` | 出站方式开关：`marker` ｜ `tool` ｜ `always` |
-| `delivery` | `'auto'` | 投递方式：`auto`（忙则插话）｜ `followup` ｜ `steer` |
-| `replyMaxChars` | `1500` | 出站字数上限（下限 100）；**超过就不发送** |
-| `replyWithQuote` | `false` | 回复时引用触发的那条消息 |
-| `stripMarkdown` | `true` | 出站去掉 Markdown 标记 |
-| `visionModel` | `''` | 给图片写描述的多模态模型（`"provider/model"`）；空 = 自动查找 |
-| `agentPreset` | `''` | resume 目标会话时挂载的 agent preset；空 = 沿用会话 header 里记录的 |
-| `onebotUrl` | `''` | NapCat 正向 WS 地址；空 = 不启用传输 |
-| `accessTokenEnv` | `''` | access_token 的凭据引用名 |
-| `selfId` | `''` | 插件自身的 QQ 号；空 = 连上后自动获取 |
-| `heartbeatTimeoutMs` | `90000` | 多久没有 WS 流量就判定连接已死并重连 |
-| `napcatInstallDir` | `''` | NapCat 安装目录；空 = `$DSH_HOME/napcat` |
-| `napcatVersion` | `''` | 要装的版本 tag；空 = 最新 |
-| `downloadProxy` | `''` | 下载用代理；空 = 读环境变量 |
-| `onebotPort` | `3001` | 写进 NapCat 配置并用来连的 WS 端口 |
-| `qqNumber` | `''` | 快速登录用 QQ 号（需先手动登录过一次） |
+| `targetSessionId` | `''` | 接到哪个会话。`single` 时**空 = 不接到任何会话**。`perGroup` 时可以留空（新建会话用宿主当前默认模型）；填了则新建会话沿用该会话的模型 |
+| `sessionScope` | `single` | 会话怎么分。`single` = 所有群共用一个会话；`perGroup` = 每个群、每个私聊各记各的，映射写在状态文件的 `sessionByDest`（键为 `group:<群号>` / `private:<QQ号>`） |
+| `maxRecentTurns` | `40` | 每个会话最多留几轮。超出后调用宿主 `compaction.compactNow` 尽量压缩。`0` = 不限制 |
+| `nicknames` | `['244','小助手']` | 听到这些名字就回应 |
+| `wakeProbability` | `0.05` | 没点名时的回应概率 |
+| `whitelist` / `groupWhitelist` | `[]` | 哪些私聊可以叫醒 / 哪些群可以叫醒（**留空 = 谁都不能叫醒**） |
+| `attachRecentChat` / `recentChatLimit` | `true` / `8` | 把没叫醒时的聊天一并带上，以及附带最近几条 |
+| `atOnlyInGroup` | `false` | 群里必须 @ 才理 |
+| `replyMode` | `'marker'` | 群里发出去的是哪一段：`marker` 只发「发给群」里的那段｜`tool` 用发消息工具｜`always` 整段回答都进群（慎用） |
+| `delivery` | `'auto'` | 忙的时候怎么插话：`auto` 能插就插，不能就排队（推荐）｜`followup` 一律新开一轮｜`steer` 不管忙不忙都插 |
+| `replyMaxChars` | `1500` | 一条最多多少字（下限 100）；**超过就不发送** |
+| `replyWithQuote` | `false` | 回复时带上原消息 |
+| `stripMarkdown` | `true` | 去掉 Markdown 记号 |
+| `visionModel` | `''` | 用来看图的模型（`provider/model`）；空 = 自动查找 |
+| `agentPreset` | `''` | 人设预设；空 = 沿用会话自己记着的 |
+| `onebotUrl` | `''` | OneBot 连接地址；空 = 先不连接 |
+| `accessTokenEnv` | `''` | OneBot 令牌放在哪个环境变量（填变量名，不是令牌，也不是模型 API key） |
+| `selfId` | `''` | 机器人自己的 QQ 号；空 = 连上后自动读取 |
+| `heartbeatTimeoutMs` | `90000` | 多久没收到连接数据就判定断线并重连 |
+| `napcatInstallDir` | `''` | NapCat 安装目录；空 = `$DSH_HOME/napcat`。自己装的或 Docker 里的请填实际目录 |
+| `napcatWebuiUrl` | `''` | NapCat 网页管理地址。空 = 读 `webui.json`（通常是 `127.0.0.1`，只有跑着 NapCat 的机器能打开）。远程使用时填外面打得开的地址 |
+| `napcatVersion` | `''` | 要下载的 NapCat 版本；空 = 最新 |
+| `downloadProxy` | `''` | 下载时走的代理；空 = 读环境变量 |
+| `onebotPort` | `3001` | OneBot 端口。自己另外部署的 NapCat 要和这边一致 |
+| `qqNumber` | `''` | 快速登录用的 QQ 号（需先手动登录过一次） |
 
 这些值优先从设置界面 / `settings.yaml` 取，未设置时回落到 `cordis.patch.yml` 里的 composition base。
 
@@ -381,9 +395,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 1. `package.json` 里的 `dsh.client` 还在；
 2. **重启过 `dsh web`**。浏览器端的内容是启动时读盘并计算指纹的，修改后必须重启；
 3. **重启之后刷新过页面（F5）**。清单是页面加载时注入的，只重启服务器时，已经打开的页面手里还是旧清单；
-4. DSH 版本：**0.2.0 改了 2 处名字** —— 客户端设置服务 `settingsScope` → `webUiSettings`，
-   插件配置页的挂载点 `settings.plugin.item` → `settings.plugins.tab`（插件自身是一个 tab）。
-   本插件**2 个服务门、2 个 slot 各注册一次**，哪个存在哪个生效，所以 0.1.5-rc.3 与 0.2.0 都能显示卡片。
+4. DSH 版本：0.2.0 把客户端设置服务从 `settingsScope` 改名为 `webUiSettings`，插件配置页的挂载点从 `settings.plugin.item` 改成 `settings.plugins.tab`。有的 0.2.x 上这两个服务都不存在，`ctx.inject` 会一直等。本插件**不等它们**：`apply` 时就挂上卡片。宿主设置域还在就用它；否则读写 `/api/qq-bridge/settings`。挂载点有四个：`settings.plugins.tab`、`settings.plugin.item`、`plugins.tab`、`plugins.detail.section`（详情页只在本包 `dsh-qq-bot`、旧包名 `dsh-qq-bridge`，或 id `qq-bridge` 上显示）。卡片默认展开。
 
 > 卡片按 settings 命名空间派发，`client/client.js` 里的 key 必须逐字等于 `qq-bridge`。
 > 对不上不会报错，只是静默不显示（`test-smoke.mjs` 包含该一致性的断言）。
@@ -465,7 +477,9 @@ QQ 侧没有人能点击“同意”，因此：
 
 ## 测试
 
-4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **498 条断言**：
+改用法、设置或运行行为时，同一次提交里更新本文件。约定见 [`AGENTS.md`](./AGENTS.md)。
+
+4 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器），共 **532 条断言**：
 
 ```powershell
 node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具 + 设置卡片字段（假 ctx，纯离线）
@@ -488,4 +502,4 @@ node test-stickers.mjs  # 表情包登记表：哈希 / 读写 / 查找 / 原子
 | **M8** ✅ | 分得清“在 QQ 还是 DSH 里”：出站闸门按来源生效、出站方式做成开关、改模式立刻重挂提示词 |
 | **M9** 🚧 | 戳一戳（入站已通，出站受 NapCat 限制，见[已知限制](#已知限制与环境要求)） |
 
-完整变更记录见 [`CHANGELOG.md`](./CHANGELOG.md)，发行版见 [Releases](https://github.com/sj244/dsh-qq-bridge/releases)。
+完整变更记录见 [`CHANGELOG.md`](./CHANGELOG.md)。上游发行版见 [sj244/dsh-qq-bridge Releases](https://github.com/sj244/dsh-qq-bridge/releases)。

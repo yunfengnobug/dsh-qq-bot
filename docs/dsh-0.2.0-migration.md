@@ -116,7 +116,7 @@ if (legacy) {
 
 - [x] **自建设置通道 —— 已实现**（2026-10-01）：照抄皮肤中心 ——
       宿主半可选注入 `webServer`（`ctx.inject(['webServer'], …)`），`ctx.webServer.register()` 挂
-      `/api/qq-bridge/settings`（GET 读 / POST 写，非 loopback 403，只写 schema 白名单）；
+      `/api/qq-bridge/settings`（GET 读 / POST 写；本机直接可用，反向代理认已登录的面板会话，无会话的外网请求 403，只写 schema 白名单）；
       值存 `$DSH_HOME/qq-bridge-settings.json`（`readSettings()` 优先级 = 设置文件 > composition config）；
       浏览器半在拿不到可写域时自动改走它（`createApiScope()`，快照形状与宿主 scope 对齐，卡片没改）。
       离线测试覆盖：GET/POST/403/白名单/非法值/`unset` + 客户端 `via()==='api'`。

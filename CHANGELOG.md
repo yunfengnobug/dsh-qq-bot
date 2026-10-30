@@ -1,6 +1,16 @@
 # 更新日志 / Changelog
 
-## 未发布
+## v0.2.0 — 2026-10-30
+
+Fork 功能版本。Cordis 插件 id 仍是 `qq-bridge`。
+
+- **设置卡片不等宿主设置服务**：DSH 0.2.x 上 `settingsScope` / `webUiSettings` 可能不存在，以前会一直等、卡片不出现。现在加载时就挂到设置页和插件页（含插件详情，只挂在本包上）。宿主设置域还在就用它，否则走 `/api/qq-bridge/settings`。请求带上面板登录 cookie。卡片默认展开。
+- **NapCat 网页地址和缺失目录**：新增设置 `napcatWebuiUrl`（「NapCat 网页管理地址」）。留空仍读 `webui.json`；地址是 `127.0.0.1` 或 `localhost` 时，「打开 WebUI」保持可点，并说明只有跑着 NapCat 的机器能打开。安装目录不存在时「打开文件夹」不会去猜路径，提示自己部署或 Docker 要另填目录。NapCat 已经自己跑着时，可以跳过下载那一段，但 OneBot 端口仍要对上。
+- **设置卡片改成白话**：标签、说明和选项都是中文，例如「群里发出去的是哪一段」「忙的时候怎么插话」。配置键仍是英文。
+- **设置和 NapCat 按钮不再只限本机回环**：本机请求照旧可用。经反向代理访问时，认 DSH 面板已经通过的登录会话，不必再配 `trustedHosts`。没有会话的外网请求仍然拒绝。打到 `127.0.0.1`、但来源是别的网站的请求也仍然拒绝。
+- **出站目的地钉在唤醒那一轮**：标记块、发消息工具、表情包和会话跟随都用这一轮被叫醒时的群或私聊。别的群里只被记录的消息仍会更新“最后一次入站”，但不会把正在回答的这一轮带跑。工具里显式写了群号或 QQ 号时发到那里，并且不引用别的会话的原消息。
+- **按目的地分会话，并限制每个会话保留的轮数**：新设置 `sessionScope`（`single` 默认，沿用一个 `targetSessionId`；`perGroup` 为每个群、每个私聊自动创建或恢复一条 DSH 会话）。映射持久化在状态文件的 `sessionByDest`。`maxRecentTurns` 默认 40，`0` 表示不限制；QQ 驱动的一轮结束后，若宿主有 `compaction.compactNow`，会尽量把更早的轮次压到这个上限。
+- **Fork 品牌改为 dsh-qq-bot**：包名、界面显示名、NapCat 配置里的默认名称改为 dsh-qq-bot。Cordis 插件 id、设置命名空间和 `/api/qq-bridge/...` 仍是 `qq-bridge`，已有 profile 覆盖不用改。v4 消息来源写成 `plugin:dsh-qq-bot`，同时仍认上游的 `plugin:dsh-qq-bridge`。上游 [sj244/dsh-qq-bridge](https://github.com/sj244/dsh-qq-bridge) 的 MIT 版权保留。
 
 - **修 issue #1：相邻重复的 `[QQ]` 块只发一次**：模型先写回答、再调工具、随后又把同一句重写一遍时，
   本轮正文按 step 累积，拼接后 QQ 会收到连着两句相同的话。现在相邻且完全相同的块只保留一个；

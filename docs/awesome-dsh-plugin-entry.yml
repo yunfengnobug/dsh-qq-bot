@@ -1,20 +1,14 @@
-# 提交给 awesome-dsh-plugin 的条目（本站仓库里留一份，方便以后更新描述/分类）。
+# 给 awesome-dsh-plugin 用的条目草稿。本文件只描述这个 fork，不代替上游条目。
 #
-# 怎么用：复制到 awesome-dsh-plugin 仓库，路径必须是
-#     data/plugins/sj244__dsh-qq-bridge.yml
-# 然后开 PR。一个 PR 就是一个文件；两个 README 由脚本从 data/plugins/*.yml 生成，**不要手改**。
+# 上游 sj244/dsh-qq-bridge 若已上架，保留原条目即可。
+# 本 fork 若单独上架，复制到 awesome-dsh-plugin 的路径应是
+#     data/plugins/yunfengnobug__dsh-qq-bot.yml
 # 规范：https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/main/contributing.md
 #
-# 上架前的两道门槛（细节见 HANDOVER.md §16）：
-#   1) 仓库要有 `dsh-plugin` topic；
-#   2) 仓库创建满 1 天 —— 本仓库 created_at = 2026-09-29T20:33:45Z，
-#      即 2026-10-01 04:33（北京）之后 CI 才会放行。早提交只会被 CI 打回，等够了再提。
-#
-# 分类依据：同类插件（dsh-qq-onebot-bridge、dsh-im-qq）都在 README 的
-# “Notifications & Integrations” 一节，对应 category: notify。
-url: https://github.com/sj244/dsh-qq-bridge
-name: sj244/dsh-qq-bridge
+# 分类依据：同类插件在 “Notifications & Integrations”，对应 category: notify。
+url: https://github.com/yunfengnobug/dsh-qq-bot
+name: yunfengnobug/dsh-qq-bot
 category: notify
 description:
-  en: Connects one existing DSH session to QQ through OneBot/NapCat without starting a new session, and uses a fail-closed whitelist plus @-mention, nickname and configurable-probability wake rules to decide which messages reach the model.
-  zh: 把一个固定的 DSH 会话接到 QQ（OneBot/NapCat），不新建会话、保留原上下文；白名单 fail-closed，@ 与昵称必唤醒，其余按可调概率唤醒。
+  en: DSH plugin (fork of sj244/dsh-qq-bridge) that connects DSH sessions to QQ through OneBot/NapCat. Fail-closed whitelist; @-mention, nickname and configurable-probability wake. Cordis id remains qq-bridge.
+  zh: DSH 插件（fork 自 sj244/dsh-qq-bridge），把 DSH 会话接到 QQ（OneBot/NapCat）。白名单 fail-closed，@ 与昵称必唤醒。Cordis 插件 id 仍是 qq-bridge。

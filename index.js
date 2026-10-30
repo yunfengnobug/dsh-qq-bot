@@ -1,4 +1,5 @@
-// dsh-qq-bridge — 把一个“固定的”DSH 会话接到 QQ（OneBot / NapCat）。
+// dsh-qq-bot — 把 DSH 会话接到 QQ（OneBot / NapCat）。
+// Fork of sj244/dsh-qq-bridge. Cordis 插件 id 仍是 qq-bridge。
 //
 // 设计见同目录 DESIGN.md。核心两点：
 //   1) 唤醒策略：白名单(fail-closed) → 命中昵称/@ 必唤醒 → 否则按概率(默认 5%)唤醒
@@ -11,6 +12,7 @@
 //     出站文本超过 replyMaxChars 就拒绝发送；未超长才发给最后一次入站的目的地。
 //     传输细节（内置 WebSocket、token 走查询串、退避重连）全部封装在 onebot.js。
 
+import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -69,7 +71,9 @@ export function hasLegacySettings(service) {
 }
 const PLUGIN_TAG = 'qq-bridge'
 /** 包名（v4 消息格式里 producer 归属用）。 */
-const PACKAGE = 'dsh-qq-bridge'
+const PACKAGE = 'dsh-qq-bot'
+/** 上游包名。已注入的旧消息仍按这个 kind 认，避免升级后哑火。 */
+const PACKAGE_LEGACY = 'dsh-qq-bridge'
 
 /**
  * 注入消息用的 source，按宿主能力分叉（导出以便测试）。
@@ -84,7 +88,7 @@ export function injectedMessageSource(legacy) {
   return legacy ? { kind: 'plugin', plugin: PLUGIN_TAG } : { kind: `plugin:${PACKAGE}` }
 }
 /** 包名：与 `client/client.js` 里 `__ModuleLoader__.load({id})` 的值必须一致。 */
-const PACKAGE_NAME = 'dsh-qq-bridge'
+const PACKAGE_NAME = 'dsh-qq-bot'
 const MAX_BUFFER = 200
 const MAX_LOG = 200
 const MAX_OUTBOX = 50
@@ -112,36 +116,42 @@ const MAX_STICKER_LIST = 50
 const MAX_STICKER_DESC = 40
 
 export const Config = Schema.object({
-  targetSessionId: Schema.string().default('').description('固定目标会话 id；留空则用 settings 里的值。'),
-  agentPreset: Schema.string().default('').description('resume 目标会话时挂载的 preset；留空沿用 header 记录。'),
-  statePath: Schema.string().default('').description('状态文件路径；留空 = $DSH_HOME/qq-bridge-state.json'),
-  debugTools: Schema.boolean().default(true).description('注册 qq_bridge_* 调试工具。'),
+  targetSessionId: Schema.string().default('').description('接到哪个会话。single 时留空 = 不接到任何会话。perGroup 时可以留空，新建会话用宿主当前的默认模型。'),
+  agentPreset: Schema.string().default('').description('人设预设。留空 = 沿用会话自己记着的。'),
+  statePath: Schema.string().default('').description('状态文件放哪。留空 = $DSH_HOME/qq-bridge-state.json。'),
+  debugTools: Schema.boolean().default(true).description('要不要注册调试工具。'),
   // ── M2：OneBot 传输 ────────────────────────────────────────────────────────
-  onebotUrl: Schema.string().default('').description('NapCat 的正向 WS 地址，如 ws://127.0.0.1:3001；留空 = 不启用传输。'),
-  accessTokenEnv: Schema.string().default('').role('credential-ref').description('存放 access_token 的凭据引用名（环境变量名），经 ctx.credentials 解析；不要明文写 token。'),
-  selfId: Schema.string().default('').description('机器人自己的 QQ 号；留空则连上后调 get_login_info 自动获取。'),
-  replyWithQuote: Schema.boolean().default(false).description('回复时引用触发那条消息（[CQ:reply]）。'),
-  atOnlyInGroup: Schema.boolean().default(false).description('群里只有被 @ 才处理（比概率唤醒更严的闸门）。'),
-  stripMarkdown: Schema.boolean().default(true).description('出站前去掉 Markdown 标记（QQ 不渲染）。'),
-  replyMode: Schema.string().default('marker').description("出站方式：'marker'（默认，只发 [QQ]…[/QQ] 块里的内容）｜'tool'（不用标记块，改由 qq_bridge_send 工具发送）｜'always'（整轮回复都发，旧行为）。"),
-  delivery: Schema.string().default('auto').description("QQ 消息怎么投递给目标会话：'auto'（默认，**目标正忙就插话** steer、空闲时排队）｜'followup'（永远排队成独立一轮）｜'steer'（永远插话）。"),
-  visionModel: Schema.string().default('').description('用来给图片写描述的多模态模型，"provider/model"；留空 = 自动找第一个支持图片输入的模型。'),
-  heartbeatTimeoutMs: Schema.number().default(90000).description('多久没有任何 WS 流量就判定连接已死并重连。'),
+  onebotUrl: Schema.string().default('').description('OneBot 连接地址，例如 ws://127.0.0.1:3001。留空 = 先不连接。'),
+  accessTokenEnv: Schema.string().default('').role('credential-ref').description('OneBot 令牌放在哪个环境变量。填变量名，不要填令牌本身，也不是模型的 API key。'),
+  selfId: Schema.string().default('').description('机器人自己的 QQ 号。留空 = 连上之后自动读取。'),
+  replyWithQuote: Schema.boolean().default(false).description('回复时带上原消息。'),
+  atOnlyInGroup: Schema.boolean().default(false).description('群里必须 @ 才理。'),
+  stripMarkdown: Schema.boolean().default(true).description('去掉 Markdown 记号。QQ 不会渲染它们。'),
+  replyMode: Schema.string().default('marker').description('群里发出去的是哪一段：marker = 只发「发给群」里的那段；tool = 用发消息工具；always = 整段回答都进群（慎用）。'),
+  delivery: Schema.string().default('auto').description('忙的时候怎么插话：auto = 能插就插，不能就排队（推荐）；followup = 一律新开一轮；steer = 不管忙不忙都插。'),
+  visionModel: Schema.string().default('').description('用来看图的模型，写成 provider/model。留空 = 自动找一个能看图的。'),
+  heartbeatTimeoutMs: Schema.number().default(90000).description('多久没收到连接数据就判定断线并重连。'),
   // ── M5：NapCat 自助托管 ───────────────────────────────────────────────────
   // 注意：这些只是**参数**；插件加载时绝不下载或执行任何东西，
   // 一切都要靠显式调用 qq_bridge_napcat 工具。
-  napcatInstallDir: Schema.string().default('').description('NapCat 安装目录；留空 = $DSH_HOME/napcat。'),
-  napcatVersion: Schema.string().default('').description('要装的 NapCat 版本 tag（如 v4.18.28）；留空 = 最新。'),
-  napcatAsset: Schema.string().default(DEFAULT_ASSET).description('要下载的发行资产名。'),
-  downloadProxy: Schema.string().default('').description('下载用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量，再不行直连。'),
-  onebotPort: Schema.number().default(3001).description('写进 NapCat 配置、并用来连的正向 WS 端口。'),
-  qqNumber: Schema.string().default('').description('快速登录用的 QQ 号（需先成功登录过一次）。'),
+  napcatInstallDir: Schema.string().default('').description('NapCat 安装目录。留空 = $DSH_HOME/napcat。自己装的或 Docker 里的不在这个位置时，填实际目录。'),
+  napcatWebuiUrl: Schema.string().default('').description('NapCat 网页管理地址。留空 = 读安装目录里的 webui.json。那边通常是 127.0.0.1，只有跑着 NapCat 的那台机器能打开。远程使用时填一个外面打得开的地址。'),
+  napcatVersion: Schema.string().default('').description('要下载的 NapCat 版本，例如 v4.18.28。留空 = 最新。'),
+  napcatAsset: Schema.string().default(DEFAULT_ASSET).description('要下载的安装包文件名。'),
+  downloadProxy: Schema.string().default('').description('下载时走的代理，例如 http://127.0.0.1:7890。留空 = 先看环境变量，没有就直接下载。'),
+  onebotPort: Schema.number().default(3001).description('OneBot 端口。自己另外部署的 NapCat，这里要和那边的端口一致。'),
+  qqNumber: Schema.string().default('').description('快速登录用的 QQ 号。需要先成功登录过一次。'),
+  sessionScope: Schema.union([
+    Schema.const('single'),
+    Schema.const('perGroup'),
+  ]).default('single').description('会话怎么分：single = 所有群共用一个会话；perGroup = 每个群、每个私聊各记各的。'),
+  maxRecentTurns: Schema.number().default(40).description('每个会话最多留几轮。默认 40。更早的内容会尽量压缩掉。填 0 表示不限制。'),
   // 以下是 settings 命名空间的 composition base（装好的默认值）：
   // 设置界面里的用户层会覆盖它们。
-  nicknames: Schema.array(Schema.string()).default(['244']),
-  wakeProbability: Schema.number().default(0.05),
-  whitelist: Schema.array(Schema.string()).default([]),
-  groupWhitelist: Schema.array(Schema.string()).default([]),
+  nicknames: Schema.array(Schema.string()).default(['244']).description('听到这些名字就回应。'),
+  wakeProbability: Schema.number().default(0.05).description('没点名时的回应概率（0 到 1）。'),
+  whitelist: Schema.array(Schema.string()).default([]).description('哪些私聊可以叫醒。留空 = 任何私聊都不叫醒。'),
+  groupWhitelist: Schema.array(Schema.string()).default([]).description('哪些群可以叫醒。留空 = 任何群都不叫醒。'),
 })
 
 // 用户可编辑设置：注册成 settings 命名空间后，会持久化到 settings.yaml，
@@ -150,31 +160,37 @@ export const Config = Schema.object({
 // ⚠️ **每个键都要有 description**：这个 Schema 直接生成设置界面上的表单，
 // 没有描述就只剩一个裸键名，用户根本不知道该怎么填（M3）。
 const BridgeSettings = Schema.object({
-  targetSessionId: Schema.string().default('').description('固定目标会话 id —— 决定"在跟哪个会话说话"；留空 = 不驱动任何会话。'),
-  nicknames: Schema.array(Schema.string()).default(['244']).description('叫到这些名字必然唤醒；可加多个（如 244、小助手）。'),
-  wakeProbability: Schema.number().default(0.05).description('既没被 @、也没叫名字时，按这个概率唤醒（0–1）。默认 0.05 = 5%；嫌耗 token 就调小。'),
-  whitelist: Schema.array(Schema.string()).default([]).description('允许唤醒的**私聊** QQ 号；空 = 谁都不能唤醒（fail-closed）。'),
-  groupWhitelist: Schema.array(Schema.string()).default([]).description('允许唤醒的**群**号；空 = 任何群都不唤醒。'),
-  attachRecentChat: Schema.boolean().default(true).description('唤醒时，是否把"未唤醒期间"的聊天记录一并附上。'),
-  recentChatLimit: Schema.number().default(DEFAULT_RECENT_CHAT_LIMIT).description('上面那段摘要最多带最近几条（0–200）。'),
-  replyMaxChars: Schema.number().default(1500).description('出站文本的字数上限（下限 100）；超过就不发送，请缩短后重发。'),
+  targetSessionId: Schema.string().default('').description('接到哪个会话。single 时留空 = 不接到任何会话。perGroup 时可以留空，新建会话用宿主当前的默认模型。'),
+  nicknames: Schema.array(Schema.string()).default(['244']).description('听到这些名字就回应。用逗号分开，例如 244, 小助手。'),
+  wakeProbability: Schema.number().default(0.05).description('没点名时的回应概率（0 到 1）。默认 0.05。'),
+  whitelist: Schema.array(Schema.string()).default([]).description('哪些私聊可以叫醒。留空 = 任何私聊都不叫醒。'),
+  groupWhitelist: Schema.array(Schema.string()).default([]).description('哪些群可以叫醒。留空 = 任何群都不叫醒。'),
+  attachRecentChat: Schema.boolean().default(true).description('把没叫醒时的聊天一并带上。'),
+  recentChatLimit: Schema.number().default(DEFAULT_RECENT_CHAT_LIMIT).description('附带最近几条（0–200）。'),
+  replyMaxChars: Schema.number().default(1500).description('一条最多多少字。超过就不发送。'),
   // M2
-  onebotUrl: Schema.string().default('').description('NapCat 的正向 WS 地址，如 ws://127.0.0.1:3001；留空 = 完全不启用传输。'),
-  accessTokenEnv: Schema.string().default('').role('credential-ref').description('access_token 所在的**凭据引用名**（环境变量名）；别写明文 token。'),
-  selfId: Schema.string().default('').description('机器人自己的 QQ 号；留空 = 连上后自动获取。'),
-  replyWithQuote: Schema.boolean().default(false).description('回复时引用触发的那条消息。'),
-  atOnlyInGroup: Schema.boolean().default(false).description('群里只有被 @ 才处理（比概率唤醒更严的闸门）。'),
-  stripMarkdown: Schema.boolean().default(true).description('出站前去掉 Markdown 标记（QQ 不渲染）。'),
-  replyMode: Schema.string().default('marker').description("出站闸门（开关）：'marker' = 标记块发送（默认）｜'tool' = **关掉标记块**，改用 qq_bridge_send 工具发送｜'always' = 整轮都发（旧行为，慎用）。"),
-  delivery: Schema.string().default('auto').description("投递方式：'auto' = 目标正忙时**插话**（steer）、空闲时排队（默认，最像群聊）｜'followup' = 永远排队成独立一轮｜'steer' = 永远插话。"),
-  visionModel: Schema.string().default('').description('给图片写描述的多模态模型，形如 provider/model；留空 = 自动找第一个支持图片输入的模型。'),
-  agentPreset: Schema.string().default('').description('resume 目标会话时挂载的 agent preset；留空 = 沿用会话 header 里记录的。'),
+  onebotUrl: Schema.string().default('').description('OneBot 连接地址，例如 ws://127.0.0.1:3001。留空 = 先不连接。'),
+  accessTokenEnv: Schema.string().default('').role('credential-ref').description('OneBot 令牌放在哪个环境变量。填变量名，不要填令牌本身，也不是模型的 API key。'),
+  selfId: Schema.string().default('').description('机器人自己的 QQ 号。留空 = 连上之后自动读取。'),
+  replyWithQuote: Schema.boolean().default(false).description('回复时带上原消息。'),
+  atOnlyInGroup: Schema.boolean().default(false).description('群里必须 @ 才理。'),
+  stripMarkdown: Schema.boolean().default(true).description('去掉 Markdown 记号。QQ 不会渲染它们。'),
+  replyMode: Schema.string().default('marker').description('群里发出去的是哪一段：marker = 只发「发给群」里的那段；tool = 用发消息工具；always = 整段回答都进群（慎用）。'),
+  delivery: Schema.string().default('auto').description('忙的时候怎么插话：auto = 能插就插，不能就排队（推荐）；followup = 一律新开一轮；steer = 不管忙不忙都插。'),
+  visionModel: Schema.string().default('').description('用来看图的模型，写成 provider/model。留空 = 自动找一个能看图的。'),
+  agentPreset: Schema.string().default('').description('人设预设。留空 = 沿用会话自己记着的。'),
   // M5
-  napcatInstallDir: Schema.string().default('').description('NapCat 安装目录；留空 = $DSH_HOME/napcat。'),
-  napcatVersion: Schema.string().default('').description('要下载的 NapCat 版本 tag（如 v4.18.28）；留空 = 最新。'),
-  downloadProxy: Schema.string().default('').description('下载 NapCat 用的 HTTP 代理（如 http://127.0.0.1:7890）；留空 = 读环境变量，再不行直连。'),
-  onebotPort: Schema.number().default(3001).description('写进 NapCat 配置、并用来连的正向 WS 端口。'),
-  qqNumber: Schema.string().default('').description('快速登录用的 QQ 号（需先成功登录过一次）。'),
+  napcatInstallDir: Schema.string().default('').description('NapCat 安装目录。留空 = $DSH_HOME/napcat。自己装的或 Docker 里的不在这个位置时，填实际目录。'),
+  napcatWebuiUrl: Schema.string().default('').description('NapCat 网页管理地址。留空 = 读安装目录里的 webui.json。那边通常是 127.0.0.1，只有跑着 NapCat 的那台机器能打开。远程使用时填一个外面打得开的地址。'),
+  napcatVersion: Schema.string().default('').description('要下载的 NapCat 版本，例如 v4.18.28。留空 = 最新。'),
+  downloadProxy: Schema.string().default('').description('下载时走的代理。留空 = 先看环境变量，没有就直接下载。'),
+  onebotPort: Schema.number().default(3001).description('OneBot 端口。自己另外部署的 NapCat，这里要和那边的端口一致。'),
+  qqNumber: Schema.string().default('').description('快速登录用的 QQ 号。需要先成功登录过一次。'),
+  sessionScope: Schema.union([
+    Schema.const('single'),
+    Schema.const('perGroup'),
+  ]).default('single').description('会话怎么分：single = 所有群共用一个会话；perGroup = 每个群、每个私聊各记各的，互不串上下文。'),
+  maxRecentTurns: Schema.number().default(40).description('每个会话最多留几轮对话。默认 40。更早的内容会尽量压缩掉，好让回复更快。填 0 表示不限制。'),
 })
 
 /** OneBot 非文本消息段 → 可读占位符。
@@ -319,7 +335,7 @@ export function apply(ctx, config) {
   /**
    * 用户设置的落盘位置（0.2.0 专用）。
    * 0.2.0 的宿主设置桥不给第三方插件可写域（见 docs/dsh-0.2.0-migration.md），
-   * 所以照抄 @linxin666/dsh-client-ui-skin-center 的做法：自己挂一条**只服务本机**的接口，
+   * 所以照抄 @linxin666/dsh-client-ui-skin-center 的做法：自己挂一条设置接口（本机可直接用，反向代理认面板会话），
    * 值写在自己的文件里。优先级：本文件 > composition config（见 readSettings）。
    * 放在 statePath 同一个目录，测试里天然落在临时目录。
    */
@@ -359,10 +375,13 @@ export function apply(ctx, config) {
         replyMode: normalizeReplyMode(config.replyMode),
         delivery: normalizeDelivery(config.delivery),
         napcatInstallDir: config.napcatInstallDir ?? '',
+        napcatWebuiUrl: config.napcatWebuiUrl ?? '',
         napcatVersion: config.napcatVersion ?? '',
         downloadProxy: config.downloadProxy ?? '',
         onebotPort: config.onebotPort ?? 3001,
         qqNumber: config.qqNumber ?? '',
+        sessionScope: normalizeSessionScope(config.sessionScope),
+        maxRecentTurns: normalizeMaxRecentTurns(config.maxRecentTurns),
       },
         applies: 'live',
     })
@@ -410,10 +429,13 @@ export function apply(ctx, config) {
       agentPreset: String(s.agentPreset ?? config.agentPreset ?? '').trim(),
       heartbeatTimeoutMs: Math.max(10000, Number(config.heartbeatTimeoutMs ?? 90000)),
       napcatInstallDir: String(s.napcatInstallDir ?? config.napcatInstallDir ?? '').trim(),
+      napcatWebuiUrl: String(s.napcatWebuiUrl ?? config.napcatWebuiUrl ?? '').trim(),
       napcatVersion: String(s.napcatVersion ?? config.napcatVersion ?? '').trim(),
       downloadProxy: String(s.downloadProxy ?? config.downloadProxy ?? '').trim(),
       onebotPort: Math.max(1, Math.min(65535, Number(s.onebotPort ?? config.onebotPort ?? 3001))),
       qqNumber: String(s.qqNumber ?? config.qqNumber ?? '').trim(),
+      sessionScope: normalizeSessionScope(s.sessionScope ?? config.sessionScope),
+      maxRecentTurns: normalizeMaxRecentTurns(s.maxRecentTurns ?? config.maxRecentTurns),
     }
   }
 
@@ -505,36 +527,80 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 本机接口的准入判定：对端回环地址 + 请求来源 + 带体 POST 的 `content-type`。
+   * 设置接口与 NapCat 按钮的准入。
    *
-   * ⚠️ 只查对端地址不够。用户浏览器里的任意网页都能用无预检的 `fetch`
-   * （`mode: 'no-cors'`）打到 `http://127.0.0.1:<port>`：响应读不到，但副作用照发生 ——
-   * 改 `whitelist` / `targetSessionId`、POST `/api/qq-bridge/napcat/launch` 启动 NapCat。
-   * 对端地址挡不住这条路：请求确实发自本机，发起者是**浏览器里的别的页面**。
+   * 本机回环照旧放行（命令行、SSH 隧道、本机面板）。本机上若 Origin/Referer 指向别的网站，
+   * 仍然拒绝：浏览器里的任意网页都能对 `127.0.0.1` 发无预检请求，会话也不能拿来盖过这条。
    *
-   * `content-type` 只在请求体非空时要求 `application/json`，理由有两条：
-   * ① 跨站 `fetch` 用 `mode: 'no-cors'` 时，`content-type` 只能是 CORS 安全列表里的值
-   * （`text/plain`、`application/x-www-form-urlencoded`、`multipart/form-data`），
-   * 所以“带体的 POST 必须声明 JSON”已经把这条攻击挡住；
-   * ② 空体的 POST 改不了任何东西：设置接口没有请求体就没有 `set` / `unset`，
-   * NapCat 的三个动作只由 URL 决定。来源判定对所有请求都生效，那才是主防线。
+   * 不是回环地址时，不再要求 trustedHosts。DSH 面板自己的登录已经挡住了未授权访问：
+   * `connection.requestRejection` 为空表示宿主已经放行；它因主机围栏返回 403 时，
+   * 再看会话是否已登录。没有可确认的会话就拒绝，避免把接口开成公网。
    *
-   * 判定顺序固定：地址 → 来源 → 带体 POST 的 `content-type`。放行返回 `null`，拒绝返回中文原因。
+   * 带体 POST 仍必须声明 JSON。放行返回 `null`，拒绝返回中文原因。
    */
+  function rejectionStatus(rejection) {
+    if (rejection == null || rejection === false || rejection === 0 || rejection === '') return 0
+    if (typeof rejection === 'number') return rejection
+    if (typeof rejection === 'object') {
+      const status = rejection.status ?? rejection.statusCode
+      if (typeof status === 'number') return status
+    }
+    return 403
+  }
+
+  function panelHttps() {
+    const protocol = ctx.webServer?.protocol ?? ctx.get?.('webServer')?.protocol
+    return String(protocol ?? '') === 'https:'
+  }
+
+  function authSaysYes(fn, thisArg, req) {
+    if (typeof fn !== 'function') return false
+    const secure = panelHttps()
+    try {
+      const result = fn.length >= 2 ? fn.call(thisArg, req, secure) : fn.length === 1 ? fn.call(thisArg, req) : fn.call(thisArg)
+      return result === true
+    } catch {
+      return false
+    }
+  }
+
+  /** 宿主已经认出这是一次登录过的 DSH 面板请求。认不出就当没有。 */
+  function panelSessionAllows(req) {
+    const connection = ctx.get?.('connection')
+    if (!connection || typeof connection !== 'object') return false
+    if (typeof connection.requestRejection === 'function') {
+      let rejection
+      try {
+        rejection = connection.requestRejection(req)
+      } catch {
+        return false
+      }
+      const status = rejectionStatus(rejection)
+      if (status === 0) return true
+      if (status === 401 || status !== 403) return false
+    }
+    return (
+      authSaysYes(connection.isAuthenticated, connection, req) ||
+      authSaysYes(connection.browserAuth?.isAuthenticated, connection.browserAuth, req) ||
+      authSaysYes(connection.auth?.isAuthenticated, connection.auth, req)
+    )
+  }
+
   function checkLocalRequest(req) {
     const addr = String(req?.socket?.remoteAddress ?? '')
-    if (!isLoopbackAddress(addr)) {
-      return `只接受本机请求（对端地址 ${addr === '' ? '未知' : addr}）。这个接口能改设置、也能启动 NapCat，不对外网或局域网开放。`
-    }
-    // 有 Origin 就只认它；没有 Origin 才看 Referer。两者都没有 = 命令行工具或卡片同源请求，放行。
+    const loopback = isLoopbackAddress(addr)
     const origin = String(req?.headers?.origin ?? '').trim()
     const referer = String(req?.headers?.referer ?? '').trim()
     const source = origin !== '' ? origin : referer
-    if (source !== '') {
+    if (loopback && source !== '') {
       const host = originHostOf(source)
       if (host === null || !isLoopbackHost(host)) {
         return `只接受本机页面发来的请求（来源 ${source} 不是本机）。请在本机打开的 DSH 界面里操作。`
       }
+    }
+    if (!loopback && !panelSessionAllows(req)) {
+      const who = addr === '' ? '未知' : addr
+      return `这个接口不按回环地址拦截。对端 ${who} 不是本机，且没有已通过的 DSH 面板会话。请用带登录 token 的面板打开后再改设置（不需要再配 trustedHosts）。`
     }
     if (String(req?.method ?? '').toUpperCase() === 'POST' && requestHasBody(req) && !isJsonContentType(req)) {
       const got = String(req?.headers?.['content-type'] ?? '')
@@ -647,6 +713,8 @@ export function apply(ctx, config) {
     lastDestination: null,
     lastMessageId: null,
     listening: null,
+    /** destKey（group:<id> / private:<id>）→ 会话 id。perGroup 时每个群、每个私聊一条。 */
+    sessionByDest: {},
   }
   loadState()
 
@@ -661,6 +729,13 @@ export function apply(ctx, config) {
       if (raw?.lastDestination && typeof raw.lastDestination === 'object') state.lastDestination = raw.lastDestination
       if (raw?.lastMessageId !== undefined) state.lastMessageId = raw.lastMessageId
       if (raw?.listening && typeof raw.listening === 'object') state.listening = raw.listening
+      if (raw?.sessionByDest && typeof raw.sessionByDest === 'object') {
+        const next = {}
+        for (const [key, value] of Object.entries(raw.sessionByDest)) {
+          if (typeof key === 'string' && typeof value === 'string' && value.trim() !== '') next[key] = value.trim()
+        }
+        state.sessionByDest = next
+      }
     } catch (error) {
       logger.warn(`state load failed: ${error?.message ?? error}`)
     }
@@ -937,10 +1012,78 @@ export function apply(ctx, config) {
     return undefined
   }
 
-  async function ensureTargetAgent() {
+  function trackedSessionIds(s = readSettings()) {
+    const ids = new Set()
+    if (s.sessionScope === 'perGroup') {
+      for (const id of Object.values(state.sessionByDest || {})) {
+        if (id) ids.add(id)
+      }
+      return ids
+    }
+    if (s.targetSessionId) ids.add(s.targetSessionId)
+    return ids
+  }
+
+  function isTrackedSession(sessionId) {
+    if (!sessionId) return false
+    return trackedSessionIds().has(sessionId)
+  }
+
+  async function resolveDefaultAgentOptions() {
+    try {
+      const fallback = ctx.get('agentDefaultModel')
+      const sel = typeof fallback?.currentSelection === 'function' ? fallback.currentSelection() : undefined
+      if (sel?.provider && sel?.model) {
+        return {
+          provider: sel.provider,
+          model: sel.model,
+          ...(sel.reasoningEffort ? { reasoningEffort: sel.reasoningEffort } : {}),
+        }
+      }
+    } catch {
+      // 没有默认模型时，新建会话仍继续；提示词里的 {{model}} 会在那一轮暴露。
+    }
+    return undefined
+  }
+
+  async function createDestSession(msg, s) {
+    const key = destinationKeyOf(msg)
+    if (!key) throw new Error('无法为该消息确定会话目的地')
+    if (typeof ctx.agents?.create !== 'function') {
+      throw new Error('这个宿主没有 agents.create，无法为每个群单独开会话')
+    }
+    const sessionId = `qq-${randomUUID().replace(/-/g, '').slice(0, 12)}`
+    const agentOptions =
+      (s.targetSessionId ? await resolveResumeAgentOptions(s.targetSessionId) : null) ||
+      (await resolveDefaultAgentOptions())
+    const label = msg.groupId
+      ? `QQ群 ${msg.groupName || msg.groupId}`
+      : `QQ私聊 ${msg.nickname || msg.userId}`
+    const handle = await ctx.agents.create({
+      sessionId,
+      ...(agentOptions ? { agentOptions } : {}),
+      ...(s.agentPreset ? { setup: mountPreset, meta: { agentPreset: s.agentPreset } } : {}),
+    })
+    state.sessionByDest[key] = sessionId
+    saveState()
+    handles.set(sessionId, handle)
+    mountUsagePrompt(handle.agent)
+    logger.info(`created per-dest session ${sessionId} for ${key} (${label})`)
+    return handle.agent
+  }
+
+  async function ensureTargetAgent(msg) {
     const s = readSettings()
-    const id = s.targetSessionId
-    if (!id) throw new Error('未配置 targetSessionId')
+    let id
+    if (s.sessionScope === 'perGroup') {
+      const key = destinationKeyOf(msg)
+      if (!key) throw new Error('perGroup 模式下缺少 groupId 或 userId')
+      id = state.sessionByDest[key]
+      if (!id) return await createDestSession(msg, s)
+    } else {
+      id = s.targetSessionId
+      if (!id) throw new Error('未配置 targetSessionId')
+    }
 
     const live = ctx.agents.get(id)
     if (live) {
@@ -960,16 +1103,68 @@ export function apply(ctx, config) {
 
     // 显式 resume：这是与 dsh-cron 的关键差异 —— 目标会话没开着也能被唤醒。
     // ⚠️ 必须带 agentOptions（模型）—— 否则提示词里的 {{model}} 没值，整轮组装失败。
-    const agentOptions = await resolveResumeAgentOptions(id)
-    const handle = await ctx.agents.resume({
-      resumeSessionId: id,
-      ...(agentOptions ? { agentOptions } : {}),
-      ...(s.agentPreset ? { setup: mountPreset } : {}),
-    })
-    handles.set(id, handle)
-    mountUsagePrompt(handle.agent)
-    logger.info(`resumed target session ${id}`)
-    return handle.agent
+    try {
+      const agentOptions = await resolveResumeAgentOptions(id)
+      const handle = await ctx.agents.resume({
+        resumeSessionId: id,
+        ...(agentOptions ? { agentOptions } : {}),
+        ...(s.agentPreset ? { setup: mountPreset } : {}),
+      })
+      handles.set(id, handle)
+      mountUsagePrompt(handle.agent)
+      logger.info(`resumed target session ${id}`)
+      return handle.agent
+    } catch (error) {
+      if (s.sessionScope !== 'perGroup') throw error
+      logger.warn(`resume ${id} 失败，改为新建：${error?.message ?? error}`)
+      const key = destinationKeyOf(msg)
+      if (key) delete state.sessionByDest[key]
+      saveState()
+      return await createDestSession(msg, s)
+    }
+  }
+
+  /**
+   * QQ 驱动的一轮结束后，把该会话压到 maxRecentTurns。
+   * 0 或宿主没有 compaction 时什么都不做。压缩失败只记日志，不挡出站。
+   */
+  async function maybeTrimSession(agent) {
+    const max = readSettings().maxRecentTurns
+    if (!max || max <= 0 || !agent) return
+    const compaction = ctx.get('compaction')
+    if (!compaction || typeof compaction.compactNow !== 'function') return
+    const countTurns = () => {
+      try {
+        const events = typeof agent.session?.events === 'function' ? agent.session.events() : agent.session?.events
+        const list = Array.isArray(events) ? events : []
+        let turns = 0
+        for (const event of list) {
+          if (event?.type === 'turn/end') turns += 1
+        }
+        if (turns > 0) return turns
+      } catch {
+        // 读不到事件就试投影
+      }
+      try {
+        const outline = agent.session?.projection?.turnOutline?.turns
+        if (Array.isArray(outline)) return outline.length
+      } catch {
+        // 投影也没有时当作不需要压缩
+      }
+      return 0
+    }
+    for (let i = 0; i < 6; i++) {
+      const turns = countTurns()
+      if (!turns || turns <= max) return
+      try {
+        const result = await compaction.compactNow(agent)
+        if (!result) return
+        logger.info(`session ${agent.session?.id ?? agent.id} trimmed via compact (turns~${turns} > ${max})`)
+      } catch (error) {
+        logger.warn(`compact trim failed: ${error?.message ?? error}`)
+        return
+      }
+    }
   }
 
   /** resume 时把 preset 挂到该 agent 的 setup 上（可选）。 */
@@ -1318,7 +1513,7 @@ export function apply(ctx, config) {
     return { blocks, failures }
   }
 
-  /** 记住“这条消息是谁从哪儿发的”，出站回复用它当目的地。 */
+  /** 记住“这条消息是谁从哪儿发的”。没钉住某一轮时，出站回落到这里。 */
   function rememberDestination(msg) {
     if (msg.groupId) state.lastDestination = { kind: 'group', groupId: String(msg.groupId) }
     else if (msg.userId) state.lastDestination = { kind: 'private', userId: String(msg.userId) }
@@ -1326,6 +1521,22 @@ export function apply(ctx, config) {
       state.lastMessageId = String(msg.messageId)
     }
     saveState()
+  }
+
+  /** 一条消息对应的出站目的地。没有群号也没有私聊号就是 null。 */
+  function destFromMsg(msg) {
+    if (msg?.groupId) return { kind: 'group', groupId: String(msg.groupId) }
+    if (msg?.userId) return { kind: 'private', userId: String(msg.userId) }
+    return null
+  }
+
+  function messageIdOf(msg) {
+    if (msg?.messageId === undefined || msg?.messageId === null || String(msg.messageId) === '') return null
+    return String(msg.messageId)
+  }
+
+  function sessionIdOf(agent) {
+    return agent?.session?.id || agent?.id || null
   }
 
   /**
@@ -1385,8 +1596,9 @@ export function apply(ctx, config) {
 
     // 唤醒失败必须能从事后排查里看出来：台账条目改成 `wake-failed`，调用方拿到
     // `wakeFailed` / `error`，函数**不向上抛**。
-    // 投递前会置位三面闸门标志。投递失败时必须回滚到置位前的值，否则一次失败的唤醒
-    // 会污染下一轮的归属判定。`gateBeforeWake` 在置位点紧前面快照，两者之间没有 await。
+    // 投递前会置位闸门标志，并把这一轮的出站目的地钉住。投递失败时必须回滚到置位前的值，
+    // 否则一次失败的唤醒会污染下一轮的归属判定，或把目的地钉在没发出去的那条消息上。
+    // `gateBeforeWake` 在置位点紧前面快照，两者之间没有 await。
     // 失败路径在清缓冲之前返回，所以缓冲不丢。
     let gateBeforeWake = null
     const failWake = (error) => {
@@ -1395,6 +1607,17 @@ export function apply(ctx, config) {
         pendingFromQQ = gateBeforeWake.pendingFromQQ
         currentTurnFromQQ = gateBeforeWake.currentTurnFromQQ
         claimedFromQQ = gateBeforeWake.claimedFromQQ
+        pendingDestination = gateBeforeWake.pendingDestination
+        currentTurnDestination = gateBeforeWake.currentTurnDestination
+        pendingMessageId = gateBeforeWake.pendingMessageId
+        currentTurnMessageId = gateBeforeWake.currentTurnMessageId
+        const sid = gateBeforeWake.wakeSessionId
+        if (sid) {
+          if (gateBeforeWake.pinHad) sessionPins.set(sid, gateBeforeWake.pinSnap)
+          else sessionPins.delete(sid)
+          if (gateBeforeWake.queuedHad) sessionPinQueued.set(sid, gateBeforeWake.queuedSnap)
+          else sessionPinQueued.delete(sid)
+        }
       }
       inboundLog.decision = 'wake-failed'
       inboundLog.error = reason
@@ -1405,7 +1628,7 @@ export function apply(ctx, config) {
 
     let agent
     try {
-      agent = await ensureTargetAgent()
+      agent = await ensureTargetAgent(msg)
     } catch (error) {
       // 还没走到置位点，闸门标志本来就是“置位前的值”，不必回滚。
       return failWake(error)
@@ -1448,17 +1671,56 @@ export function apply(ctx, config) {
     // `turn/start` 当场就到达，而它会快照 pending/claim。晚一步置位 = “标还没立、轮已经开了”，
     // 整轮哑火。（2026-09-30 真机抓到的时序：gate = { pending: true, current: false,
     // turnActive: true, claimed: false } —— pending 对、current 错，就是置位晚了一拍的指纹。）
-    // 置位之前快照这三面闸门标志：投递失败时按它回滚（见上面的 failWake）。
-    gateBeforeWake = { pendingFromQQ, currentTurnFromQQ, claimedFromQQ }
+    // 置位之前快照闸门标志和目的地钉：投递失败时按它回滚（见上面的 failWake）。
+    const wakeDest = destFromMsg(msg)
+    const wakeMessageId = messageIdOf(msg)
+    const wakeSessionId = sessionIdOf(agent)
+    const pinHad = Boolean(wakeSessionId && sessionPins.has(wakeSessionId))
+    const queuedHad = Boolean(wakeSessionId && sessionPinQueued.has(wakeSessionId))
+    gateBeforeWake = {
+      pendingFromQQ,
+      currentTurnFromQQ,
+      claimedFromQQ,
+      pendingDestination,
+      currentTurnDestination,
+      pendingMessageId,
+      currentTurnMessageId,
+      wakeSessionId,
+      pinHad,
+      pinSnap: pinHad ? cloneDestPin(sessionPins.get(wakeSessionId)) : undefined,
+      queuedHad,
+      queuedSnap: queuedHad ? cloneDestPin(sessionPinQueued.get(wakeSessionId)) : undefined,
+    }
     pendingFromQQ = true
+    pendingDestination = wakeDest
+    pendingMessageId = wakeMessageId
     // 没有正在跑的轮就顺手认领这一轮（会观察到 turn/start）；有正在跑的轮则不能改它。
+    // 插话插进的是正在跑的那一轮，目的地也改成这条唤醒的群，避免回错群。
+    const claimCurrent = !turnActive || wantSteer
     if (!turnActive) {
       currentTurnFromQQ = true
       claimedFromQQ = true
+      currentTurnDestination = wakeDest
+      currentTurnMessageId = wakeMessageId
     }
     // 插话插进的是**正在跑的那一轮**：从这一刻起这一轮里就有 QQ 消息要回，
     // 所以归属也得跟着算 QQ —— 否则工具会在这一轮里被拒，插话反而变成哑火。
-    if (wantSteer) currentTurnFromQQ = true
+    if (wantSteer) {
+      currentTurnFromQQ = true
+      currentTurnDestination = wakeDest
+      currentTurnMessageId = wakeMessageId
+    }
+    // 按会话钉住。perGroup 时两路会话会重叠，进程级的 currentTurnDestination 盖不住。
+    // 这一轮还没人占着，或这次是插话：钉在当前轮上。已经有一轮在跑且只是排队：先排到下一轮。
+    if (wakeSessionId && wakeDest) {
+      const existing = sessionPins.get(wakeSessionId)
+      if (!existing || claimCurrent) {
+        if (claimCurrent) sessionPinQueued.delete(wakeSessionId)
+        sessionPins.set(wakeSessionId, { dest: wakeDest, messageId: wakeMessageId, owned: claimCurrent })
+      } else {
+        sessionPinQueued.set(wakeSessionId, { dest: wakeDest, messageId: wakeMessageId })
+      }
+    }
 
     const send = () => {
       if (wantSteer && typeof agent.steer === 'function') return agent.steer(injected)
@@ -1705,15 +1967,18 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 出站：把目标会话的回复发给“最后一次入站的目的地”。
+   * 出站：发给调用方给定的目的地；没给就用这一轮钉住的，再没有才用最后一次入站。
    * M2 之前这里只是打日志的桩。
    *
    * 超长文本**一条都不发**：QQ 不该发长消息，所以只把拒绝结果回给调用方
    * （`reason: 'too-long'`），由模型缩短后重发。
+   *
+   * `options.quoteMessageId` 显式传入（含 null）时就用它，避免发的时候 `lastMessageId`
+   * 已经被另一条消息改掉。省略则用这一轮钉住的消息 id，再没有用 `lastMessageId`。
    */
-  async function sendToQQ(text, destination) {
+  async function sendToQQ(text, destination, options) {
     const s = readSettings()
-    const dest = destination ?? state.lastDestination
+    const dest = destination ?? currentTurnDestination ?? state.lastDestination
     if (!dest?.kind) {
       logger.warn('outbound dropped: no destination yet (还没有任何非丢弃的入站消息)')
       return { sent: 0, dropped: true, reason: 'no-destination' }
@@ -1734,9 +1999,12 @@ export function apply(ctx, config) {
       return { sent: 0, dropped: true, reason: 'too-long', limit: s.replyMaxChars, length }
     }
 
+    const quoteId = options && Object.prototype.hasOwnProperty.call(options, 'quoteMessageId')
+      ? options.quoteMessageId
+      : (currentTurnMessageId || state.lastMessageId)
     const segments = []
-    if (s.replyWithQuote && state.lastMessageId) {
-      segments.push({ type: 'reply', data: { id: String(state.lastMessageId) } })
+    if (s.replyWithQuote && quoteId) {
+      segments.push({ type: 'reply', data: { id: String(quoteId) } })
     }
     segments.push({ type: 'text', data: { text: body } })
 
@@ -1771,8 +2039,10 @@ export function apply(ctx, config) {
     // 用法说明的正文是**挂载那一刻的快照**：设置或文案一变就要重挂。
     // 判据在 `mountUsagePrompt()` 里比渲染后的正文，这里只管把它叫过来 ——
     // 正文没变时它会自己早退，所以不必在外面再维护一份“依赖哪些设置”的清单。
-    const live = s.targetSessionId ? ctx.agents.get(s.targetSessionId) : undefined
-    if (live) mountUsagePrompt(live)
+    for (const id of trackedSessionIds(s)) {
+      const live = ctx.agents.get(id)
+      if (live) mountUsagePrompt(live)
+    }
 
     const key = `${s.onebotUrl}\u0000${s.accessTokenEnv}`
     if (key === lastTransportKey) return
@@ -1788,7 +2058,8 @@ export function apply(ctx, config) {
     applySettingChanges()
   }))
 
-  // 0.2.0：宿主设置桥写不了 → 自己挂一条**只服务本机**的设置接口（范本：皮肤中心的 /api/skin-center/...）。
+  // 0.2.0：宿主设置桥写不了 → 自己挂设置接口（范本：皮肤中心的 /api/skin-center/...）。
+  // 本机回环直接可用；经反向代理时认 DSH 面板会话，不要求 trustedHosts。
   // 可选注入：没有 webServer 服务的部署照常工作（只是卡片仍拿不到可写域）。
   // ⚠️ **只在非老模型（0.2.0 那类）宿主上挂**：老模型（0.1.5）读的是 settings 命名空间、不读这个文件，
   // 挂上去只会是个“改了不生效”的死接口。（`ctx.inject` 是 Cordis 核心 API，真实宿主一定有，
@@ -1809,7 +2080,7 @@ export function apply(ctx, config) {
           // 卸载时路由可能已经不在了，忽略
         }
       })
-      logger.info('设置接口已挂载：/api/qq-bridge/settings（仅本机）')
+      logger.info('设置接口已挂载：/api/qq-bridge/settings（本机，或已登录的 DSH 面板）')
     } catch (error) {
       logger.warn(`设置接口挂载失败（可能同路径已被占用）：${error?.message ?? error}`)
     }
@@ -1843,6 +2114,31 @@ export function apply(ctx, config) {
   let turnActive = false
   /** 注入时对“下一轮”的直接认领（只可能由我们自己的注入置位，比 pending 权威）。 */
   let claimedFromQQ = false
+  /**
+   * 出站目的地钉在“这一轮的唤醒”，不跟全局 lastDestination 走。
+   * 别的群只被记录时仍会改 lastDestination，但不能把正在回答的这一轮带跑。
+   * sessionPins 按会话各记一份：perGroup 时两路会话会重叠，一个全局变量盖不住。
+   * owned=true 表示钉的是当前这一轮；排队等下一轮的先放 sessionPinQueued。
+   */
+  let pendingDestination = null
+  let currentTurnDestination = null
+  let pendingMessageId = null
+  let currentTurnMessageId = null
+  const sessionPins = new Map()
+  const sessionPinQueued = new Map()
+  function cloneDestPin(pin) {
+    if (!pin) return undefined
+    return {
+      dest: pin.dest ? { ...pin.dest } : null,
+      messageId: pin.messageId ?? null,
+      owned: pin.owned === true,
+    }
+  }
+  function sameDest(a, b) {
+    if (!a?.kind || !b?.kind || a.kind !== b.kind) return false
+    if (a.kind === 'group') return String(a.groupId) === String(b.groupId)
+    return String(a.userId) === String(b.userId)
+  }
   /**
    * “非 QQ 轮二次确认”状态：本轮已经回过一次“确认要发吗”。
    * `turn/start` 与 `turn/end` 都清零，所以它严格属于**某一轮**，绝不会跨轮生效。
@@ -1896,8 +2192,7 @@ export function apply(ctx, config) {
   }
 
   ctx.on('session/event', guarded('session/event', (session, event) => {
-    const targetId = readSettings().targetSessionId
-    if (!targetId || session?.id !== targetId) return
+    if (!isTrackedSession(session?.id)) return
     const data = event?.data ?? {}
 
     // 一轮开始：把“当前轮来源”定下来。
@@ -1907,7 +2202,33 @@ export function apply(ctx, config) {
       // 注入时的“认领”优先：`claimedFromQQ` **只可能**由我们自己的注入置位，比 pending 更权威。
       //（早先这里无条件取 pending —— 一旦 pending 被同轮里的别的消息污染（harness 上下文）就哑火。）
       currentTurnFromQQ = claimedFromQQ || pendingFromQQ
+      const sid = session?.id ?? null
+      const pin = sid ? sessionPins.get(sid) : null
+      if (currentTurnFromQQ) {
+        if (pin?.dest) {
+          pin.owned = true
+          sessionPins.set(sid, pin)
+          currentTurnDestination = pin.dest
+          currentTurnMessageId = pin.messageId ?? null
+        } else if (claimedFromQQ && pendingDestination) {
+          // 唤醒时还没有会话 id，只能用这次认领带上的目的地。
+          currentTurnDestination = pendingDestination
+          currentTurnMessageId = pendingMessageId ?? null
+        } else if (claimedFromQQ) {
+          currentTurnDestination = currentTurnDestination || state.lastDestination
+          currentTurnMessageId = currentTurnMessageId || state.lastMessageId
+        } else {
+          // 多轮延续：这一轮没有新的唤醒钉，回落到最后一次非丢弃入站。
+          currentTurnDestination = state.lastDestination
+          currentTurnMessageId = state.lastMessageId
+        }
+      } else if (!pin?.owned) {
+        currentTurnDestination = null
+        currentTurnMessageId = null
+      }
       claimedFromQQ = false
+      pendingDestination = null
+      pendingMessageId = null
       // 新一轮：非 QQ 轮的“二次确认”清零（否则上一轮的确认会跨轮生效）。
       nonQQConfirmPending = false
       return
@@ -1930,7 +2251,7 @@ export function apply(ctx, config) {
       // ⚠️ 两个条件都要：`mine` 是“认出来了”（消息 id / 正文前缀），`plugin === PLUGIN_TAG`
       // 是“来源字段还老实”时的兜底。**少任何一个都会哑火** —— 写这段时我先把后者删了，
       // 测试立刻挂了 8 条（真实链路里前缀一定匹配，但别把正确性押在“一定”上）。
-      if (mine || (kind === 'plugin' && plugin === PLUGIN_TAG) || kind === `plugin:${PACKAGE}`) {
+      if (mine || (kind === 'plugin' && plugin === PLUGIN_TAG) || kind === `plugin:${PACKAGE}` || kind === `plugin:${PACKAGE_LEGACY}`) {
         pendingFromQQ = true
         effect = 'pending=true（我们自己注入的 QQ 消息）'
       } else if (kind === 'user') {
@@ -1968,11 +2289,36 @@ export function apply(ctx, config) {
       const raw = pendingReply
       pendingReply = null
       // 消费：这一轮结束，当前轮判定清空，等下一次 turn/start 重新快照。
+      // 目的地先摘下来再清。sendToQQ 是异步的，不能等它去读可能已被别的群改掉的 lastDestination。
       const fromQQ = currentTurnFromQQ
+      const sid = session?.id ?? null
+      const pin = sid ? sessionPins.get(sid) : null
+      const ownedPin = pin?.owned ? pin : null
+      const turnDest = ownedPin?.dest || currentTurnDestination
+      const turnMsgId = ownedPin ? ownedPin.messageId : currentTurnMessageId
+      if (ownedPin && sid) {
+        sessionPins.delete(sid)
+        const next = sessionPinQueued.get(sid)
+        sessionPinQueued.delete(sid)
+        if (next?.dest) sessionPins.set(sid, { dest: next.dest, messageId: next.messageId ?? null, owned: false })
+      }
+      const clearGlobal = !ownedPin || !currentTurnDestination || sameDest(currentTurnDestination, ownedPin.dest)
       currentTurnFromQQ = false
+      if (clearGlobal) {
+        currentTurnDestination = null
+        currentTurnMessageId = null
+      }
       turnActive = false
       claimedFromQQ = false
       nonQQConfirmPending = false
+      if (fromQQ) {
+        const liveAgent = ctx.agents.get(session.id)
+        if (liveAgent) {
+          Promise.resolve(maybeTrimSession(liveAgent)).catch((error) =>
+            logger.warn(`maybeTrimSession: ${error?.message ?? error}`),
+          )
+        }
+      }
       if (!raw) return
 
       // 闸门的第一道：**只发 QQ 唤醒的那一轮**。DSH 界面里聊出来的标记块一个字都不发。
@@ -2000,7 +2346,8 @@ export function apply(ctx, config) {
       // 被拒绝的（含超长）不落 outbox，否则台账里会多出一条 QQ 里根本没有的消息。
       // 被拒的结果记进独立的丢弃台账。
       const via = s.replyMode === 'always' ? 'always' : 'marker'
-      sendToQQ(text)
+      const outboundDest = turnDest || state.lastDestination
+      sendToQQ(text, outboundDest, { quoteMessageId: turnMsgId || null })
         .then((result) => {
           if (result?.dropped) {
             const detail = result.reason === 'too-long' ? `（${result.length} 字 > 上限 ${result.limit} 字）` : ''
@@ -2011,7 +2358,7 @@ export function apply(ctx, config) {
               reason: result.reason,
               limit: result.limit ?? null,
               length: result.length ?? null,
-              destination: state.lastDestination,
+              destination: outboundDest,
               sessionId: session.id,
             })
             // 回注会话：标记块模式下模型收不到任何反馈，会以为已经回复了。
@@ -2169,6 +2516,7 @@ export function apply(ctx, config) {
         return JSON.stringify({
           settings: s,
           targetLoaded: Boolean(live),
+          sessionByDest: state.sessionByDest,
           resumedHandles: [...handles.keys()],
           transport: transport.status(),
           visionModel: (await findVisionModel()) ?? '(没找到支持图片输入的模型)',
@@ -2232,6 +2580,7 @@ export function apply(ctx, config) {
         groupId: { type: 'string', description: '群 id（需在群白名单内）。' },
         nickname: { type: 'string', description: '发送者昵称（仅用于渲染与记录）。' },
         atSelf: { type: 'boolean', description: '是否 @ 了机器人。' },
+        messageId: { type: 'string', description: '原消息 id。出站引用时用它，不跟后来的入站混。' },
         dryRun: { type: 'boolean', description: 'true 时只返回决策、不注入。' },
       },
       output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
@@ -2243,6 +2592,7 @@ export function apply(ctx, config) {
           groupId: args.groupId ?? null,
           nickname: args.nickname ?? null,
           atSelf: args.atSelf === true,
+          messageId: args.messageId ?? null,
         }
         const preview = decide(msg, s)
         if (args.dryRun) return JSON.stringify({ preview, allowed: isAllowed(msg, s) }, null, 2)
@@ -2265,6 +2615,26 @@ export function apply(ctx, config) {
   //   ② 不是 QQ 唤醒的那一轮 → 第一次调用只回一句“确认要发吗”（**一个字都不发**），
   //      同一轮里再调一次才真的发。`nonQQConfirmPending` 按轮清零，不跨轮泄漏。
   // 返回**字符串**时调用方必须原样 return 它；返回 null = 放行。
+  /**
+   * 工具出站的目的地：显式 groupId / userId 优先，且不引用别的群的消息。
+   * 否则用这个会话钉住的目的地，再没有用当前轮，最后才是 lastDestination。
+   */
+  function resolveOutboundDest(args, exec) {
+    if (args?.groupId) {
+      return { dest: { kind: 'group', groupId: String(args.groupId) }, quoteMessageId: null }
+    }
+    if (args?.userId) {
+      return { dest: { kind: 'private', userId: String(args.userId) }, quoteMessageId: null }
+    }
+    const sid = exec?.agent?.session?.id || exec?.agent?.id || null
+    const pin = sid ? sessionPins.get(sid) : null
+    if (pin?.dest) return { dest: pin.dest, quoteMessageId: pin.messageId ?? null }
+    if (currentTurnDestination) {
+      return { dest: currentTurnDestination, quoteMessageId: currentTurnMessageId ?? null }
+    }
+    return { dest: state.lastDestination, quoteMessageId: state.lastMessageId ?? null }
+  }
+
   function outboundGate(action) {
     if (currentTurnFromQQ) return null
     if (!nonQQConfirmPending) {
@@ -2284,7 +2654,7 @@ export function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: 'qq_bridge_send',
     description:
-      '把一条消息发到 QQ（默认发给最后一次入站的目的地）。' +
+      '把一条消息发到 QQ（默认发给这一轮钉住的群或私聊；没钉住就用最后一次入站）。' +
       '**只有被 QQ 唤醒的那一轮才直接发得出去**：在 DSH 界面里直接对话时，第一次调用只会回一句' +
       '"本轮不是 QQ 发起的，确认要发吗"，同一轮里再调一次才真的发出去。' +
       'replyMode=tool 时这是唯一的出站方式；marker 模式下它是「直接发这一条」的旁路。' +
@@ -2292,24 +2662,21 @@ export function apply(ctx, config) {
       '发出去的内容会记进 outbox（via: tool）。',
     parameters: {
       text: { type: 'string', required: true, description: '要发送的文本；超过出站字数上限时不会发出。' },
-      userId: { type: 'string', description: '私聊目标 QQ 号；与 groupId 二选一，都不给则用最后一次入站目的地。' },
-      groupId: { type: 'string', description: '群号；与 userId 二选一。' },
+      userId: { type: 'string', description: '私聊目标 QQ 号；与 groupId 二选一，都不给则用这一轮钉住的目的地。' },
+      groupId: { type: 'string', description: '群号；与 userId 二选一。显式指定时不引用别的群的消息。' },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
-    async execute(args) {
+    async execute(args, exec) {
       // 来源闸门（2026-10-01 起是**二次确认**，不再是硬拒绝）：
       // 不是 QQ 唤醒的那一轮，第一次调用只回一句“确认要发吗”、**一个字都不发**；
       // 同一轮里再调一次才真的发出去。DSH 侧依然不会误发（多跨一道有意识的动作），
       // 但同时保住了“我确实想让你发到 QQ”这条能力 —— 以前是彻底发不出去。
       const blocked = outboundGate('qq_bridge_send')
       if (blocked !== null) return blocked
-      const dest = args.groupId
-        ? { kind: 'group', groupId: String(args.groupId) }
-        : args.userId
-          ? { kind: 'private', userId: String(args.userId) }
-          : undefined
+      const resolved = resolveOutboundDest(args, exec)
+      const dest = resolved.dest
       try {
-        const result = await sendToQQ(args.text, dest)
+        const result = await sendToQQ(args.text, dest, { quoteMessageId: resolved.quoteMessageId })
         // 只记真的发出去的：被拒绝的不落 outbox。
         if (result?.sent > 0) {
           recordOutbox({
@@ -2417,11 +2784,11 @@ export function apply(ctx, config) {
       fromLast: { type: 'boolean', description: 'save 时 true = 取缓冲区里最近一张图。' },
       mood: { type: 'string', description: '情绪分类，如 无语 / 开心 / 震惊。save 必填；send 只给 mood 时随机挑一张。' },
       description: { type: 'string', description: '这张图是什么。save 必填，之后识图与发送都用它。' },
-      groupId: { type: 'string', description: '发到哪个群；与 userId 二选一，都不给则用最后一次入站目的地。' },
+      groupId: { type: 'string', description: '发到哪个群；与 userId 二选一，都不给则用这一轮钉住的目的地。' },
       userId: { type: 'string', description: '发到哪个私聊 QQ 号。' },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
-    async execute(args) {
+    async execute(args, exec) {
       const store = loadStickerStore()
       const action = String(args.action ?? 'list')
       try {
@@ -2510,11 +2877,7 @@ export function apply(ctx, config) {
             }, null, 2)
           }
 
-          const dest = args.groupId
-            ? { kind: 'group', groupId: String(args.groupId) }
-            : args.userId
-              ? { kind: 'private', userId: String(args.userId) }
-              : state.lastDestination
+          const dest = resolveOutboundDest(args, exec).dest
           if (!dest?.kind) {
             return JSON.stringify({
               ok: false,
@@ -2786,11 +3149,46 @@ export function apply(ctx, config) {
   // ── 卡片上的三个操作按钮（打开 WebUI / 启动 NapCat / 打开文件夹）─────────────
   //
   // ⚠️ 这三条路由**不受 legacySettings 门控**：它们只管启动与打开，跟“设置值存在哪”无关，
-  //    两代宿主都要挂。仍然只服务本机 —— 它们能启动进程、能开文件管理器。
+  //    两代宿主都要挂。准入与设置接口相同：本机可以直接用，反向代理要带已登录的面板会话。
+
+  /** 回环 WebUI 打不开时给卡片的说明。不含 token。 */
+  const WEBUI_LOOPBACK_HINT =
+    '这个地址是 127.0.0.1 或 localhost，只有跑着 NapCat 的那台机器能打开。远程使用请填写「NapCat 网页管理地址」。'
+
+  /** 安装目录不存在。把用户填过的路径说出来，但不另猜一个目录。 */
+  function napcatDirMissingMessage(installDir) {
+    return `目录不存在：${installDir}。自己部署或 Docker 里的 NapCat 通常不在默认位置，请把「NapCat 安装目录」改成实际路径。插件不会猜一个路径。`
+  }
+
+  /** 公开地址没带 token 时，补上 webui.json 里的那个。已有 token 则保持原样。解析失败就原样返回。 */
+  function appendWebuiToken(url, token) {
+    if (token === '') return url
+    let parsed
+    try {
+      parsed = new URL(url)
+    } catch {
+      return url
+    }
+    const existing = parsed.searchParams.get('token')
+    if (existing !== null && existing !== '') return url
+    parsed.searchParams.set('token', token)
+    return parsed.toString()
+  }
+
+  function webuiUrlIsLoopback(url) {
+    try {
+      return isLoopbackHost(new URL(url).hostname)
+    } catch {
+      return false
+    }
+  }
 
   /**
-   * 读 NapCat 的 WebUI 地址（`<configDir>/webui.json`）。
+   * 读 NapCat 的 WebUI 地址。
    *
+   * 设置里填了 `napcatWebuiUrl` 就用它（没带 token 时才从 webui.json 补上）。
+   * 没填则读 `<configDir>/webui.json`；文件没有时仍按 127.0.0.1:6099 给出地址，按钮保持可点，
+   * 并用 webuiLoopbackOnly / webuiHint 说明只有本机打得开。
    * configDir 的取法与 napcatConfigure 一致：安装目录里没有 `config/` 时，用 QQ 那边已有的那个。
    * 返回值里**只有布尔量**说明 token 有没有；token 本身只拼进 webuiUrl，绝不写日志。
    */
@@ -2804,12 +3202,23 @@ export function apply(ctx, config) {
       const parsed = JSON.parse(readFileSync(join(configDir, 'webui.json'), 'utf8'))
       cfg = parsed && typeof parsed === 'object' ? parsed : undefined
     } catch {
-      // 文件不存在或不是 JSON 都当“没读到” —— 卡片上会显示“没读到 webui.json”。
       cfg = undefined
     }
     const host = String(cfg?.host || '127.0.0.1')
     const port = Number(cfg?.port ?? 6099) || 6099
     const token = typeof cfg?.token === 'string' ? cfg.token : ''
+    const fromFile = `http://${host}:${port}/webui${token === '' ? '' : `?token=${encodeURIComponent(token)}`}`
+    const override = String(s.napcatWebuiUrl || '').trim()
+    const webuiUrl = override === '' ? fromFile : appendWebuiToken(override, token)
+    const loopback = webuiUrlIsLoopback(webuiUrl)
+    const installDirExists = existsSync(installDir)
+    let webuiHint = ''
+    if (loopback) {
+      webuiHint =
+        cfg === undefined && override === ''
+          ? '没读到 webui.json，先按本机 127.0.0.1:6099 打开。这个地址只有跑着 NapCat 的那台机器能用。远程使用请填写「NapCat 网页管理地址」。'
+          : WEBUI_LOOPBACK_HINT
+    }
     return {
       ok: true,
       installDir,
@@ -2817,7 +3226,11 @@ export function apply(ctx, config) {
       configFound: cfg !== undefined,
       port,
       hasToken: token !== '',
-      webuiUrl: `http://${host}:${port}/webui${token === '' ? '' : `?token=${encodeURIComponent(token)}`}`,
+      webuiUrl,
+      webuiLoopbackOnly: loopback,
+      webuiHint,
+      installDirExists,
+      ...(installDirExists ? {} : { installDirMissingHint: napcatDirMissingMessage(installDir) }),
     }
   }
 
@@ -2825,7 +3238,7 @@ export function apply(ctx, config) {
   function revealNapcatDir() {
     const s = readSettings()
     const installDir = s.napcatInstallDir || defaultInstallDir(home)
-    if (!existsSync(installDir)) throw new Error(`目录不存在：${installDir}`)
+    if (!existsSync(installDir)) throw new Error(napcatDirMissingMessage(installDir))
     const command =
       process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open'
     const child = spawn(command, [installDir], { detached: true, stdio: 'ignore' })
@@ -2901,7 +3314,7 @@ export function apply(ctx, config) {
           }
         }
       })
-      logger.info('NapCat 操作接口已挂载：/api/qq-bridge/napcat{,/launch,/reveal}（仅本机）')
+      logger.info('NapCat 操作接口已挂载：/api/qq-bridge/napcat{,/launch,/reveal}（本机，或已登录的 DSH 面板）')
     } catch (error) {
       for (const dispose of disposes) {
         try {
@@ -2966,7 +3379,7 @@ export function apply(ctx, config) {
       off: { type: 'boolean', description: 'true = 立刻关闭监听窗口。' },
     },
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
-    async execute(args) {
+    async execute(args, exec) {
       if (args.off === true) {
         state.listening = null
         saveState()
@@ -2976,7 +3389,7 @@ export function apply(ctx, config) {
       if (args.minutes === undefined || args.minutes === null) {
         return JSON.stringify({ listening: state.listening, now: Date.now() }, null, 2)
       }
-      const dest = state.lastDestination
+      const dest = resolveOutboundDest({}, exec).dest
       if (!dest?.kind) {
         return JSON.stringify({ error: '还没有任何入站目的地（先等一条非丢弃的 QQ 消息）' }, null, 2)
       }
@@ -2994,6 +3407,19 @@ export function apply(ctx, config) {
   }))
 
   logger.info(`ready (target=${readSettings().targetSessionId || '未设置'}, onebot=${readSettings().onebotUrl || '未配置'}, state=${statePath})`)
+}
+
+/** 会话范围：只认 single | perGroup。别的值（含空）回落到 single，与上游单会话一致。 */
+export function normalizeSessionScope(raw) {
+  return raw === 'perGroup' ? 'perGroup' : 'single'
+}
+
+/** 每个会话保留的最近轮数。非数字回落 40；夹在 0–500。0 = 不限制。 */
+export function normalizeMaxRecentTurns(raw) {
+  if (raw === undefined || raw === null || raw === '') return 40
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return 40
+  return Math.max(0, Math.min(500, Math.floor(n)))
 }
 
 /** 出站方式的归一化：只认 'marker' | 'tool' | 'always'，别的一律当 'marker'。导出是为了可测试。 */
@@ -3029,7 +3455,7 @@ export function buildUsagePrompt(s = {}) {
   const maxChars = usagePromptMaxChars(s)
   const mode = normalizeReplyMode(s?.replyMode)
   return [
-    '你正通过 dsh-qq-bridge 连着 QQ（可能是群聊，也可能是私聊）。',
+    '你正通过 dsh-qq-bot 连着 QQ（可能是群聊，也可能是私聊）。',
     '',
     '**下面这些规矩只对「被 QQ 唤醒的那一轮」生效** —— 判据是那一轮的用户消息带 `[QQ · …]` 前缀。',
     '会话发起人也可能在 **DSH 界面里直接跟你说话**：那种消息**不带**前缀，按平常方式回答就行，',

@@ -1,4 +1,6 @@
-# HANDOVER —— dsh-qq-bridge 交接说明
+# HANDOVER —— 上游 dsh-qq-bridge 交接说明
+
+> 这份交接说明来自上游 sj244/dsh-qq-bridge。本 fork 的包名是 **dsh-qq-bot**，Cordis 插件 id 仍是 `qq-bridge`。文中的本机路径、会话 id 若出现占位符，不要换成真实环境。
 
 > 交接对象：接手本项目的专门 agent
 > 交接人：DSH 工作区会话 `<HANDOVER_SESSION>` 的 agent
@@ -137,7 +139,7 @@ ctx.on('session/event', (session, event) => {
 ```
 
 - `sendToQQ(text, destination?)` **已经是真实发送**（不再是桩）：
-  目的地默认取 `state.lastDestination`（入站时记住的**最后一次来源**，持久化），
+  目的地优先用这一轮唤醒时钉住的群或私聊；没有钉时才取 `state.lastDestination`（入站时记住的最后一次来源，持久化），
   也可以用参数显式指定；私聊发 `send_private_msg`、群发 `send_group_msg`。
 - 按 `replyMaxChars`（下限 100）判定，超长一条都不发；`replyWithQuote` 时回复带 reply 段引用触发消息。
 - **连不上或还没有目的地时丢弃并记日志**（不静默排队堆积）。
