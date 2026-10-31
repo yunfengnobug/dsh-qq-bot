@@ -150,15 +150,13 @@ New-Item -ItemType Junction `
 
 ### 以后怎么发版
 
-维护者按这个顺序，不要跳：
-
 1. 改 `package.json` 的 `version`。
-2. 在 [`CHANGELOG.md`](./CHANGELOG.md) 顶部写这一版做了什么。
-3. 提交并合进 main。
-4. 在含这个版本号的提交上打 annotated tag：`vX.Y.Z`。
-5. 用 CHANGELOG 里对应那一节的中文摘要发 GitHub Release。
+2. 在 [`CHANGELOG.md`](./CHANGELOG.md) 顶部写这一版。
+3. 推到 `main`。
 
-Release 不附带密钥、日志或本机文件。源码压缩包让 GitHub 自己生成即可，不必另外上传。用户侧安装优先用 npm 上的 `@fengye_nobug/dsh-qq-bot@版本`，不要把 main 当稳定版。见[用 npm 安装](#用-npm-安装)。
+[`.github/workflows/npm-publish.yml`](./.github/workflows/npm-publish.yml) 看到 npm 上还没有 `@fengye_nobug/dsh-qq-bot` 的这一版时，用 Secret `NPM_TOKEN` 执行 `npm publish --access public`，并补 tag `vX.Y.Z` 和 GitHub Release（正文用 CHANGELOG 里这一节）。已经发布过就跳过，任务成功。版本号不变不会再次发布。
+
+`NPM_TOKEN` 在 GitHub → Settings → Secrets and variables → Actions 配一次：npm Automation token，或带 Bypass 2FA、能发布 `@fengye_nobug` 的 token。不要写进仓库。Actions 页也可以手动运行「发布到 npm」。发布成功但 Release 还没有时，重跑同一次 workflow。Release 不附带密钥、日志或本机文件。
 
 ## 用 npm 安装
 
@@ -178,12 +176,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.5
 
 一键更新的顺利路径是 npm，不再要求打开 github.com。某台机器上的 `dsh plugin --help` 如果只认 `github:`，就继续用 Release tag。想用镜像，配置这台机器的 npm / pnpm registry，不要等插件内置一个镜像地址。
 
-维护者发布下一版（仓库里没有 npm token，也不会在 CI 里代发）：
-
-1. `npm login`
-2. 确认 `package.json` 的 `name` 是 `@fengye_nobug/dsh-qq-bot`，`version` 和要发的 tag 一致。
-3. `npm pack --dry-run`，看清单里没有测试、密钥、本机路径。
-4. `npm publish`
+发版见[以后怎么发版](#以后怎么发版)。
 
 `files` 是白名单。Node 要求 `>=22`（`engines`）。`@deepseek-ai/*` 仍是 `peerDependencies`，由 DSH 的 profile 提供，不要改成普通 dependencies。
 

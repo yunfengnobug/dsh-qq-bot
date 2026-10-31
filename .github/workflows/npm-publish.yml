@@ -1,0 +1,214 @@
+# 推到 main 时：npm 上还没有 package.json 里的 version 才发布。
+# 同一版本已经在 registry 里则跳过，任务仍然成功。版本号没变的推送不会重复发布。
+# 新版本发布成功后，补上 tag vX.Y.Z（还没有的话）和 GitHub Release。
+# 令牌只用仓库 Secret NPM_TOKEN，不要把令牌写进这个文件。
+# 不用 id-token：这里走 npm token，不走 Trusted Publishing。
+
+name: 发布到 npm
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: npm-publish-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: 按版本号发布
+    # 只在本仓库的 main 上跑。workflow_dispatch 选了别的分支时不发布。
+    if: github.repository == 'yunfengnobug/dsh-qq-bot' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 取出代码
+        uses: actions/checkout@v7
+        with:
+          # Release 走 gh API，不需要用这份 checkout 里的凭证去 git push。
+          persist-credentials: false
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          # 仓库没有 lockfile，这里也不安装依赖。
+          package-manager-cache: false
+
+      - name: 确认 npm 上有没有这一版
+        id: npm
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'CHECK'
+          import { appendFileSync, readFileSync } from 'node:fs'
+
+          const expectedName = '@fengye_nobug/dsh-qq-bot'
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
+          const { name, version } = pkg
+
+          function out(key, value) {
+            appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`)
+          }
+          function summary(text) {
+            if (process.env.GITHUB_STEP_SUMMARY) {
+              appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`)
+            }
+          }
+
+          if (name !== expectedName) {
+            console.error(`package.json 的 name 是 ${name}，本工作流只发布 ${expectedName}。`)
+            process.exit(1)
+          }
+          // 限制字符集，避免版本号被拼进 tag 或 shell 时出问题。允许正式版和预发布，不接受带 + 的 build。
+          if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+            console.error(`version「${version}」不是 x.y.z 或 x.y.z-预发布，停止。`)
+            process.exit(1)
+          }
+
+          const url = `https://registry.npmjs.org/${name.replace('/', '%2f')}/${encodeURIComponent(version)}`
+          let res
+          try {
+            res = await fetch(url, {
+              headers: { accept: 'application/json' },
+              signal: AbortSignal.timeout(20000),
+            })
+          } catch (err) {
+            console.error('连不上 npm registry，停止以免误发或误跳过。')
+            console.error(err instanceof Error ? err.message : String(err))
+            process.exit(1)
+          }
+
+          out('version', version)
+          out('name', name)
+
+          if (res.status === 200) {
+            let data
+            try {
+              data = await res.json()
+            } catch {
+              console.error('registry 返回的不是 JSON，停止以免误判。')
+              process.exit(1)
+            }
+            if (data.version !== version) {
+              console.error(`registry 返回的版本是 ${data.version ?? '(空)'}，与 package.json 的 ${version} 不一致，停止。`)
+              process.exit(1)
+            }
+            out('on_npm', 'true')
+            const line = `npm 上已有 \`${name}@${version}\`，跳过发布。`
+            console.log(line)
+            summary(line)
+          } else if (res.status === 404) {
+            out('on_npm', 'false')
+            const line = `npm 上还没有 \`${name}@${version}\`，将发布。`
+            console.log(line)
+            summary(line)
+          } else {
+            console.error(`查询 npm 得到 HTTP ${res.status}，停止以免误发或误跳过。`)
+            process.exit(1)
+          }
+          CHECK
+
+      - name: 发布到 npm
+        id: publish
+        if: steps.npm.outputs.on_npm == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.npm.outputs.version }}
+          PKG_NAME: ${{ steps.npm.outputs.name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "npm 上还没有 ${PKG_NAME}@${VERSION}，但仓库 Secret NPM_TOKEN 是空的。"
+            echo "到 GitHub → Settings → Secrets and variables → Actions，新建 Secret，名字必须是 NPM_TOKEN。"
+            echo "值用 npm 的 Automation token，或带 Bypass 2FA、能发布 @fengye_nobug 的 granular token。粘贴时不要加引号。"
+            exit 1
+          fi
+
+          set +e
+          npm publish --access public 2>&1 | tee "${RUNNER_TEMP}/npm-publish.log"
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "已发布 ${PKG_NAME}@${VERSION}。"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              echo "已发布 \`${PKG_NAME}@${VERSION}\`。" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+
+          # 两次发布撞在一起时，另一边可能已经把这一版发出去了。再查一次 registry。
+          if node --input-type=module <<'RECHECK'
+          const version = process.env.VERSION
+          const name = process.env.PKG_NAME
+          const url = `https://registry.npmjs.org/${name.replace('/', '%2f')}/${encodeURIComponent(version)}`
+          const res = await fetch(url, {
+            headers: { accept: 'application/json' },
+            signal: AbortSignal.timeout(20000),
+          })
+          if (res.status !== 200) process.exit(1)
+          const data = await res.json()
+          if (data.version !== version) process.exit(1)
+          RECHECK
+          then
+            echo "npm publish 没有成功，但 registry 上已经有 ${PKG_NAME}@${VERSION}，按已发布处理。"
+            exit 0
+          fi
+          echo "npm publish 失败，且 registry 上仍没有 ${PKG_NAME}@${VERSION}。"
+          exit "$code"
+
+      - name: 补上 tag 和 GitHub Release
+        # 刚发布成功，或这一版本来就在 npm 上：缺的 tag / Release 补上，已有的不动。
+        if: success() && (steps.publish.outcome == 'success' || steps.npm.outputs.on_npm == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.npm.outputs.version }}
+          PKG_NAME: ${{ steps.npm.outputs.name }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          NOTES="${RUNNER_TEMP}/release-notes.md"
+          export NOTES_FILE="$NOTES"
+
+          node --input-type=module <<'NOTES'
+          import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+
+          const version = process.env.VERSION
+          const name = process.env.PKG_NAME
+          const fallback = `发布 \`${name}@${version}\`。\n`
+          let body = fallback
+          if (existsSync('CHANGELOG.md')) {
+            const text = readFileSync('CHANGELOG.md', 'utf8')
+            const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+            const match = new RegExp(`^## v${escaped}\\b.*$`, 'm').exec(text)
+            if (match) {
+              const after = text.slice(match.index + match[0].length)
+              const next = after.search(/^## /m)
+              const section = (next === -1 ? after : after.slice(0, next)).trim()
+              if (section) body = `${match[0]}\n\n${section}\n`
+            }
+          }
+          writeFileSync(process.env.NOTES_FILE, body)
+          NOTES
+
+          if gh release view "$TAG" --json tagName --jq .tagName >/dev/null 2>&1; then
+            echo "GitHub Release ${TAG} 已经存在，不重复创建。"
+            exit 0
+          fi
+
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --silent >/dev/null 2>&1; then
+            echo "tag ${TAG} 已在远端，只补 Release。"
+            gh release create "$TAG" --title "$TAG" --notes-file "$NOTES"
+          else
+            echo "创建 tag ${TAG}，指向 ${GITHUB_SHA}。"
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes-file "$NOTES"
+          fi
+          echo "已创建 GitHub Release ${TAG}。"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            echo "已创建 GitHub Release \`${TAG}\`。" >> "$GITHUB_STEP_SUMMARY"
+          fi
