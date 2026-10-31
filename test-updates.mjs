@@ -82,12 +82,12 @@ const newer = assessUpdate({
 })
 check('有新正式版：跳过草稿和预发布，取最高的', newer.updateAvailable === true && newer.latest === '0.2.4' && newer.kind === 'update')
 check(
-  '有新正式版：白话里有版本、摘要、安装命令和重启',
-  newer.message.includes('有新版本 0.2.4') &&
-    newer.message.includes('你现在是 0.2.3') &&
-    newer.message.includes('设置页可以检查更新') &&
-    newer.message.includes('装完请重启 dsh-web') &&
-    newer.message.includes('更新到 v0.2.4') &&
+  '有新正式版：短句写明在 GitHub 上，只检查不安装',
+  newer.message === '有新版本 0.2.4（现在是 0.2.3），在 GitHub 上。这里只检查，还没安装。' &&
+    newer.summary.includes('设置页可以检查更新') &&
+    !newer.message.includes('装完请重启') &&
+    !newer.message.includes('升级命令') &&
+    !newer.message.includes('三分钟') &&
     newer.command === installCommand('0.2.4') &&
     newer.install === 'github:yunfengnobug/dsh-qq-bot#v0.2.4',
   newer.message,
@@ -280,12 +280,56 @@ const systemdPlan = planPanelRestart({
 check(
   'systemd 下预约重启那个服务，而不是再拉起一份',
   systemdPlan.mode === 'systemd' &&
+    systemdPlan.scope === 'system' &&
     systemdPlan.command === 'systemd-run' &&
     systemdPlan.args.includes('restart') &&
     systemdPlan.args.includes('dsh-web.service') &&
+    !systemdPlan.args.includes('--user') &&
     !systemdPlan.args.includes('4242'),
   JSON.stringify(systemdPlan.args),
 )
+const userPlan = planPanelRestart({
+  platform: 'linux',
+  env: { INVOCATION_ID: 'abc' },
+  cgroup: '0::/user.slice/user-1000.slice/user@1000.service/app.slice/dsh-web.service\n',
+})
+check(
+  '用户服务用 systemctl --user 重启，不碰 user@',
+  userPlan.mode === 'systemd' &&
+    userPlan.scope === 'user' &&
+    userPlan.unit === 'dsh-web.service' &&
+    userPlan.args.includes('--user') &&
+    userPlan.args.includes('dsh-web.service') &&
+    !userPlan.args.includes('user@1000.service'),
+  JSON.stringify(userPlan.args),
+)
+let cgroupReads = 0
+const readPlan = planPanelRestart({
+  platform: 'linux',
+  env: { INVOCATION_ID: 'abc' },
+  readCgroup: () => {
+    cgroupReads += 1
+    return '0::/system.slice/dsh-web.service\n'
+  },
+})
+check(
+  '没传入 cgroup 时读取本进程的 cgroup',
+  cgroupReads === 1 && readPlan.mode === 'systemd' && readPlan.unit === 'dsh-web.service' && readPlan.scope === 'system',
+)
+let skippedReads = 0
+const notSystemd = planPanelRestart({
+  platform: 'linux',
+  env: {},
+  readCgroup: () => {
+    skippedReads += 1
+    return '0::/system.slice/dsh-web.service'
+  },
+  execPath: '/usr/bin/node',
+  argv: ['bin.js', 'web'],
+  pid: 7,
+  cwd: '/work',
+})
+check('没被 systemd 拉起时不读 cgroup', skippedReads === 0 && notSystemd.mode === 'reexec')
 check(
   '认不出单独服务时不重启整个登录',
   planPanelRestart({ platform: 'linux', env: { NOTIFY_SOCKET: '/run/systemd/notify' }, cgroup: '0::/user.slice/user@1000.service' }).mode === 'manual',
@@ -339,14 +383,67 @@ const systemdOk = await schedulePanelRestart({
   },
 })
 check('systemd-run 成功就认为重启已安排', systemdOk.ok === true && systemdOk.mode === 'systemd' && systemdSpawned[0]?.command === 'systemd-run' && systemdSpawned[0]?.options?.detached !== true)
-const systemdFail = await schedulePanelRestart({
+const privilegeSteps = []
+const privilegeFallback = await schedulePanelRestart({
   plan: systemdPlan,
-  spawnImpl: (command, args, options) => laterClose(1)(command, args, options),
+  execPath: '/usr/bin/node',
+  argv: ['bin.js', 'web'],
+  pid: 4242,
+  cwd: '/work',
+  env: { PATH: '/usr/bin' },
+  spawnImpl: (command, args, options) => {
+    privilegeSteps.push(command)
+    if (command === 'systemd-run') return laterClose(1)(command, args, options)
+    return { on() {}, unref() {}, command, args, options }
+  },
 })
 check(
-  'systemd-run 失败是白话，不带堆栈',
-  systemdFail.ok === false && /已经装上/.test(systemdFail.error) && /登录口令/.test(systemdFail.error) && !/Error|ENOENT/.test(systemdFail.error),
-  String(systemdFail.error),
+  'systemd-run 失败时改按当前命令行重启',
+  privilegeFallback.ok === true &&
+    privilegeFallback.mode === 'reexec' &&
+    privilegeSteps[0] === 'systemd-run' &&
+    privilegeSteps[1] === '/usr/bin/node' &&
+    !privilegeFallback.error,
+  JSON.stringify(privilegeSteps),
+)
+const restartGiveUp = await schedulePanelRestart({
+  plan: systemdPlan,
+  spawnImpl: () => {
+    throw new Error('EPERM')
+  },
+})
+check(
+  'systemd 和命令行都拉不起来才是白话',
+  restartGiveUp.ok === false &&
+    restartGiveUp.mode === 'manual' &&
+    /已经装上/.test(restartGiveUp.error) &&
+    /请自己重启/.test(restartGiveUp.error) &&
+    /登录口令/.test(restartGiveUp.error) &&
+    !/Error|EPERM|ENOENT/.test(restartGiveUp.error),
+  String(restartGiveUp.error),
+)
+const manualSpawn = []
+const manualRestart = await schedulePanelRestart({
+  plan: { mode: 'manual' },
+  execPath: '/usr/bin/node',
+  argv: ['bin.js', 'web'],
+  pid: 9,
+  cwd: '/work',
+  env: { PATH: '/usr/bin' },
+  spawnImpl: (command, args, options) => {
+    manualSpawn.push({ command, args, options })
+    return { on() {}, unref() {} }
+  },
+})
+check(
+  '认不出单独服务时不重启整个登录，改为重启当前进程',
+  manualRestart.ok === true &&
+    manualRestart.mode === 'reexec' &&
+    manualSpawn[0]?.command === '/usr/bin/node' &&
+    manualSpawn[0]?.args?.[0] === '-e' &&
+    !JSON.stringify(manualSpawn).includes('systemctl') &&
+    !JSON.stringify(manualSpawn).includes('user@'),
+  JSON.stringify(manualSpawn.map((item) => item.command)),
 )
 
 const reexecCalls = []
@@ -462,9 +559,8 @@ check(
     installed.result.tag === 'v9.9.9' &&
     installed.result.install === 'github:yunfengnobug/dsh-qq-bot#v9.9.9' &&
     installed.result.command === installCommand('9.9.9') &&
-    /已经装上 v9.9.9/.test(installed.result.message) &&
-    /登录口令可能会变/.test(installed.result.message) &&
-    /没有改动 NapCat/.test(installed.result.message) &&
+    installed.result.message.startsWith('已经从 GitHub 装上 v9.9.9，面板即将重启。') &&
+    !/登录口令|不改 NapCat|三分钟|优先从 npm/.test(installed.result.message) &&
     !installed.result.message.includes('codeload') &&
     !installed.result.message.includes('evil.example') &&
     !/TypeError|fetch failed|\n\s+at /.test(installed.result.message) &&
@@ -753,11 +849,13 @@ const restartFailed = await applyWith({
   scheduleRestart: async () => ({ ok: false, error: undefined }),
 })
 check(
-  '装上了但没重启：说清楚已经装上，并提醒登录口令',
+  '装上了但没重启：写明从 GitHub 装上，并请人自己重启',
   restartFailed.result.ok === false &&
     restartFailed.result.stage === 'restart' &&
     restartFailed.result.installed === true &&
-    /已经装上/.test(restartFailed.result.error) &&
+    restartFailed.result.channel === 'github' &&
+    /新版本已经从 GitHub 装上/.test(restartFailed.result.error) &&
+    /请自己重启 dsh-web/.test(restartFailed.result.error) &&
     /登录口令/.test(restartFailed.result.error) &&
     !/TypeError|\n\s+at /.test(restartFailed.result.error),
   String(restartFailed.result.error),
@@ -823,8 +921,9 @@ check(
     npmChecked.latest === '9.9.9' &&
     npmChecked.install === '@fengye_nobug/dsh-qq-bot@9.9.9' &&
     npmChecked.command === npmInstallCommand('9.9.9') &&
-    npmChecked.message.includes('从 npm 装上') &&
+    npmChecked.message === '有新版本 9.9.9（现在是 0.2.3），在 npm 上。这里只检查，还没安装。' &&
     !npmChecked.message.includes('github:') &&
+    !npmChecked.message.includes('升级命令') &&
     npmPack.calls.length === 1,
   npmChecked.message,
 )
@@ -845,9 +944,7 @@ check(
     viaNpm.result.channel === 'npm' &&
     viaNpm.result.install === '@fengye_nobug/dsh-qq-bot@9.9.9' &&
     viaNpm.result.command === npmInstallCommand('9.9.9') &&
-    /已经装上 v9.9.9/.test(viaNpm.result.message) &&
-    /从 npm 装的/.test(viaNpm.result.message) &&
-    /没有改动 NapCat/.test(viaNpm.result.message) &&
+    viaNpm.result.message === '已经从 npm 装上 v9.9.9，面板即将重启。' &&
     viaNpm.seen.length === 1 &&
     viaNpm.seen[0].packageSpec === '@fengye_nobug/dsh-qq-bot@9.9.9' &&
     viaNpm.seen[0].profile === 'web' &&
@@ -1015,9 +1112,8 @@ check(
   '一键安装成功后说明 Cordis 包名已改成实际安装的包',
   appliedWithHome.ok === true &&
     appliedWithHome.channel === 'npm' &&
-    /已经装上 v9.9.9/.test(appliedWithHome.message) &&
+    appliedWithHome.message.startsWith('已经从 npm 装上 v9.9.9，面板即将重启。') &&
     /Cordis 里 qq-bridge 的包名已经改成实际安装的 @fengye_nobug\/dsh-qq-bot/.test(appliedWithHome.message) &&
-    /没有改动 NapCat/.test(appliedWithHome.message) &&
     appliedAlign.result.ok === true &&
     !/Cordis 里 qq-bridge/.test(appliedAlign.result.message),
   appliedWithHome.message,
@@ -1217,22 +1313,126 @@ const hung = await applyPluginUpdate({
 const hungPatch = readFileSync(join(hungProfile, 'cordis.patch.yml'), 'utf8')
 const hungPlugin = readFileSync(join(hungProfile, 'node_modules', '@fengye_nobug', 'dsh-qq-bot', 'cordis.patch.yml'), 'utf8')
 check(
-  '安装超时但目标版本已经在磁盘上时改包名，不自动重启',
-  hung.ok === false &&
-    hung.restarting !== true &&
-    hungRestarted === false &&
+  '安装超时但目标版本已经在磁盘上时改包名，并安排重启',
+  hung.ok === true &&
+    hung.restarting === true &&
+    hung.channel === 'npm' &&
+    hungRestarted === true &&
     hungSink.options?.detached === true &&
     hungSignals.some(([target, signal]) => target === -4242 && signal === 'SIGTERM') &&
     hungSignals.some(([target, signal]) => target === 4242 && signal === 'SIGTERM') &&
     hungSignals.some(([target, signal]) => target === -4242 && signal === 'SIGKILL') &&
-    /包名也改成了 @fengye_nobug\/dsh-qq-bot/.test(hung.message) &&
-    /请重启 dsh-web/.test(hung.message) &&
+    hung.message.startsWith('已经从 npm 装上 v9.9.9，面板即将重启。') &&
+    /包名已经改成实际安装的 @fengye_nobug\/dsh-qq-bot/.test(hung.message) &&
+    !/请自己重启|请重启 dsh-web/.test(hung.message) &&
     hungPatch.includes("name: '@fengye_nobug/dsh-qq-bot'") &&
     hungPatch.includes('keep: 1') &&
     hungPlugin.includes("targetSessionId: ''") &&
     !hung.message.includes(hungRoot) &&
     !/Error|at\s|ENOENT/.test(hung.message),
   `${hung.message} ${JSON.stringify(hungSignals)}`,
+)
+
+const alignedRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-aligned-'))
+const alignedProfile = plantScoped(alignedRoot, '9.9.9')
+for (const file of [
+  join(alignedProfile, 'cordis.patch.yml'),
+  join(alignedProfile, 'node_modules', '@fengye_nobug', 'dsh-qq-bot', 'cordis.patch.yml'),
+  join(alignedRoot, 'cordis.patch.yml'),
+]) {
+  writeFileSync(file, readFileSync(file, 'utf8').replaceAll('dsh-qq-bot', '@fengye_nobug/dsh-qq-bot'))
+}
+let alignedRestarted = false
+const alignedHung = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  home: alignedRoot,
+  profile: 'web',
+  timeoutMs: 40,
+  killGraceMs: 20,
+  fetchImpl: npmReady(),
+  alive: () => false,
+  kill() {},
+  spawnImpl: hangSpawn(4242),
+  scheduleRestart: async () => {
+    alignedRestarted = true
+    return { ok: true, mode: 'reexec' }
+  },
+})
+check(
+  '超时且包名已经对齐时仍然重启，不再请人自己重启',
+  alignedHung.ok === true &&
+    alignedHung.restarting === true &&
+    alignedHung.channel === 'npm' &&
+    alignedRestarted === true &&
+    /即将重启/.test(alignedHung.message) &&
+    !/请自己重启|请重启 dsh-web/.test(alignedHung.message),
+  alignedHung.message,
+)
+
+const giveUpRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-giveup-'))
+plantScoped(giveUpRoot, '9.9.9')
+let giveUpRestarted = false
+const giveUpHung = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  home: giveUpRoot,
+  profile: 'web',
+  timeoutMs: 40,
+  killGraceMs: 20,
+  fetchImpl: npmReady(),
+  alive: () => false,
+  kill() {},
+  spawnImpl: hangSpawn(4242),
+  scheduleRestart: async () => {
+    giveUpRestarted = true
+    return { ok: false, error: undefined }
+  },
+})
+check(
+  '超时后版本已在磁盘上，但自动重启失败，才请人自己重启',
+  giveUpHung.ok === false &&
+    giveUpHung.installed === true &&
+    giveUpHung.restarting !== true &&
+    giveUpHung.channel === 'npm' &&
+    giveUpRestarted === true &&
+    /已经从 npm 装上/.test(giveUpHung.message) &&
+    /请自己重启 dsh-web/.test(giveUpHung.message) &&
+    !/Error|at\s/.test(giveUpHung.message),
+  giveUpHung.message,
+)
+
+const ghHungRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-gh-hang-'))
+plantScoped(ghHungRoot, '9.9.9')
+let ghHungRestarted = false
+const ghHung = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  home: ghHungRoot,
+  profile: 'web',
+  timeoutMs: 40,
+  killGraceMs: 20,
+  fetchImpl: async (url) => {
+    const href = String(url)
+    if (href === npmPackageUrl()) return { ok: false, status: 404, json: async () => ({}) }
+    if (href.includes('api.github.com')) return { ok: true, status: 200, json: async () => releasesOf('v9.9.9'), text: async () => '' }
+    if (href === githubArchiveUrl('9.9.9')) {
+      return { ok: true, status: 200, headers: { get: () => '' }, arrayBuffer: async () => tarballFor('9.9.9') }
+    }
+    throw new Error(`不该访问 ${href}`)
+  },
+  alive: () => false,
+  kill() {},
+  spawnImpl: hangSpawn(4242),
+  scheduleRestart: async () => {
+    ghHungRestarted = true
+    return { ok: true, mode: 'reexec' }
+  },
+})
+check(
+  'GitHub 安装超时但目标版本已在磁盘上时也安排重启',
+  ghHung.ok === true && ghHung.restarting === true && ghHung.channel === 'github' && ghHungRestarted === true && /从 GitHub 装上/.test(ghHung.message),
+  ghHung.message,
 )
 
 const missRoot = mkdtempSync(join(tmpdir(), 'dsh-qq-bot-miss-'))
@@ -1345,12 +1545,148 @@ const quick = await applyPluginUpdate({
 })
 check(
   '宽限期内安装进程以 0 退出仍算装上，并安排重启',
-  quick.ok === true && quick.restarting === true && quickRestarted === true && /已经装上 v9.9.9/.test(quick.message),
+  quick.ok === true && quick.restarting === true && quickRestarted === true && quick.message.startsWith('已经从 npm 装上 v9.9.9，面板即将重启。'),
   quick.message,
+)
+
+const autoSpawn = []
+const autoRestart = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  env: {},
+  execPath: '/usr/bin/node',
+  argv: ['bin.js', 'web'],
+  pid: 77,
+  cwd: '/work',
+  fetchImpl: npmReady(),
+  runCommand: async () => ({ ok: true, code: 0 }),
+  spawnImpl: (command, args, options) => {
+    autoSpawn.push({ command, args, detached: options?.detached })
+    return { on() {}, unref() {} }
+  },
+})
+check(
+  '安装成功会自己安排重启，不靠外层再传重启函数',
+  autoRestart.ok === true &&
+    autoRestart.restarting === true &&
+    autoRestart.channel === 'npm' &&
+    autoSpawn[0]?.command === '/usr/bin/node' &&
+    autoSpawn[0]?.args?.[0] === '-e' &&
+    autoSpawn[0]?.detached === true &&
+    /即将重启/.test(autoRestart.message) &&
+    !/请自己重启/.test(autoRestart.message),
+  `${autoRestart.message} ${JSON.stringify(autoSpawn)}`,
+)
+
+const userSpawn = []
+const userService = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  env: { INVOCATION_ID: 'run' },
+  readCgroup: () => '0::/user.slice/user-1000.slice/user@1000.service/app.slice/dsh-web.service\n',
+  fetchImpl: npmReady(),
+  runCommand: async () => ({ ok: true, code: 0 }),
+  spawnImpl: (command, args, options) => {
+    userSpawn.push({ command, args })
+    return laterClose(0)(command, args, options)
+  },
+})
+check(
+  '安装成功且跑在用户服务里时，用 systemd-run --user 重启 dsh-web',
+  userService.ok === true &&
+    userService.restarting === true &&
+    userSpawn[0]?.command === 'systemd-run' &&
+    userSpawn[0]?.args?.includes('--user') &&
+    userSpawn[0]?.args?.includes('dsh-web.service') &&
+    !userSpawn[0]?.args?.includes('user@1000.service'),
+  JSON.stringify(userSpawn[0]),
+)
+
+const deniedSpawn = []
+const denied = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  env: { INVOCATION_ID: 'run' },
+  readCgroup: () => '0::/system.slice/dsh-web.service\n',
+  execPath: '/usr/bin/node',
+  argv: ['bin.js', 'web'],
+  pid: 88,
+  cwd: '/work',
+  fetchImpl: npmReady(),
+  runCommand: async () => ({ ok: true, code: 0 }),
+  spawnImpl: (command, args, options) => {
+    deniedSpawn.push(command)
+    if (command === 'systemd-run') return laterClose(1)(command, args, options)
+    return { on() {}, unref() {} }
+  },
+})
+check(
+  'systemd-run 没权限时，安装成功仍按当前命令行重启',
+  denied.ok === true &&
+    denied.restarting === true &&
+    deniedSpawn[0] === 'systemd-run' &&
+    deniedSpawn[1] === '/usr/bin/node' &&
+    !/请自己重启/.test(denied.message),
+  `${denied.message} ${JSON.stringify(deniedSpawn)}`,
+)
+
+const sessionSpawn = []
+const sessionOnly = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  env: { NOTIFY_SOCKET: '/run/systemd/notify' },
+  readCgroup: () => '0::/user.slice/user-1000.slice/user@1000.service\n',
+  execPath: '/usr/bin/node',
+  argv: ['bin.js', 'web'],
+  pid: 89,
+  cwd: '/work',
+  fetchImpl: npmReady(),
+  runCommand: async () => ({ ok: true, code: 0 }),
+  spawnImpl: (command, args) => {
+    sessionSpawn.push({ command, args })
+    return { on() {}, unref() {} }
+  },
+})
+check(
+  '只看见用户会话时不重启整个登录，改为拉起当前命令',
+  sessionOnly.ok === true &&
+    sessionOnly.restarting === true &&
+    sessionSpawn[0]?.command === '/usr/bin/node' &&
+    !JSON.stringify(sessionSpawn).includes('systemctl') &&
+    !JSON.stringify(sessionSpawn).includes('user@1000'),
+  JSON.stringify(sessionSpawn),
+)
+
+const cannot = await applyPluginUpdate({
+  current: '0.2.3',
+  platform: 'linux',
+  env: {},
+  execPath: '/usr/bin/node',
+  argv: ['bin.js', 'web'],
+  pid: 90,
+  cwd: '/work',
+  fetchImpl: npmReady(),
+  runCommand: async () => ({ ok: true, code: 0 }),
+  spawnImpl: () => {
+    throw new Error('EPERM restart')
+  },
+})
+check(
+  '自动重启确实失败时才请人自己重启',
+  cannot.ok === false &&
+    cannot.installed === true &&
+    cannot.restarting !== true &&
+    cannot.channel === 'npm' &&
+    /请自己重启 dsh-web/.test(cannot.message) &&
+    !/EPERM|Error|at\s/.test(cannot.message),
+  cannot.message,
 )
 
 rmSync(recordRoot, { recursive: true, force: true })
 rmSync(hungRoot, { recursive: true, force: true })
+rmSync(alignedRoot, { recursive: true, force: true })
+rmSync(giveUpRoot, { recursive: true, force: true })
+rmSync(ghHungRoot, { recursive: true, force: true })
 rmSync(missRoot, { recursive: true, force: true })
 rmSync(leftRoot, { recursive: true, force: true })
 rmSync(otherRoot, { recursive: true, force: true })

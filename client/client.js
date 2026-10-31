@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
         key: 'checkUpdateOnStart',
         label: '启动时检查一次',
         kind: 'boolean',
-        hint: '默认关。打开并保存后，下次启动 dsh-web 会先问 npm 上的 @fengye_nobug/dsh-qq-bot 有没有新版本；npm 上还没有更新时再看 GitHub。只写在日志里，不会自动安装。要装新版本，用检查之后出现的更新按钮。',
+        hint: '默认关。打开并保存后，下次启动只检查有没有新版本，写在日志里，不会自动安装。',
       },
       {
         key: 'sessionScope',
@@ -860,9 +860,9 @@ window.__ModuleLoader__.load({
               )
             : null,
         ),
-        h('div', { style: S.hint }, '先问 npm 上有没有新版本。这里只检查，不会安装。'),
+        h('div', { style: S.hint }, '只检查，不安装。'),
         updateOffer
-          ? h('div', { style: S.hint }, '优先从 npm 安装 @fengye_nobug/dsh-qq-bot 的这一版并重启面板。这一版还没发到 npm 时，会改从 GitHub 下载。设置还在，不改 NapCat。重启后请刷新，登录口令可能会变。安装如果超过三分钟没有动静，会停掉卡住的进程，并用白话说明。')
+          ? h('div', { style: S.hint }, '装完会重启面板。请刷新；登录口令可能会变。不改 NapCat。')
           : null,
         updateNote
           ? h('div', { style: { ...(updateIsError ? S.err : S.note), whiteSpace: 'pre-wrap' } }, updateNote)

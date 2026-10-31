@@ -1,5 +1,10 @@
 # 更新日志
 
+## v0.2.7 — 2026-10-31
+
+- **一键更新装完会自己重启 dsh-web**：安装成功后按面板原来的办法重启，不再把「请自己重启」当成正常结果。Linux 上如果是 systemd 拉起来的，会读本进程的 cgroup，大约 3 秒后只重启认出来的那个服务。服务在用户实例里时用 `systemctl --user`，不会重启整个登录。以前没把 cgroup 读进来，服务里一点更新就直接说面板没有重启。`systemd-run` 没权限或失败时，改为按当前的 node 命令行再拉起一次。两条都做不到，才用白话请你自己重启 dsh-web，并提醒刷新页面、登录口令可能会变。安装超过三分钟、但磁盘上已经是要装的版本时，同样会改包名并重启。进程还在，或没有确认装上时，仍然不会重启。
+- **检查和安装的提示改成短句**：设置卡片不再把「优先从 npm…三分钟…」那段长说明当作主要提示。检查按钮旁边写「只检查，不安装。」有更新按钮时另写「装完会重启面板。请刷新；登录口令可能会变。不改 NapCat。」检查结果是「有新版本 x.y.z（现在是 a.b.c），在 npm 上。这里只检查，还没安装。」或「在 GitHub 上」。安装成功是「已经从 npm 装上 vX.Y.Z，面板即将重启。」或「已经从 GitHub 装上 vX.Y.Z，面板即将重启。」自动重启失败时才请自己重启，并写明这次是从 npm 还是从 GitHub 装上的。
+
 ## v0.2.6 — 2026-10-30
 
 - **一键更新之后，Cordis 按实际装上的包名挂 `qq-bridge`**：npm 包是 `@fengye_nobug/dsh-qq-bot`。v0.2.5 自带的 `cordis.patch.yml` 仍写 `name: dsh-qq-bot`。Cordis 按这个名字去加载，无作用域包并不存在，插件 id `qq-bridge` 不会挂上，`/api/qq-bridge/settings` 就是 HTTP 404，设置页显示本机接口不可用。现在插件自带的补丁把 `name` 写成 `@fengye_nobug/dsh-qq-bot`。安装成功后，还会看 profile 的 `cordis.patch.yml`、`$DSH_HOME/cordis.patch.yml`（这份文件里有 `qq-bridge` 才改），以及已经装进 profile 的插件补丁。这三处里 `qq-bridge` 的 `name` 如果还是 `dsh-qq-bot` 或 `dsh-qq-bridge`，就改成磁盘上 `package.json` 的包名。别的插件不动，`config` 里的设置不动。界面显示名和消息来源仍是 `dsh-qq-bot`，Cordis id 仍是 `qq-bridge`。从 0.2.5 点「更新」时，跑的仍是 0.2.5 里的安装程序，profile 里手写的旧 `name` 要先改成 `@fengye_nobug/dsh-qq-bot` 再重启；这一版自己跑一键更新时会改。
