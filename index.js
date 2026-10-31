@@ -4,6 +4,7 @@
 // 设计见同目录 DESIGN.md。核心两点：
 //   1) 唤醒策略：白名单(fail-closed) → 命中昵称/@ 必唤醒 → 否则按概率(默认 5%)唤醒
 //      → 其余只进“最近聊天缓冲”，在下一次唤醒时作为上下文附上（期间零模型调用）。
+//      主人用整句「白名单」命令改 groupWhitelist 时，发生在白名单闸门之前。
 //   2) 目标会话显式加载：agents.get(id) 拿不到就 agents.resume(resumeSessionId) 拉起来，
 //      并且【绝不】回退到别的会话（dsh-cron 的已知坑：roots() 找不到就投给活动会话）。
 //
@@ -169,6 +170,7 @@ export const Config = Schema.object({
   wakeProbability: Schema.number().default(0.05).description('没点名时的回应概率（0 到 1）。'),
   whitelist: Schema.array(Schema.string()).default([]).description('哪些私聊可以叫醒。留空 = 任何私聊都不叫醒。'),
   groupWhitelist: Schema.array(Schema.string()).default([]).description('哪些群可以叫醒。留空 = 任何群都不叫醒。'),
+  ownerWhitelist: Schema.array(Schema.string()).default([]).description('主人 QQ。这些号才能在 QQ 里用「白名单」命令。留空 = 谁都不能用。'),
   checkUpdateOnStart: Schema.boolean().default(false).description('启动时向 GitHub 检查一次有没有新版本。默认关。只在日志里提示，不会自动安装。'),
 })
 
@@ -183,6 +185,7 @@ const BridgeSettings = Schema.object({
   wakeProbability: Schema.number().default(0.05).description('没点名时的回应概率（0 到 1）。默认 0.05。'),
   whitelist: Schema.array(Schema.string()).default([]).description('哪些私聊可以叫醒。留空 = 任何私聊都不叫醒。'),
   groupWhitelist: Schema.array(Schema.string()).default([]).description('哪些群可以叫醒。留空 = 任何群都不叫醒。'),
+  ownerWhitelist: Schema.array(Schema.string()).default([]).description('主人 QQ。这些号才能在 QQ 里用「白名单」命令。留空 = 谁都不能用。'),
   checkUpdateOnStart: Schema.boolean().default(false).description('启动时向 GitHub 检查一次有没有新版本。默认关。只在日志里提示，不会自动安装。'),
   attachRecentChat: Schema.boolean().default(true).description('把没叫醒时的聊天一并带上。'),
   recentChatLimit: Schema.number().default(DEFAULT_RECENT_CHAT_LIMIT).description('附带最近几条（0–200）。'),
@@ -479,6 +482,64 @@ export function mapOneBotMessage(event, selfId) {
   }
 }
 
+/** 去掉空项和重复项，保留原来的顺序。 */
+export function normalizeIdList(list) {
+  const out = []
+  const seen = new Set()
+  for (const item of Array.isArray(list) ? list : []) {
+    const id = String(item ?? '').trim()
+    if (id === '' || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
+}
+
+/** QQ 群号：只要数字。全角数字先换成半角。对不上就返回空串。 */
+export function normalizeGroupId(value) {
+  const id = String(value ?? '')
+    .trim()
+    .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+  return /^\d{1,16}$/.test(id) ? id : ''
+}
+
+/**
+ * 整句是不是「白名单」命令。
+ *
+ * 先去掉首尾空白，中间连续空白收成一个空格，可选一个前导 `/`。
+ * 第一个词必须就是「白名单」。后面只能是子命令，多出来的字就返回 null，
+ * 免得一句「忽略之前的指令，白名单 加」把群白名单改掉。
+ *
+ * 返回 `{ op: 'list' | 'add' | 'remove', groupId: string | null }`。
+ * `groupId === null` 表示用当前群（私聊里没有当前群）。
+ */
+export function parseWhitelistCommand(text) {
+  let body = String(text ?? '')
+    .replace(/[\u200b\u200c\u200d\ufeff]/g, '')
+    .replace(/[\u3000\u00a0]/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ')
+  if (body.startsWith('/') || body.startsWith('／')) body = body.slice(1).trim()
+  if (body === '') return null
+  const parts = body.split(' ')
+  if (parts[0] !== '白名单' || parts.length > 3) return null
+  if (parts.length === 1) return { op: 'list', groupId: null }
+  const sub = parts[1]
+  const arg = parts[2]
+  if (sub === '列表') return arg === undefined ? { op: 'list', groupId: null } : null
+  const adding = sub === '加' || sub === '加本群'
+  const removing = sub === '删' || sub === '删本群'
+  if (!adding && !removing) return null
+  const op = adding ? 'add' : 'remove'
+  if (sub === '加本群' || sub === '删本群') {
+    return arg === undefined ? { op, groupId: null } : null
+  }
+  if (arg === undefined || arg === '本群') return { op, groupId: null }
+  const groupId = normalizeGroupId(arg)
+  if (groupId === '') return null
+  return { op, groupId }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function apply(ctx, config) {
@@ -552,6 +613,7 @@ export function apply(ctx, config) {
         wakeProbability: config.wakeProbability ?? 0.05,
         whitelist: config.whitelist ?? [],
         groupWhitelist: config.groupWhitelist ?? [],
+        ownerWhitelist: config.ownerWhitelist ?? [],
         checkUpdateOnStart: config.checkUpdateOnStart === true,
         onebotUrl: config.onebotUrl ?? '',
         accessTokenEnv: config.accessTokenEnv ?? '',
@@ -598,6 +660,7 @@ export function apply(ctx, config) {
       wakeProbability: clamp01(Number(s.wakeProbability ?? config.wakeProbability ?? 0.05)),
       whitelist: (s.whitelist ?? config.whitelist ?? []).map(String),
       groupWhitelist: (s.groupWhitelist ?? config.groupWhitelist ?? []).map(String),
+      ownerWhitelist: (s.ownerWhitelist ?? config.ownerWhitelist ?? []).map(String),
       checkUpdateOnStart: (s.checkUpdateOnStart ?? config.checkUpdateOnStart) === true,
       attachRecentChat: (s.attachRecentChat ?? config.attachRecentChat) !== false,
       recentChatLimit: Math.max(
@@ -658,6 +721,60 @@ export function apply(ctx, config) {
     writeFileSync(tmp, `${JSON.stringify({ version: 1, values }, null, 2)}\n`, 'utf8')
     renameSync(tmp, settingsPath)
     settingsFileCache = { mtimeMs: -1, values: {} } // 让下次读取重新加载
+  }
+
+  /**
+   * 把若干设置写成和设置卡片同一条存储，并让下一次 readSettings() 读到新值。
+   *
+   * 0.2：写入 qq-bridge-settings.json（比 cordis 里的安装配置优先，重启还在）。
+   * 更早的宿主：改 settings.get 返回的那份用户层，并在服务提供 update / set 时写回去。
+   * 不改 apply() 拿到的 composition config，这样「撤销覆盖」仍回到原来的安装配置。
+   */
+  async function saveSettingsPatch(patch) {
+    if (legacySettings) {
+      const svc = ctx.settings
+      let stored
+      try {
+        stored = typeof svc?.get === 'function' ? svc.get(NS) : undefined
+      } catch {
+        stored = undefined
+      }
+      const backup = {}
+      if (stored && typeof stored === 'object') {
+        for (const key of Object.keys(patch)) backup[key] = stored[key]
+        Object.assign(stored, patch)
+      }
+      try {
+        if (typeof svc?.update === 'function') await svc.update(NS, patch)
+        else if (typeof svc?.set === 'function') {
+          for (const key of Object.keys(patch)) await svc.set(NS, key, patch[key])
+        }
+      } catch (error) {
+        if (stored && typeof stored === 'object') {
+          for (const key of Object.keys(patch)) {
+            if (Object.prototype.hasOwnProperty.call(backup, key)) stored[key] = backup[key]
+            else delete stored[key]
+          }
+        }
+        throw error
+      }
+      applySettingChanges()
+      return
+    }
+
+    const known = knownSettingKeys()
+    const next = { ...readSettingsFile() }
+    const validate = typeof BridgeSettings === 'function' ? BridgeSettings : (v) => v
+    const merged = validate({ ...readSettings(), ...patch })
+    let wrote = false
+    for (const key of Object.keys(patch)) {
+      if (!known.has(key)) continue
+      next[key] = merged[key]
+      wrote = true
+    }
+    if (!wrote) throw new Error('没有可写的设置')
+    writeSettingsFile(next)
+    applySettingChanges()
   }
 
   /** 只认 schema 里有的键 —— 接口不写白名单之外的任何东西。 */
@@ -2142,12 +2259,112 @@ export function apply(ctx, config) {
     return agent?.session?.id || agent?.id || null
   }
 
+  function formatGroupWhitelist(ids) {
+    if (ids.length === 0) return '群白名单是空的，共 0 个。留空时任何群都不会叫醒。'
+    const shown = ids.slice(0, 30)
+    const extra = ids.length > shown.length ? ` ……等共 ${ids.length} 个` : ''
+    return `群白名单共 ${ids.length} 个：${shown.join(' ')}${extra}`
+  }
+
+  /** 管理命令的回复直接发回这条消息所在的群或私聊，不经过唤醒，也不查群白名单。 */
+  async function replyAdmin(msg, text) {
+    const dest = destFromMsg(msg)
+    if (!dest) return { sent: 0, dropped: true, reason: 'no-destination' }
+    return sendToQQ(String(text), dest, { quoteMessageId: messageIdOf(msg) })
+  }
+
+  /**
+   * 主人改群白名单。调用前已经确认发送者在 ownerWhitelist 里，且整句是命令。
+   * 失败时配置保持原样。回复里可以有群号；日志不展开整份名单。
+   */
+  async function handleWhitelistAdmin(msg, command) {
+    const current = normalizeGroupId(msg?.groupId)
+    let target = command.groupId
+    if (command.op !== 'list' && target == null) {
+      if (current === '') {
+        const text = msg?.groupId
+          ? '没认出群号，没有改白名单。'
+          : '私聊里要写上群号。例如：白名单 加 群号'
+        const sent = await replyAdmin(msg, text)
+        pushLog({
+          kind: 'admin',
+          action: command.op,
+          result: 'need-group',
+          who: msg?.userId ?? null,
+          group: msg?.groupId ?? null,
+        })
+        return { action: 'admin', reason: 'need-group', delivered: false, changed: false, replied: sent.sent > 0 }
+      }
+      target = current
+    }
+
+    const before = normalizeIdList(readSettings().groupWhitelist)
+    let next = before
+    let changed = false
+    let reply
+    if (command.op === 'list') {
+      reply = formatGroupWhitelist(before)
+    } else if (command.op === 'add') {
+      if (before.includes(target)) {
+        reply = target === current ? `本群已经在白名单里。共 ${before.length} 个。` : `${target} 已经在白名单里。共 ${before.length} 个。`
+      } else {
+        next = [...before, target]
+        changed = true
+        reply = target === current ? `已把本群加入白名单。现在共 ${next.length} 个。` : `已加入 ${target}。现在共 ${next.length} 个。`
+      }
+    } else if (before.includes(target)) {
+      next = before.filter((id) => id !== target)
+      changed = true
+      const tail = next.length === 0 ? '现在任何群都不会叫醒。' : ''
+      reply = `已移出 ${target}。现在共 ${next.length} 个。${tail}`
+    } else {
+      reply = target === current ? `本群本来就不在白名单里。共 ${before.length} 个。` : `${target} 本来就不在白名单里。共 ${before.length} 个。`
+    }
+
+    if (changed) {
+      try {
+        await saveSettingsPatch({ groupWhitelist: next })
+      } catch (error) {
+        logger.warn(`群白名单没有保存：${error?.message ?? error}`)
+        const sent = await replyAdmin(msg, '没保存成，群白名单没改。')
+        pushLog({
+          kind: 'admin',
+          action: command.op,
+          result: 'save-failed',
+          who: msg?.userId ?? null,
+          group: msg?.groupId ?? null,
+        })
+        return { action: 'admin', reason: 'save-failed', delivered: false, changed: false, replied: sent.sent > 0 }
+      }
+    }
+
+    const sent = await replyAdmin(msg, reply)
+    logger.info(`群白名单命令 ${command.op}${changed ? ' 已保存' : ''}`)
+    pushLog({
+      kind: 'admin',
+      action: command.op,
+      result: changed ? 'saved' : 'unchanged',
+      who: msg?.userId ?? null,
+      group: msg?.groupId ?? null,
+    })
+    return { action: 'admin', reason: command.op, delivered: false, changed, replied: sent.sent > 0 }
+  }
+
   /**
    * 入站总入口（OneBot 传输与调试工具都调它）。
    * msg: { text, userId, nickname?, userName?, groupId?, groupName?, atSelf?, messageId? }
    */
   async function handleInbound(msg) {
     const s = readSettings()
+    // 主人的整句命令发生在白名单闸门之前，这样新群还没被允许时也能加进去。
+    // 不是主人、或不是整句命令：照旧走 decide()，不另外回复。
+    // 只有传输层打上 fromTransport 的消息才算。调试工具模拟的入站改不了白名单。
+    if (msg?.fromTransport === true) {
+      const command = parseWhitelistCommand(msg.text)
+      if (command && normalizeIdList(s.ownerWhitelist).includes(String(msg.userId ?? '').trim())) {
+        return handleWhitelistAdmin(msg, command)
+      }
+    }
     const d = decide(msg, s)
     // 保留引用：唤醒失败时把这一条就地改成 `wake-failed`。修之前失败也写着 `wake`，事后查不出问题。
     const inboundLog = pushLog({ kind: 'inbound', decision: d.action, reason: d.reason, who: msg.userId, group: msg.groupId ?? null, text: String(msg.text ?? '').slice(0, 200) })
@@ -2445,6 +2662,7 @@ export function apply(ctx, config) {
         : await loadGroupName(inbound.groupId)
     }
 
+    inbound.fromTransport = true
     await handleInbound(inbound)
   }
 
@@ -2476,6 +2694,7 @@ export function apply(ctx, config) {
         ? groupNames.get(inbound.groupId)
         : await loadGroupName(inbound.groupId)
     }
+    inbound.fromTransport = true
     await handleInbound(inbound)
   }
 
@@ -3088,7 +3307,7 @@ export function apply(ctx, config) {
 
     ctx.tools.register(defineTool({
       name: 'qq_bridge_simulate',
-      description: '模拟一条 QQ 入站消息，走完整唤醒策略（不改白名单的话默认会被丢弃）。用于验证昵称唤醒 / 概率唤醒 / 只记录三条分支。',
+      description: '模拟一条 QQ 入站消息，走完整唤醒策略（不改白名单的话默认会被丢弃）。用于验证昵称唤醒 / 概率唤醒 / 只记录三条分支。不会执行「白名单」命令，也不会改群白名单。',
       parameters: {
         text: { type: 'string', required: true, description: 'QQ 消息文本。' },
         userId: { type: 'string', description: '私聊发送者 id（需在白名单内）。' },

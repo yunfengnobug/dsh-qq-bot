@@ -77,6 +77,7 @@ ensureTargetAgent():
 | `wakeProbability` | number | `0.05` | 非昵称消息的唤醒概率 |
 | `whitelist` | string[] | `[]` | 私聊 openid 白名单（空=全拒，fail-closed） |
 | `groupWhitelist` | string[] | `[]` | 群 openid 白名单 |
+| `ownerWhitelist` | string[] | `[]` | 主人 QQ。空 = 不能在 QQ 里改群白名单 |
 | `attachRecentChat` / `recentChatLimit` | boolean / number | `true` / `8` | 未唤醒聊天是否作为摘要附给下次唤醒、条数 |
 | `replyMaxChars` | number | `1500` | 出站字数上限（下限 100）；**超过就不发送** |
 | `replyMode` | string | `'marker'` | 出站闸门：只发 `[QQ]…[/QQ]` 块内的内容；`'always'` = 整轮都发 |
@@ -86,6 +87,8 @@ ensureTargetAgent():
 | `replyWithQuote` | boolean | `false` | 首段带 `[CQ:reply]` 引用触发消息 |
 | `atOnlyInGroup` | boolean | `false` | 群里只有被 @ 才处理 |
 | `stripMarkdown` | boolean | `true` | 出站去掉 Markdown 标记 |
+
+主人用整句「白名单」命令改 `groupWhitelist` 时，发生在白名单闸门之前，所以新群还没被允许也能加。不是主人、主人名单为空、或句子里夹了别的字，都不改配置。调试工具模拟的入站不执行这条命令。保存走和设置卡片相同的用户层（0.2 为 `qq-bridge-settings.json`），不改 composition config 本身。
 
 Config（`cordis.patch.yml`）另有：`agentPreset`、`statePath`、`debugTools`、`heartbeatTimeoutMs`。
 
