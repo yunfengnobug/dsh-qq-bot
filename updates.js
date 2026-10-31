@@ -10,7 +10,11 @@
 // 安装成功后，若 profile、home 或插件自己的 cordis.patch.yml 里 qq-bridge 的 name
 // 仍是旧的无作用域名，会改成磁盘上 package.json 里的包名。不改 config，不改设置，不改 NapCat。
 // 安装超过三分钟还没结束时，停掉这次拉起的进程组，并清掉已经退出的安装记录。
-// 超时后若磁盘上已是目标版本，仍改包名，但不自动重启。
+// 超时后若磁盘上已是目标版本，仍改包名，并安排重启。
+// 重启会读本进程的 cgroup：认得出具体服务就用 systemd-run 只重启那个服务
+// （挂在 user@ 下面的用 systemctl --user）。systemd-run 失败，或只看见用户会话、
+// 认不出单独服务时，不重启整个登录，改为按当前命令行再拉起一次。
+// 两条都做不到，才提示自己重启。
 
 import { spawn } from 'node:child_process'
 import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -627,9 +631,6 @@ function installError(code, command, extra = {}) {
     const which = Number.isSafeInteger(pid) && pid > 1 ? `（进程 ${pid}）` : ''
     return `已经有一个安装进程还在跑${which}，这次没有再启动。等它结束再点「更新」。如果确认它已经卡死，先停掉那个进程，再点一次。`
   }
-  if (code === 'timeout' && extra.packageName) {
-    return `安装超时，已经停掉卡住的进程。新版本的文件已经在磁盘上，qq-bridge 的包名也改成了 ${extra.packageName}。请重启 dsh-web，设置页才会出来。`
-  }
   if (code === 'timeout' && extra.leftover) {
     return `安装超时，卡住的安装进程还没停干净。请先停掉 dsh 和 pnpm，再点一次「更新」。${hint}`
   }
@@ -639,9 +640,7 @@ function installError(code, command, extra = {}) {
   if (code === 'wrong-name') return '下到的安装包不是这个插件，没有安装。'
   if (code === 'wrong-version') return '下到的版本和发布标签对不上，没有安装。'
   if (code === 'bad-package') return '下到的安装包读不懂，没有安装。'
-  const base = `安装没有成功。${hint}`
-  if (extra.packageName) return `${base}Cordis 里 qq-bridge 的包名已经改成实际安装的 ${extra.packageName}。请重启 dsh-web，设置页才会出来。`
-  return base
+  return `安装没有成功。${hint}`
 }
 
 function restartError() {
@@ -1538,24 +1537,38 @@ setTimeout(() => {
 }, delay)
 `.trim()
 
-/**
- * 重启计划。systemd 里只重启 cgroup 里那个具体服务，用 systemd-run 把动作放到服务外面。
- * 认不出单独服务时不重启整个登录会话。其余情况等响应发出后，按当前进程的命令行再拉起一次。
- */
-export function planPanelRestart(input = {}) {
-  const platform = input.platform || process.platform
-  const env = input.env || process.env
-  const invocation = platform !== 'win32' && Boolean(env && (env.INVOCATION_ID || env.NOTIFY_SOCKET))
-  const unit = invocation ? systemdUnitFromCgroup(input.cgroup ?? '') : null
-  if (invocation && !unit) return { mode: 'manual' }
-  if (unit) {
-    return {
-      mode: 'systemd',
-      command: 'systemd-run',
-      args: ['--quiet', '--collect', '--on-active=3s', '--timer-property=AccuracySec=1s', '--', 'systemctl', 'restart', unit],
-      unit,
-    }
+/** 具体服务挂在 user@UID.service 下面时，重启要走用户实例，不能重启整个登录会话。 */
+function systemdUserManager(text) {
+  return /\/user@\d+\.service(?:\/|$)/.test(String(text ?? ''))
+}
+
+function systemdRunArgs(unit, user) {
+  const scope = user ? ['--user'] : []
+  return [
+    ...scope,
+    '--quiet',
+    '--collect',
+    '--on-active=3s',
+    '--timer-property=AccuracySec=1s',
+    '--',
+    'systemctl',
+    ...scope,
+    'restart',
+    unit,
+  ]
+}
+
+function cgroupText(input) {
+  if (input.cgroup != null) return String(input.cgroup)
+  const read = typeof input.readCgroup === 'function' ? input.readCgroup : readOwnCgroup
+  try {
+    return String(read() ?? '')
+  } catch {
+    return ''
   }
+}
+
+function reexecPlan(input) {
   return {
     mode: 'reexec',
     execPath: input.execPath || process.execPath,
@@ -1567,17 +1580,32 @@ export function planPanelRestart(input = {}) {
 }
 
 /**
- * @param {{ plan?: ReturnType<typeof planPanelRestart>, spawnImpl?: typeof spawn, env?: NodeJS.ProcessEnv, platform?: string, cgroup?: string, execPath?: string, argv?: string[], pid?: number, cwd?: string }} input
+ * 重启计划。systemd 里只重启 cgroup 里那个具体服务，用 systemd-run 把动作放到服务外面。
+ * 没传入 cgroup 时读本进程的 /proc/self/cgroup。用户服务加 --user。
+ * 认不出单独服务时计划是 manual：不重启整个登录会话。其余情况按当前进程的命令行再拉起一次。
  */
-export async function schedulePanelRestart(input = {}) {
-  const plan = input.plan || planPanelRestart(input)
-  if (plan.mode === 'manual') return { ok: false, mode: 'manual', error: restartError() }
-  const spawnImpl = input.spawnImpl || spawn
-  if (plan.mode === 'systemd') {
-    const ran = await runChild(spawnImpl, plan.command, plan.args, { timeoutMs: 20000, stdio: 'ignore' })
-    if (!ran.ok) return { ok: false, mode: 'systemd', error: restartError() }
-    return { ok: true, mode: 'systemd' }
+export function planPanelRestart(input = {}) {
+  const platform = input.platform || process.platform
+  const env = input.env || process.env
+  const invocation = platform !== 'win32' && Boolean(env && (env.INVOCATION_ID || env.NOTIFY_SOCKET))
+  const cgroup = invocation ? cgroupText(input) : ''
+  const unit = invocation ? systemdUnitFromCgroup(cgroup) : null
+  if (unit) {
+    const user = systemdUserManager(cgroup)
+    return {
+      mode: 'systemd',
+      command: 'systemd-run',
+      args: systemdRunArgs(unit, user),
+      unit,
+      scope: user ? 'user' : 'system',
+    }
   }
+  if (invocation) return { mode: 'manual' }
+  return reexecPlan(input)
+}
+
+async function spawnReexec(plan, input) {
+  const spawnImpl = input.spawnImpl || spawn
   const payload = JSON.stringify({
     pid: plan.pid,
     cwd: plan.cwd,
@@ -1605,6 +1633,29 @@ export async function schedulePanelRestart(input = {}) {
   child.on('error', () => {})
   if (typeof child.unref === 'function') child.unref()
   return { ok: true, mode: 'reexec' }
+}
+
+/**
+ * 先按计划重启。systemd-run 失败，或认不出单独服务时，改为重启当前进程，不重启整个登录。
+ * 两条都做不到才返回失败。
+ * @param {{ plan?: ReturnType<typeof planPanelRestart>, spawnImpl?: typeof spawn, env?: NodeJS.ProcessEnv, platform?: string, cgroup?: string, readCgroup?: () => string, execPath?: string, argv?: string[], pid?: number, cwd?: string }} input
+ */
+export async function schedulePanelRestart(input = {}) {
+  const plan = input.plan || planPanelRestart(input)
+  const spawnImpl = input.spawnImpl || spawn
+  if (plan.mode === 'systemd') {
+    const ran = await runChild(spawnImpl, plan.command, plan.args, { timeoutMs: 20000, stdio: 'ignore' })
+    if (ran.ok) return { ok: true, mode: 'systemd', unit: plan.unit, scope: plan.scope }
+    const fallback = await spawnReexec(reexecPlan(input), { ...input, spawnImpl })
+    if (fallback.ok) return fallback
+    return { ok: false, mode: 'manual', error: restartError() }
+  }
+  if (plan.mode === 'manual') {
+    const fallback = await spawnReexec(reexecPlan(input), { ...input, spawnImpl })
+    if (fallback.ok) return fallback
+    return { ok: false, mode: 'manual', error: restartError() }
+  }
+  return spawnReexec(plan, { ...input, spawnImpl })
 }
 
 const CORDIS_ID = 'qq-bridge'
@@ -1810,25 +1861,31 @@ function installRunSpec(input, extra) {
   }
 }
 
-/** 安装失败时，只有目标版本已经在磁盘上、并且进程已经停干净，才改包名。不在这里重启。 */
-function failInstall(input, decision, ran, command, install) {
+/** 磁盘上的已安装包是不是这次要装的版本。只读 package.json，不改文件。 */
+function installedMatches(input, version) {
+  const profileDir = profileDirOf(input)
+  if (profileDir === '' || !version) return false
+  const scoped = readInstalledManifest(join(profileDir, 'node_modules', '@fengye_nobug', 'dsh-qq-bot'))
+  const legacy = readInstalledManifest(join(profileDir, 'node_modules', 'dsh-qq-bot'))
+  return [scoped, legacy].some((item) => item && compareSemver(item.version, version) === 0)
+}
+
+/**
+ * 安装命令没返回成功时：进程已经停干净，并且磁盘上已经是目标版本，就改包名并安排重启。
+ * 进程还在，或版本对不上，不重启。
+ */
+async function failInstall(input, decision, ran, command, install, channel) {
   const code = ran?.code
   const leftover = ran?.leftover === true
-  let packageName = ''
-  const profileDir = profileDirOf(input)
-  if (!leftover && (code === 'timeout' || code === 'exit' || code === 'error') && profileDir !== '') {
-    try {
-      const aligned = alignCordisNames({
-        profileDir,
-        home: typeof input.home === 'string' ? input.home : '',
-        expectedVersion: decision.version,
-      })
-      if (aligned.changed.length > 0) packageName = aligned.name
-    } catch {
-      // 对不齐就只说明安装失败。
-    }
+  const via = channel === 'npm' || channel === 'github' ? channel : decision.channel
+  if (!leftover && (code === 'timeout' || code === 'exit' || code === 'error') && installedMatches(input, decision.version)) {
+    return finishApply(
+      input,
+      { ...decision, command: command || decision.command, install: install || decision.install },
+      via === 'npm' ? 'npm' : 'github',
+    )
   }
-  const message = installError(code, command, { packageName, leftover, pid: ran?.pid })
+  const message = installError(code, command, { leftover, pid: ran?.pid })
   return {
     ok: false,
     stage: 'install',
@@ -1891,7 +1948,7 @@ export async function applyPluginUpdate(input = {}) {
       ran = { ok: false, code: 'error' }
     }
     if (ran?.ok === true) return finishApply(input, decision, 'npm')
-    if (ran?.code !== 'unpublished') return failInstall(input, decision, ran, decision.command, decision.install)
+    if (ran?.code !== 'unpublished') return failInstall(input, decision, ran, decision.command, decision.install, 'npm')
     channel = 'github'
   }
   const shown = shownInstall(channel, decision.version, repo)
@@ -1933,7 +1990,7 @@ export async function applyPluginUpdate(input = {}) {
     rmSync(dir, { recursive: true, force: true })
   }
   if (!ran || ran.ok !== true) {
-    return failInstall(input, { ...decision, install: shown.install, command: shown.command }, ran, shown.command, shown.install)
+    return failInstall(input, { ...decision, install: shown.install, command: shown.command }, ran, shown.command, shown.install, 'github')
   }
   return finishApply(input, { ...decision, install: shown.install, command: shown.command }, 'github')
 }
@@ -1943,7 +2000,17 @@ async function finishApply(input, decision, channel) {
   let restart
   try {
     const schedule = input.scheduleRestart || schedulePanelRestart
-    restart = await schedule({ spawnImpl: input.spawnImpl, platform: input.platform })
+    restart = await schedule({
+      spawnImpl: input.spawnImpl,
+      platform: input.platform,
+      env: input.env,
+      cgroup: input.cgroup,
+      readCgroup: input.readCgroup,
+      execPath: input.execPath,
+      argv: input.argv,
+      pid: input.pid,
+      cwd: input.cwd,
+    })
   } catch {
     restart = { ok: false, error: restartError() }
   }

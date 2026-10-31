@@ -23,7 +23,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.5
 在 GitHub 上 Watch → Custom → **Releases**，比盯 main 稳。环境、第一次怎么开白名单、怎么升级、和官方插件为什么不能一起挂，写在[安装](#安装)。
 
 - 设计：[`DESIGN.md`](./DESIGN.md) ｜ 里程碑与真机实录：[`HANDOVER.md`](./HANDOVER.md) ｜ 变更：[`CHANGELOG.md`](./CHANGELOG.md)
-- 源码版本 **0.2.6**（一键更新会把 Cordis 的包名改成实际装上的 `@fengye_nobug/dsh-qq-bot`）。已经发布的是 **v0.2.5**，npm 上对应 `@fengye_nobug/dsh-qq-bot@0.2.5`。源码这一版还没打 tag，也还没 `npm publish`。v0.2.5 自带补丁里的 `name` 仍是无作用域的 `dsh-qq-bot`，装完若设置页是 HTTP 404，先把 `qq-bridge` 的 `name` 改成 `@fengye_nobug/dsh-qq-bot` 再重启。见 [`CHANGELOG.md`](./CHANGELOG.md)。
+- 源码版本 **0.2.7**（一键更新装完会自己重启 dsh-web；Cordis 的包名会改成实际装上的 `@fengye_nobug/dsh-qq-bot`）。已经发布的是 **v0.2.5**，npm 上对应 `@fengye_nobug/dsh-qq-bot@0.2.5`。源码这一版还没打 tag，也还没 `npm publish`。v0.2.5 自带补丁里的 `name` 仍是无作用域的 `dsh-qq-bot`，装完若设置页是 HTTP 404，先把 `qq-bridge` 的 `name` 改成 `@fengye_nobug/dsh-qq-bot` 再重启。见 [`CHANGELOG.md`](./CHANGELOG.md)。
 - **M1–M8 全部完成**，已在**真实 NapCat + 真实 QQ** 上端到端跑通（Windows 真机）
 
 ## 目录
@@ -49,7 +49,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.5
   也认 `[表情182]` 和 `[CQ:face,id=182]`。详见[出站](#出站三种模式--来源闸门)。
 - **有设置卡片**：名称是白话（哪些群可以叫醒、群里发出去的是哪一段、忙的时候怎么插话等），
   配置键仍是英文。在 `设置 → 插件 → 插件配置` 里修改，保存即生效。
-- **可以一键更新**：先点「检查更新」。有新正式版时再点「更新到 vX.Y.Z」，面板会装上并重启。优先从 npm 安装 `@fengye_nobug/dsh-qq-bot@版本`；这一版还没发到 npm 时，改从 GitHub 下载。装完把 Cordis 里 `qq-bridge` 的 `name` 改成实际装上的包名。超过三分钟没有结束就停掉卡住的安装进程；要装的版本已经在磁盘上时仍改包名，并请你自己重启 dsh-web。启动时检查不会自动安装。
+- **可以一键更新**：先点「检查更新」。有新正式版时再点「更新到 vX.Y.Z」，面板会装上并自己重启 dsh-web。优先从 npm 安装 `@fengye_nobug/dsh-qq-bot@版本`；这一版还没发到 npm 时，改从 GitHub 下载。装完把 Cordis 里 `qq-bridge` 的 `name` 改成实际装上的包名。超过三分钟没有结束就停掉卡住的安装进程；要装的版本已经在磁盘上时仍改包名，并自动重启。只有自动重启没有安排上，才提示自己重启。启动时检查不会自动安装。
 - **NapCat 自助托管**：插件可以按需下载、校验、解包、写配置、启停 NapCat。
 
 **不做的三件事**：
@@ -60,7 +60,7 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.5
 
 ## 安装
 
-日常安装用 npm 上已经发出的 **`@fengye_nobug/dsh-qq-bot@0.2.5`**。无作用域的 `dsh-qq-bot@版本` 装不上：npm 不接受这个名字，它和已有的 `dsh-qqbot` 太像。GitHub [Releases](https://github.com/yunfengnobug/dsh-qq-bot/releases) 上已经发出的是 **v0.2.5**。仓库源码如果已经是 0.2.6，那是还没打 tag、也还没发到 npm 的版本，日常不要装 main。某一版还没出现在 registry 里时，一键更新会改从 GitHub 下载。v0.2.5 的补丁仍把 Cordis 的 `name` 写成 `dsh-qq-bot`。装上这一版后，一键更新会在安装成功时把 profile、home（写了 `qq-bridge` 才改）和插件补丁里的 `name` 改成磁盘上的包名。
+日常安装用 npm 上已经发出的 **`@fengye_nobug/dsh-qq-bot@0.2.5`**。无作用域的 `dsh-qq-bot@版本` 装不上：npm 不接受这个名字，它和已有的 `dsh-qqbot` 太像。GitHub [Releases](https://github.com/yunfengnobug/dsh-qq-bot/releases) 上已经发出的是 **v0.2.5**。仓库源码如果已经是 0.2.7，那是还没打 tag、也还没发到 npm 的版本，日常不要装 main。某一版还没出现在 registry 里时，一键更新会改从 GitHub 下载。v0.2.5 的补丁仍把 Cordis 的 `name` 写成 `dsh-qq-bot`。装上这一版后，一键更新会在安装成功时把 profile、home（写了 `qq-bridge` 才改）和插件补丁里的 `name` 改成磁盘上的包名。
 
 ```sh
 dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@0.2.5
@@ -105,13 +105,13 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot
 
 无作用域名字发不出去。第 1 步如果发现 registry 里没有 `@fengye_nobug/dsh-qq-bot` 的这一版，会改从 GitHub 下载该标签的官方源码包：先 `github.com`，连不上再试同一标签的 `codeload.github.com`，然后交给 `dsh plugin add`。v0.2.4 及更早标签里的 `package.json` 仍是无作用域名，这种源码包仍然能装，Cordis 的 `name` 也保持 `dsh-qq-bot`。v0.2.5 的 `package.json` 已是作用域包，但补丁里的 `name` 还是旧的，所以会 404。插件不写死第三方镜像。registry 里已经有比当前新的正式版时，检查和安装不再访问 GitHub。
 
-从 0.2.5 点「更新」时，执行的还是那一版里的安装程序，不会改 profile。若设置页变成 HTTP 404，把 profile 和插件目录里 `qq-bridge` 的 `name` 改成 `@fengye_nobug/dsh-qq-bot`，再重启 dsh-web。这一版（0.2.6）自己跑一键更新时会改。
+从 0.2.5 点「更新」时，执行的还是那一版里的安装程序，不会改 profile，也不会自己重启。若设置页变成 HTTP 404，把 profile 和插件目录里 `qq-bridge` 的 `name` 改成 `@fengye_nobug/dsh-qq-bot`，再重启 dsh-web。这一版（0.2.7）自己跑一键更新时会改包名，并在装完后自动重启。
 
-「检查更新」和「启动时检查一次」只询问，不会安装。已经是最新正式版时不出现更新按钮。不会装比当前更旧的版本，也不装草稿和预发布。连不上、安装失败、面板没能重启，都用白话说明。安装已经成功但没能安排重启时，新版本在磁盘上，需要自己重启 dsh-web。包名已经改好的话，重启后设置页会回来。
+「检查更新」和「启动时检查一次」只询问，不会安装。已经是最新正式版时不出现更新按钮。不会装比当前更旧的版本，也不装草稿和预发布。连不上、安装失败、面板没能重启，都用白话说明。安装已经成功但自动重启没有安排上时，新版本在磁盘上，需要自己重启 dsh-web。包名已经改好的话，重启后设置页会回来。
 
-安装超过三分钟没有结束时，会停掉卡住的 dsh 和它带起来的 pnpm，并用白话说明。profile 里的 `.plugin-manager/run.json` 只在记录的进程已经不在、或记录读不懂时删掉；进程还在就不会再开一次安装。超时后如果要装的版本已经在磁盘上，包名仍会改成实际安装的包，但不会自动重启，需要自己重启 dsh-web。没有确认装上时，可以再点一次「更新」。
+安装超过三分钟没有结束时，会停掉卡住的 dsh 和它带起来的 pnpm，并用白话说明。profile 里的 `.plugin-manager/run.json` 只在记录的进程已经不在、或记录读不懂时删掉；进程还在就不会再开一次安装。超时后如果要装的版本已经在磁盘上，包名仍会改成实际安装的包，然后自动重启 dsh-web。没有确认装上时，可以再点一次「更新」，这时不会重启。
 
-在 Linux 上，进程由 systemd 拉起并且能认出具体服务时，大约 3 秒后只重启那个服务。只看到用户会话、认不出单独服务时，请自己重启 dsh-web。没有被 systemd 拉起时，响应发出后按当前的 node 命令行再拉起一次。这次更新不改 NapCat 的配置，也不去停它。插件自己拉起的 NapCat 会随 dsh-web 退出而结束；已经在外面跑着的 NapCat 继续运行。
+在 Linux 上，进程由 systemd 拉起并且能认出具体服务时，大约 3 秒后只重启那个服务。服务挂在用户实例（`user@`）下面时，用 `systemctl --user`，不会重启整个登录。认不出单独服务，或 `systemd-run` 没有权限、执行失败时，改为按当前的 node 命令行再拉起一次。两条都做不到，才提示自己重启 dsh-web。没有被 systemd 拉起时，响应发出后按当前命令行再拉起一次。这次更新不改 NapCat 的配置，也不去停它。插件自己拉起的 NapCat 会随 dsh-web 退出而结束；已经在外面跑着的 NapCat 继续运行。
 
 想让 npm 走镜像，把 npm / pnpm 的 registry 配成你自己的镜像。插件只在没读到配置时用 `https://registry.npmjs.org/`。
 
@@ -170,7 +170,7 @@ dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@0.2.5
 
 无作用域的 `dsh-qq-bot` 发不出去，npm 认为它和已有的 `dsh-qqbot` 太像。不要写成 `dsh plugin add dsh-qq-bot@版本`。
 
-registry 里还没有要装的那一版时（源码 0.2.6 尚未发布），改用 GitHub：
+registry 里还没有要装的那一版时（源码 0.2.7 尚未发布），改用 GitHub：
 
 ```sh
 dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.5
@@ -477,7 +477,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 
 卡片上方显示**当前版本**，并有 **检查更新**。接口是 `GET/POST /api/qq-bridge/update`，准入和设置接口相同。GET 只读当前版本，不去 npm，也不去 GitHub。POST 不带 `action` 才对比版本：先问 npm registry 里的 `@fengye_nobug/dsh-qq-bot` 正式版。有比当前新的版本时，写出版本号和 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@x.y.z`，并且不再访问 GitHub。npm 上还没有更新、但 GitHub Release 上有更新时，才改问 GitHub，并说明一键更新会从 GitHub 下载。没有新版、连不上、被限流，都用白话说明。检查本身不会下载或安装。
 
-有新版时出现 **更新到 vX.Y.Z**。点下去才发送 `POST { "action": "apply", "version": "x.y.z" }`。优先 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@x.y.z`。registry 里没有这个版本时，改从 GitHub 的官方源码包装上。安装成功后，把 profile、`$DSH_HOME/cordis.patch.yml`（有 `qq-bridge` 这一行才改）和已安装插件补丁里的 `name` 改成磁盘上 `package.json` 的包名，然后重启面板。只改我们自己的旧包名（`dsh-qq-bot`、`dsh-qq-bridge`），不改 `config`，也不改别的插件。按钮下面写着：设置还在，不改 NapCat；重启后请刷新，登录口令可能会变；安装如果超过三分钟没有动静，会停掉卡住的进程，并用白话说明。进行中显示「正在更新…」。已经是最新正式版时没有这个按钮。超过三分钟还没装完时停掉这次的 dsh 和 pnpm。`.plugin-manager/run.json` 里的进程还在就不删，也不再开第二个安装；进程已经不在或记录读不懂才删。超时后如果磁盘上已经是要装的版本，仍改包名，请自己重启 dsh-web，不会自动重启。
+有新版时出现 **更新到 vX.Y.Z**。点下去才发送 `POST { "action": "apply", "version": "x.y.z" }`。优先 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@x.y.z`。registry 里没有这个版本时，改从 GitHub 的官方源码包装上。安装成功后，把 profile、`$DSH_HOME/cordis.patch.yml`（有 `qq-bridge` 这一行才改）和已安装插件补丁里的 `name` 改成磁盘上 `package.json` 的包名，然后重启面板。只改我们自己的旧包名（`dsh-qq-bot`、`dsh-qq-bridge`），不改 `config`，也不改别的插件。按钮下面写着：设置还在，不改 NapCat；重启后请刷新，登录口令可能会变；安装如果超过三分钟没有动静，会停掉卡住的进程，并用白话说明。进行中显示「正在更新…」。已经是最新正式版时没有这个按钮。超过三分钟还没装完时停掉这次的 dsh 和 pnpm。`.plugin-manager/run.json` 里的进程还在就不删，也不再开第二个安装；进程已经不在或记录读不懂才删。超时后如果磁盘上已经是要装的版本，仍改包名，并自动重启 dsh-web。自动重启没有安排上时，才提示自己重启。
 
 「启动时检查一次」默认关。打开并保存后，下次启动 dsh-web 才问一次，结果只写在日志里，不会安装。
 
@@ -628,7 +628,7 @@ QQ 侧没有人能点击“同意”，因此：
 
 改用法、设置或运行行为时，同一次提交里更新本文件。约定见 [`AGENTS.md`](./AGENTS.md)。
 
-5 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器；检查更新不连真 npm、也不连真 GitHub），共 **778 条断言**：
+5 个套件都是**零依赖**（测试自己造 zip、自己起一个最小 OneBot WS 服务器；检查更新不连真 npm、也不连真 GitHub），共 **812 条断言**：
 
 ```powershell
 node test-smoke.mjs     # 策略分支 + 出站闸门 + 描述缓存命中 + 表情包工具（含 mface）+ 系统表情分段 + 设置卡片字段 + 检查更新和一键安装接口（假 ctx，纯离线）
