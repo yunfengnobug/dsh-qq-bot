@@ -241,7 +241,7 @@ export function assessUpdate({ current, releases, repo = UPDATE_REPO, channel = 
       kind: 'no-release',
       current: parsedCurrent.raw,
       updateAvailable: false,
-      message: 'GitHub 上还没有可用的正式版，没法对比新版本。',
+      message: channel === 'npm' ? 'npm 上还没有可用的正式版，没法对比新版本。' : 'GitHub 上还没有可用的正式版，没法对比新版本。',
     }
   }
   stable.sort((left, right) => compareSemver(right.parsed, left.parsed) ?? 0)
@@ -263,21 +263,21 @@ export function assessUpdate({ current, releases, repo = UPDATE_REPO, channel = 
     url,
   }
   if (compared > 0) {
-    const lines = [`有新版本 ${latest.parsed.raw}（你现在是 ${parsedCurrent.raw}）。`]
-    if (summary) lines.push(`说明：${summary}`)
-    lines.push(`升级命令：${command}`)
-    lines.push('装完请重启 dsh-web。')
-    if (useNpm) lines.push(`也可以在设置卡片里点「更新到 v${latest.parsed.raw}」，面板会从 npm 装上并重启。`)
-    else lines.push(`也可以在设置卡片里点「更新到 v${latest.parsed.raw}」，面板会自己装并重启。`)
-    if (!useNpm) lines.push(`发布页：${url}`)
-    return { ...base, kind: 'update', updateAvailable: true, message: lines.join('\n') }
+    const where = useNpm ? 'npm' : 'GitHub'
+    return {
+      ...base,
+      kind: 'update',
+      updateAvailable: true,
+      message: `有新版本 ${latest.parsed.raw}（现在是 ${parsedCurrent.raw}），在 ${where} 上。这里只检查，还没安装。`,
+    }
   }
   if (compared < 0) {
+    const where = useNpm ? 'npm' : 'GitHub'
     return {
       ...base,
       kind: 'ahead',
       updateAvailable: false,
-      message: `你现在的 ${parsedCurrent.raw} 比 GitHub 上最新正式版 ${latest.parsed.raw} 还新，不用按 Release 往回装。`,
+      message: `你现在的 ${parsedCurrent.raw} 比 ${where} 上最新正式版 ${latest.parsed.raw} 还新，不用往回装。`,
     }
   }
   return {
@@ -443,19 +443,6 @@ export async function queryNpmVersions(input = {}) {
   return { ok: false, code: 'network' }
 }
 
-function noteGithubFallback(assessed) {
-  if (!assessed || assessed.updateAvailable !== true) return assessed
-  const message = String(assessed.message ?? '')
-  if (message.includes('还没发到 npm') || !message.includes('也可以在设置卡片里点')) return assessed
-  return {
-    ...assessed,
-    message: message.replace(
-      '也可以在设置卡片里点',
-      '这一版还没发到 npm，一键更新会改从 GitHub 下载。\n也可以在设置卡片里点',
-    ),
-  }
-}
-
 function lookupFailure(npmCode, githubError, applying) {
   const raw = String(githubError ?? '')
   if (npmCode === 'network' && /连不上 GitHub/.test(raw)) {
@@ -494,7 +481,7 @@ async function findUpdate(input) {
       if (wanted !== '') return { ok: false, error: '这次检查到的正式版里没有这个版本，没有安装。' }
       return { ok: true, channel: 'npm', releases, assessed }
     }
-    const ghAssessed = noteGithubFallback(assessUpdate({ current: input.current, releases: gh.releases, repo, channel: 'github' }))
+    const ghAssessed = assessUpdate({ current: input.current, releases: gh.releases, repo, channel: 'github' })
     if (ghAssessed.ok === false) return { ok: false, error: ghAssessed.message }
     const npmLatest = assessed.latest || '0.0.0'
     const githubNewer = ghAssessed.updateAvailable === true && (compareSemver(ghAssessed.latest, npmLatest) ?? 0) > 0
@@ -510,7 +497,7 @@ async function findUpdate(input) {
   }
   const gh = await queryGithubReleases(input.fetchImpl, { repo, timeoutMs: input.timeoutMs })
   if (!gh.ok) return { ok: false, error: lookupFailure(npm.code, gh.error, input.applying === true) }
-  const assessed = noteGithubFallback(assessUpdate({ current: input.current, releases: gh.releases, repo, channel: 'github' }))
+  const assessed = assessUpdate({ current: input.current, releases: gh.releases, repo, channel: 'github' })
   if (assessed.ok === false) return { ok: false, error: assessed.message }
   return { ok: true, channel: 'github', releases: gh.releases, assessed }
 }
@@ -643,8 +630,9 @@ function installError(code, command, extra = {}) {
   return `安装没有成功。${hint}`
 }
 
-function restartError() {
-  return '新版本已经装上，但面板没有重启。请自己重启 dsh-web，装好的才会生效。重启后请刷新页面，登录口令可能会变。'
+function restartError(channel) {
+  const via = channel === 'npm' ? '从 npm ' : channel === 'github' ? '从 GitHub ' : ''
+  return `新版本已经${via}装上，但没能自动重启面板。请自己重启 dsh-web，然后刷新页面。登录口令可能会变。`
 }
 
 function headerValue(response, name) {
@@ -1834,10 +1822,8 @@ function alignNote(input, expectedVersion) {
 }
 
 function successMessage(tag, channel, note = '') {
-  const via = channel === 'npm'
-    ? '这次是从 npm 装的。'
-    : '这一版在 npm 上还没有，所以从 GitHub 装上。'
-  const base = `已经装上 ${tag}，面板即将重启。请刷新页面；登录口令可能会变，用新的面板地址再打开。${via}现有设置还在，没有改动 NapCat。`
+  const via = channel === 'npm' ? 'npm' : 'GitHub'
+  const base = `已经从 ${via} 装上 ${tag}，面板即将重启。`
   return note ? `${base}${note}` : base
 }
 
@@ -2015,7 +2001,7 @@ async function finishApply(input, decision, channel) {
     restart = { ok: false, error: restartError() }
   }
   if (!restart || restart.ok !== true) {
-    const message = `${restart?.error || restartError()}${note}`
+    const message = `${restartError(channel)}${note}`
     return {
       ok: false,
       stage: 'restart',

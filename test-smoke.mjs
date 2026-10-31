@@ -1516,17 +1516,19 @@ function sawSentText(s) {
       )
       check('检查更新按钮不在浏览器里直接打 GitHub', src.includes('检查更新') && src.includes('/api/qq-bridge/update') && !src.includes('api.github.com') && !src.includes('codeload.github.com'))
       check(
-        '有新版本才出现更新按钮，并说明会重启、登录口令可能变',
+        '有新版本才出现更新按钮；检查只检查，不把长说明铺在卡片上',
         src.includes('更新到 ') &&
           src.includes("action: 'apply'") &&
           src.includes('正在更新…') &&
-          src.includes('这一版并重启面板') &&
-          src.includes('@fengye_nobug/dsh-qq-bot') &&
-          src.includes('优先从 npm') &&
-          src.includes('先问 npm') &&
+          src.includes('只检查，不安装。') &&
+          src.includes('装完会重启面板。') &&
           src.includes('登录口令可能会变') &&
           src.includes('不改 NapCat') &&
           src.includes('updateAvailable') &&
+          !src.includes('优先从 npm') &&
+          !src.includes('先问 npm') &&
+          !src.includes('三分钟') &&
+          !src.includes('这一版并重启面板') &&
           !src.includes('npmmirror') &&
           !src.includes('ghproxy'),
       )
@@ -4973,12 +4975,14 @@ function sawSentText(s) {
     await handler(req('POST'), resNew)
     const newer = JSON.parse(resNew.out.body)
     check(
-      'POST /update：有新版时给出版本号、摘要和 tag 安装命令',
+      'POST /update：有新版时短句写明 GitHub，摘要和安装命令留在字段里',
       newer.ok === true &&
         newer.updateAvailable === true &&
         newer.latest === '9.9.9' &&
-        String(newer.message).includes('有新版本 9.9.9') &&
-        String(newer.message).includes('商城表情可以再发一次') &&
+        newer.message === `有新版本 9.9.9（现在是 ${PLUGIN_VERSION}），在 GitHub 上。这里只检查，还没安装。` &&
+        String(newer.summary).includes('商城表情可以再发一次') &&
+        !String(newer.message).includes('商城表情可以再发一次') &&
+        !String(newer.message).includes('升级命令') &&
         newer.install === 'github:yunfengnobug/dsh-qq-bot#v9.9.9' &&
         String(newer.command).includes('dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v9.9.9'),
       JSON.stringify(newer).slice(0, 240),
@@ -5098,7 +5102,7 @@ function sawSentText(s) {
   check('启动时检查一次：开关打开才会问 npm，包还不在 npm 上时再问 GitHub', fetches === 2, String(fetches))
   check(
     '启动时检查一次：日志是白话，链接不跟到别的网站',
-    logs.some((line) => line.includes('启动时检查更新：') && line.includes('9.9.9') && line.includes('github.com/yunfengnobug/dsh-qq-bot') && !line.includes('evil.example') && !/TypeError|fetch failed/.test(line)),
+    logs.some((line) => line.includes('启动时检查更新：') && line.includes('9.9.9') && line.includes('在 GitHub 上') && line.includes('只检查') && !line.includes('evil.example') && !/TypeError|fetch failed/.test(line)),
     logs.join(' | ').slice(0, 240),
   )
   globalThis.fetch = savedFetch

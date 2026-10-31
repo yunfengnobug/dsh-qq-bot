@@ -475,9 +475,9 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 > 宿主 `requestRejection()` 返回空、`undefined` 或 `0` **不算**已登录。已登录只认宿主明确给出的结果：`isAuthenticated`、浏览器会话，或 `admit()` 交回的身份。没有这个结果的外网请求是 403。来源是别的网站、和 `Host` 对不上的请求也是 403，就算带着 cookie 也不行。接口只写 schema 白名单里的键。
 > 判断面板监听器是不是 HTTPS 时，只通过 `ctx.get('webServer')` 读协议，不读 `ctx.webServer`。插件没有把 `webServer` 放进 inject。直接读这个属性会抛错，宿主会把这次请求收成**没有正文的 HTTP 400**，卡片诊断就显示本机接口不可用，即使浏览器里已经登录。读不到这项服务、或读取失败时，按 HTTP 继续做登录判定。
 
-卡片上方显示**当前版本**，并有 **检查更新**。接口是 `GET/POST /api/qq-bridge/update`，准入和设置接口相同。GET 只读当前版本，不去 npm，也不去 GitHub。POST 不带 `action` 才对比版本：先问 npm registry 里的 `@fengye_nobug/dsh-qq-bot` 正式版。有比当前新的版本时，写出版本号和 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@x.y.z`，并且不再访问 GitHub。npm 上还没有更新、但 GitHub Release 上有更新时，才改问 GitHub，并说明一键更新会从 GitHub 下载。没有新版、连不上、被限流，都用白话说明。检查本身不会下载或安装。
+卡片上方显示**当前版本**，并有 **检查更新**。按钮旁边只写「只检查，不安装。」接口是 `GET/POST /api/qq-bridge/update`，准入和设置接口相同。GET 只读当前版本，不去 npm，也不去 GitHub。POST 不带 `action` 才对比版本：先问 npm registry 里的 `@fengye_nobug/dsh-qq-bot` 正式版。有比当前新的版本时，卡片上写短句「有新版本 x.y.z（现在是 a.b.c），在 npm 上。这里只检查，还没安装。」并且不再访问 GitHub。npm 上还没有更新、但 GitHub Release 上有更新时，改问 GitHub，短句里写「在 GitHub 上」。安装命令和说明摘要仍在接口字段里，不铺在这句主提示上。没有新版、连不上、被限流，都用白话说明。检查本身不会下载或安装。
 
-有新版时出现 **更新到 vX.Y.Z**。点下去才发送 `POST { "action": "apply", "version": "x.y.z" }`。优先 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@x.y.z`。registry 里没有这个版本时，改从 GitHub 的官方源码包装上。安装成功后，把 profile、`$DSH_HOME/cordis.patch.yml`（有 `qq-bridge` 这一行才改）和已安装插件补丁里的 `name` 改成磁盘上 `package.json` 的包名，然后重启面板。只改我们自己的旧包名（`dsh-qq-bot`、`dsh-qq-bridge`），不改 `config`，也不改别的插件。按钮下面写着：设置还在，不改 NapCat；重启后请刷新，登录口令可能会变；安装如果超过三分钟没有动静，会停掉卡住的进程，并用白话说明。进行中显示「正在更新…」。已经是最新正式版时没有这个按钮。超过三分钟还没装完时停掉这次的 dsh 和 pnpm。`.plugin-manager/run.json` 里的进程还在就不删，也不再开第二个安装；进程已经不在或记录读不懂才删。超时后如果磁盘上已经是要装的版本，仍改包名，并自动重启 dsh-web。自动重启没有安排上时，才提示自己重启。
+有新版时出现 **更新到 vX.Y.Z**。旁边只加一句「装完会重启面板。请刷新；登录口令可能会变。不改 NapCat。」点下去才发送 `POST { "action": "apply", "version": "x.y.z" }`。优先 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@x.y.z`。registry 里没有这个版本时，改从 GitHub 的官方源码包装上。安装成功后，把 profile、`$DSH_HOME/cordis.patch.yml`（有 `qq-bridge` 这一行才改）和已安装插件补丁里的 `name` 改成磁盘上 `package.json` 的包名，然后重启面板。只改我们自己的旧包名（`dsh-qq-bot`、`dsh-qq-bridge`），不改 `config`，也不改别的插件。成功时主提示是「已经从 npm 装上 vX.Y.Z，面板即将重启。」或「已经从 GitHub 装上 vX.Y.Z，面板即将重启。」进行中显示「正在更新…」。已经是最新正式版时没有这个按钮。超过三分钟还没装完时停掉这次的 dsh 和 pnpm。`.plugin-manager/run.json` 里的进程还在就不删，也不再开第二个安装；进程已经不在或记录读不懂才删。超时后如果磁盘上已经是要装的版本，仍改包名，并自动重启 dsh-web。自动重启没有安排上时，才提示自己重启，并写明这次是从 npm 还是从 GitHub 装上的。
 
 「启动时检查一次」默认关。打开并保存后，下次启动 dsh-web 才问一次，结果只写在日志里，不会安装。
 
@@ -530,7 +530,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `downloadProxy` | `''` | 下载时走的代理；空 = 先看 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`。NapCat 下载，以及一键更新改从 GitHub 下载时，都用它。从 npm 安装时走 pnpm 自己的 registry，不读这个框。界面上不显示代理地址 |
 | `onebotPort` | `3001` | OneBot 端口。自己另外部署的 NapCat 要和这边一致 |
 | `qqNumber` | `''` | 快速登录用的 QQ 号（需先手动登录过一次） |
-| `checkUpdateOnStart` | `false` | 启动时检查一次。默认关。打开后，下次启动先问 npm 上的 `@fengye_nobug/dsh-qq-bot`；npm 上还没有更新时再问 GitHub。只写日志，不自动安装。要装用卡片上的「更新到 vX.Y.Z」 |
+| `checkUpdateOnStart` | `false` | 启动时检查一次。默认关。打开后，下次启动只检查有没有新版本，写在日志里，不自动安装。要装用卡片上的「更新到 vX.Y.Z」 |
 
 这些值优先从设置界面 / `settings.yaml` 取，未设置时回落到 `cordis.patch.yml` 里的安装配置（composition base）。
 

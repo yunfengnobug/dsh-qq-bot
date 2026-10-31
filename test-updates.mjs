@@ -82,12 +82,12 @@ const newer = assessUpdate({
 })
 check('有新正式版：跳过草稿和预发布，取最高的', newer.updateAvailable === true && newer.latest === '0.2.4' && newer.kind === 'update')
 check(
-  '有新正式版：白话里有版本、摘要、安装命令和重启',
-  newer.message.includes('有新版本 0.2.4') &&
-    newer.message.includes('你现在是 0.2.3') &&
-    newer.message.includes('设置页可以检查更新') &&
-    newer.message.includes('装完请重启 dsh-web') &&
-    newer.message.includes('更新到 v0.2.4') &&
+  '有新正式版：短句写明在 GitHub 上，只检查不安装',
+  newer.message === '有新版本 0.2.4（现在是 0.2.3），在 GitHub 上。这里只检查，还没安装。' &&
+    newer.summary.includes('设置页可以检查更新') &&
+    !newer.message.includes('装完请重启') &&
+    !newer.message.includes('升级命令') &&
+    !newer.message.includes('三分钟') &&
     newer.command === installCommand('0.2.4') &&
     newer.install === 'github:yunfengnobug/dsh-qq-bot#v0.2.4',
   newer.message,
@@ -559,9 +559,8 @@ check(
     installed.result.tag === 'v9.9.9' &&
     installed.result.install === 'github:yunfengnobug/dsh-qq-bot#v9.9.9' &&
     installed.result.command === installCommand('9.9.9') &&
-    /已经装上 v9.9.9/.test(installed.result.message) &&
-    /登录口令可能会变/.test(installed.result.message) &&
-    /没有改动 NapCat/.test(installed.result.message) &&
+    installed.result.message.startsWith('已经从 GitHub 装上 v9.9.9，面板即将重启。') &&
+    !/登录口令|不改 NapCat|三分钟|优先从 npm/.test(installed.result.message) &&
     !installed.result.message.includes('codeload') &&
     !installed.result.message.includes('evil.example') &&
     !/TypeError|fetch failed|\n\s+at /.test(installed.result.message) &&
@@ -850,11 +849,13 @@ const restartFailed = await applyWith({
   scheduleRestart: async () => ({ ok: false, error: undefined }),
 })
 check(
-  '装上了但没重启：说清楚已经装上，并提醒登录口令',
+  '装上了但没重启：写明从 GitHub 装上，并请人自己重启',
   restartFailed.result.ok === false &&
     restartFailed.result.stage === 'restart' &&
     restartFailed.result.installed === true &&
-    /已经装上/.test(restartFailed.result.error) &&
+    restartFailed.result.channel === 'github' &&
+    /新版本已经从 GitHub 装上/.test(restartFailed.result.error) &&
+    /请自己重启 dsh-web/.test(restartFailed.result.error) &&
     /登录口令/.test(restartFailed.result.error) &&
     !/TypeError|\n\s+at /.test(restartFailed.result.error),
   String(restartFailed.result.error),
@@ -920,8 +921,9 @@ check(
     npmChecked.latest === '9.9.9' &&
     npmChecked.install === '@fengye_nobug/dsh-qq-bot@9.9.9' &&
     npmChecked.command === npmInstallCommand('9.9.9') &&
-    npmChecked.message.includes('从 npm 装上') &&
+    npmChecked.message === '有新版本 9.9.9（现在是 0.2.3），在 npm 上。这里只检查，还没安装。' &&
     !npmChecked.message.includes('github:') &&
+    !npmChecked.message.includes('升级命令') &&
     npmPack.calls.length === 1,
   npmChecked.message,
 )
@@ -942,9 +944,7 @@ check(
     viaNpm.result.channel === 'npm' &&
     viaNpm.result.install === '@fengye_nobug/dsh-qq-bot@9.9.9' &&
     viaNpm.result.command === npmInstallCommand('9.9.9') &&
-    /已经装上 v9.9.9/.test(viaNpm.result.message) &&
-    /从 npm 装的/.test(viaNpm.result.message) &&
-    /没有改动 NapCat/.test(viaNpm.result.message) &&
+    viaNpm.result.message === '已经从 npm 装上 v9.9.9，面板即将重启。' &&
     viaNpm.seen.length === 1 &&
     viaNpm.seen[0].packageSpec === '@fengye_nobug/dsh-qq-bot@9.9.9' &&
     viaNpm.seen[0].profile === 'web' &&
@@ -1112,9 +1112,8 @@ check(
   '一键安装成功后说明 Cordis 包名已改成实际安装的包',
   appliedWithHome.ok === true &&
     appliedWithHome.channel === 'npm' &&
-    /已经装上 v9.9.9/.test(appliedWithHome.message) &&
+    appliedWithHome.message.startsWith('已经从 npm 装上 v9.9.9，面板即将重启。') &&
     /Cordis 里 qq-bridge 的包名已经改成实际安装的 @fengye_nobug\/dsh-qq-bot/.test(appliedWithHome.message) &&
-    /没有改动 NapCat/.test(appliedWithHome.message) &&
     appliedAlign.result.ok === true &&
     !/Cordis 里 qq-bridge/.test(appliedAlign.result.message),
   appliedWithHome.message,
@@ -1323,9 +1322,7 @@ check(
     hungSignals.some(([target, signal]) => target === -4242 && signal === 'SIGTERM') &&
     hungSignals.some(([target, signal]) => target === 4242 && signal === 'SIGTERM') &&
     hungSignals.some(([target, signal]) => target === -4242 && signal === 'SIGKILL') &&
-    /已经装上 v9.9.9/.test(hung.message) &&
-    /即将重启/.test(hung.message) &&
-    /从 npm 装的/.test(hung.message) &&
+    hung.message.startsWith('已经从 npm 装上 v9.9.9，面板即将重启。') &&
     /包名已经改成实际安装的 @fengye_nobug\/dsh-qq-bot/.test(hung.message) &&
     !/请自己重启|请重启 dsh-web/.test(hung.message) &&
     hungPatch.includes("name: '@fengye_nobug/dsh-qq-bot'") &&
@@ -1399,8 +1396,8 @@ check(
     giveUpHung.restarting !== true &&
     giveUpHung.channel === 'npm' &&
     giveUpRestarted === true &&
-    /已经装上/.test(giveUpHung.message) &&
-    /请自己重启/.test(giveUpHung.message) &&
+    /已经从 npm 装上/.test(giveUpHung.message) &&
+    /请自己重启 dsh-web/.test(giveUpHung.message) &&
     !/Error|at\s/.test(giveUpHung.message),
   giveUpHung.message,
 )
@@ -1548,7 +1545,7 @@ const quick = await applyPluginUpdate({
 })
 check(
   '宽限期内安装进程以 0 退出仍算装上，并安排重启',
-  quick.ok === true && quick.restarting === true && quickRestarted === true && /已经装上 v9.9.9/.test(quick.message),
+  quick.ok === true && quick.restarting === true && quickRestarted === true && quick.message.startsWith('已经从 npm 装上 v9.9.9，面板即将重启。'),
   quick.message,
 )
 
