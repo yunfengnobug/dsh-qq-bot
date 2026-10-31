@@ -50,6 +50,8 @@ dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#v0.2.5
 
 白名单默认全关。先在设置卡片里填「哪些群可以叫醒」或「哪些私聊可以叫醒」，保存后再去 @。不要把真实群号、QQ 号写进仓库。
 
+群白名单仍按群号填写。连上之后，卡片里每个群号旁边会显示当前群名和头像。没连上，或暂时查不到，就只显示群号，保存不受影响。
+
 DSH 0.2 的卡片把值写进 `$DSH_HOME/qq-bridge-settings.json`。这份文件比 `cordis.patch.yml` 优先，保存后马上生效，重启还在。只改 `cordis.patch.yml` 要重启。
 
 主人 QQ（`ownerWhitelist`，默认 `[]`）决定谁能在 QQ 里改群白名单。**留空 = 这些命令不会生效。** 设置卡片里还没有这一项，写在下面两处之一：
@@ -66,7 +68,7 @@ DSH 0.2 的卡片把值写进 `$DSH_HOME/qq-bridge-settings.json`。这份文件
 | `nicknames` | `244`、`小助手` | 听到这些名字就叫醒 |
 | `wakeProbability` | `0.05` | 没点名时的叫醒概率 |
 | `whitelist` | `[]` | 哪些私聊可以叫醒。留空 = 都不叫醒 |
-| `groupWhitelist` | `[]` | 哪些群可以叫醒。留空 = 都不叫醒 |
+| `groupWhitelist` | `[]` | 哪些群可以叫醒。留空 = 都不叫醒。卡片里查到群名时，群号旁边有名字和头像 |
 | `ownerWhitelist` | `[]` | 主人 QQ。留空 = 不能在 QQ 里改群白名单 |
 | `onebotUrl` | 空 | NapCat 正向 WebSocket。留空 = 不连接 |
 | `atOnlyInGroup` | `false` | 打开后，群里没被 @ 就不处理 |

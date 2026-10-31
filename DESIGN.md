@@ -606,7 +606,7 @@ QQ 的“拍一拍”在 OneBot 里走的是 **notice 事件**，不是消息段
 | `maxRecentTurns` | `40` | 每个会话最多留几轮。超出后调用宿主 `compaction.compactNow` 尽量压缩。有投影时看投影轮数。压完没变短就停。`0` = 不限制 |
 | `nicknames` | `['244','小助手']` | 听到这些名字就回应 |
 | `wakeProbability` | `0.05` | 没点名时的回应概率 |
-| `whitelist` / `groupWhitelist` | `[]` | 哪些私聊可以叫醒 / 哪些群可以叫醒（**留空 = 谁都不能叫醒**） |
+| `whitelist` / `groupWhitelist` | `[]` | 哪些私聊可以叫醒 / 哪些群可以叫醒（**留空 = 谁都不能叫醒**）。群白名单在卡片里按群号填；连上且查到群名时，群号旁边显示当前群名和头像，查不到或没连上只显示群号，不影响保存 |
 | `ownerWhitelist` | `[]` | 主人 QQ。这些号才能在 QQ 里用「白名单」命令（**留空 = 谁都不能用**）。写在设置文件里马上生效；只改 `cordis.patch.yml` 要重启 |
 | `attachRecentChat` / `recentChatLimit` | `true` / `8` | 把没叫醒时的聊天一并带上，以及附带最近几条 |
 | `atOnlyInGroup` | `false` | 群里必须 @ 才理 |

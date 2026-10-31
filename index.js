@@ -503,6 +503,153 @@ export function normalizeGroupId(value) {
   return /^\d{1,16}$/.test(id) ? id : ''
 }
 
+/** 设置卡片里的群头像边长。NapCat 文档里的尺寸是 100、640 或 0。 */
+const GROUP_AVATAR_SIZE = '100'
+/** 成功拿到的群列表可以复用这么久，避免卡片一打开就反复打 OneBot。 */
+const GROUP_META_TTL_MS = 5 * 60 * 1000
+/** 列表没拿到时，多久之内不再打同一次失败的查询。 */
+const GROUP_META_RETRY_MS = 15 * 1000
+/** 一次最多解析多少个群号。再多的只显示群号，避免超长白名单把 OneBot 打满。 */
+const GROUP_META_MAX_IDS = 100
+/** 不在群列表里的号，最多再单独问几次 get_group_info。 */
+const GROUP_INFO_FALLBACK_MAX = 20
+/** 单次查询的上限。到点就放弃，卡片改只显示群号。 */
+const GROUP_META_CALL_MS = 4000
+
+/**
+ * 群头像地址。
+ * get_group_info / get_group_list 只有群名，没有头像字段。
+ * NapCat 维护者说明直接用公开群头像地址，不另做接口。
+ * 不是群号就返回空串。查没查到名字由 resolveGroupMetas 决定要不要带上这个地址。
+ */
+export function groupAvatarUrl(groupId) {
+  const id = normalizeGroupId(groupId)
+  if (id === '') return ''
+  return `https://p.qlogo.cn/gh/${id}/${id}/${GROUP_AVATAR_SIZE}`
+}
+
+function groupMetaFromRow(row) {
+  if (!row || typeof row !== 'object') return null
+  const id = normalizeGroupId(row.group_id)
+  const name = String(row.group_name ?? '').trim() || String(row.group_remark ?? '').trim()
+  if (id === '' || name === '') return null
+  return { id, name }
+}
+
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timeout')), ms)
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
+
+/** 从数组或逗号分隔的文本里抽出群号。非法项丢掉，重复的只留第一次，最多 100 个。 */
+function wantedGroupIds(ids) {
+  const out = []
+  const seen = new Set()
+  const list = Array.isArray(ids) ? ids : String(ids ?? '').split(/[,，\s]+/)
+  for (const raw of list) {
+    const id = normalizeGroupId(raw)
+    if (id === '' || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+    if (out.length >= GROUP_META_MAX_IDS) break
+  }
+  return out
+}
+
+function blankGroupMeta(id) {
+  return { id, name: '', avatar: '' }
+}
+
+function ensureGroupMetaCache(cache) {
+  const box = cache && typeof cache === 'object' ? cache : {}
+  if (!(box.byId instanceof Map)) box.byId = new Map()
+  if (!(box.info instanceof Map)) box.info = new Map()
+  if (typeof box.at !== 'number') box.at = 0
+  if (typeof box.triedAt !== 'number') box.triedAt = 0
+  if (box.ok !== true) box.ok = false
+  return box
+}
+
+function groupMetaClock(source) {
+  if (typeof source?.now !== 'function') return Date.now()
+  const value = Number(source.now())
+  return Number.isFinite(value) ? value : Date.now()
+}
+
+/**
+ * 给一组群号补上当前群名和头像。
+ *
+ * 桥没连上、查询失败、或这个号不在结果里时，那一项只有 id，name 和 avatar 都是空串。
+ * 不抛错，也不写设置。成功的群列表缓存 5 分钟；失败 15 秒内不重复打同一下。
+ * `source.cache` 会被就地更新。
+ */
+export async function resolveGroupMetas(ids, source = {}) {
+  const wanted = wantedGroupIds(ids)
+  if (wanted.length === 0) return []
+  const open = typeof source.isOpen === 'function' && source.isOpen() === true
+  const call = typeof source.call === 'function' ? source.call : null
+  if (!open || !call) return wanted.map(blankGroupMeta)
+
+  const cache = ensureGroupMetaCache(source.cache)
+  const clock = groupMetaClock(source)
+  const listFresh = cache.ok === true && clock - cache.at < GROUP_META_TTL_MS
+  if (!listFresh && clock - cache.triedAt >= GROUP_META_RETRY_MS) {
+    cache.triedAt = clock
+    try {
+      const list = await withTimeout(call('get_group_list', { no_cache: false }), GROUP_META_CALL_MS)
+      const next = new Map()
+      for (const row of Array.isArray(list) ? list : []) {
+        const meta = groupMetaFromRow(row)
+        if (meta) next.set(meta.id, meta)
+      }
+      cache.byId = next
+      cache.at = clock
+      cache.ok = true
+    } catch {
+      cache.ok = false
+    }
+  }
+
+  const known = cache.ok === true && clock - cache.at < GROUP_META_TTL_MS ? cache.byId : new Map()
+  const missing = wanted.filter((id) => !known.has(id)).slice(0, GROUP_INFO_FALLBACK_MAX)
+  if (cache.info.size > 200) cache.info.clear()
+  await Promise.all(
+    missing.map(async (id) => {
+      const prev = cache.info.get(id)
+      if (prev?.meta && clock - prev.at < GROUP_META_TTL_MS) {
+        known.set(id, prev.meta)
+        return
+      }
+      if (prev && !prev.meta && clock - prev.at < GROUP_META_RETRY_MS) return
+      try {
+        const info = await withTimeout(call('get_group_info', { group_id: id, no_cache: false }), GROUP_META_CALL_MS)
+        const meta = groupMetaFromRow(info)
+        cache.info.set(id, { at: clock, meta: meta || null })
+        if (meta) known.set(id, meta)
+      } catch {
+        cache.info.set(id, { at: clock, meta: null })
+      }
+    }),
+  )
+
+  return wanted.map((id) => {
+    const hit = known.get(id)
+    if (!hit?.name) return blankGroupMeta(id)
+    return { id, name: hit.name, avatar: groupAvatarUrl(id) }
+  })
+}
+
 /**
  * 整句是不是「白名单」命令。
  *
@@ -2611,6 +2758,8 @@ export function apply(ctx, config) {
   }
 
   const groupNames = new Map() // groupId -> 群名（懒加载缓存）
+  /** 设置卡片用的群列表缓存。和 groupNames 分开：这边有过期时间，过期或没连上就只显示群号。 */
+  const groupMetaCache = { at: 0, triedAt: 0, ok: false, byId: new Map(), info: new Map() }
 
   const transport = createOneBotTransport({
     getUrl: () => readSettings().onebotUrl,
@@ -4201,6 +4350,42 @@ export function apply(ctx, config) {
     return sendJson(res, 200, presentUpdate(result))
   }
 
+  /**
+   * GET `/api/qq-bridge/groups?ids=群号,群号` —— 设置卡片给群白名单配群名和头像。
+   * 只读。保存白名单仍走设置接口。桥没连上或查不到时仍返回 200，对应项只有群号。
+   */
+  async function handleGroupMetaRequest(req, res) {
+    if (rejectLocalRequest(req, res)) return
+    const method = String(req?.method ?? '').toUpperCase()
+    if (method !== 'GET') {
+      return sendJson(res, 405, { ok: false, error: '这个接口只接受 GET。群白名单用设置接口保存。' })
+    }
+    let raw = ''
+    try {
+      const query = String(req?.url ?? '')
+      const mark = query.indexOf('?')
+      raw = new URLSearchParams(mark === -1 ? '' : query.slice(mark + 1)).get('ids') ?? ''
+    } catch {
+      raw = ''
+    }
+    const tokens = String(raw).slice(0, 8000).split(/[,，\s]+/)
+    let groups
+    try {
+      groups = await resolveGroupMetas(tokens, {
+        isOpen: () => transport.isOpen(),
+        call: (action, params) => transport.call(action, params),
+        cache: groupMetaCache,
+      })
+    } catch (error) {
+      logger.warn(`群资料没有取到：${error?.message ?? error}`)
+      groups = wantedGroupIds(tokens).map((id) => ({ id, name: '', avatar: '' }))
+    }
+    for (const row of groups) {
+      if (row.name) groupNames.set(row.id, row.name)
+    }
+    return sendJson(res, 200, { ok: true, groups })
+  }
+
   // TODO: accessTokenEnv 留空时，可回退读 NapCat 的 onebot11*.json 里的 token（用户说可做可不做）。
   // 可选注入：没有 webServer 服务的部署照常工作（只是卡片上的按钮拿不到地址）。
   if (typeof ctx.inject === 'function') ctx.inject(['webServer'], (scoped) => {
@@ -4234,6 +4419,7 @@ export function apply(ctx, config) {
           }),
         ],
         ['/api/qq-bridge/update', handleUpdateRequest],
+        ['/api/qq-bridge/groups', handleGroupMetaRequest],
       ]
       for (const [path, handler] of routes) disposes.push(server.register({ kind: 'exact', path, handler }))
       scoped.effect(() => () => {
@@ -4245,7 +4431,7 @@ export function apply(ctx, config) {
           }
         }
       })
-      logger.info('NapCat 操作接口已挂载：/api/qq-bridge/napcat{,/launch,/reveal}；检查更新：/api/qq-bridge/update（本机，或已登录的 DSH 面板）')
+      logger.info('NapCat 操作接口已挂载：/api/qq-bridge/napcat{,/launch,/reveal}；群资料：/api/qq-bridge/groups；检查更新：/api/qq-bridge/update（本机，或已登录的 DSH 面板）')
     } catch (error) {
       for (const dispose of disposes) {
         try {

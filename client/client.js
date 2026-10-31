@@ -32,7 +32,7 @@ window.__ModuleLoader__.load({
     const NS = 'qq-bridge'
 
     // ── 表单描述 ──────────────────────────────────────────────────────────────
-    // 加一个设置项 = 在这里加一行。kind: text | list | number | boolean | select
+    // 加一个设置项 = 在这里加一行。kind: text | list | group-list | number | boolean | select | session
     const FIELDS = [
       {
         key: 'checkUpdateOnStart',
@@ -84,8 +84,8 @@ window.__ModuleLoader__.load({
       {
         key: 'groupWhitelist',
         label: '哪些群可以叫醒',
-        kind: 'list',
-        hint: '填群号，用逗号分开。留空 = 任何群都不会叫醒机器人。',
+        kind: 'group-list',
+        hint: '填群号，用逗号分开。留空 = 任何群都不会叫醒机器人。查到群名时，群号旁边会显示名字和头像；没连上或查不到就只显示群号，照样能保存。',
       },
       {
         key: 'atOnlyInGroup',
@@ -181,8 +181,58 @@ window.__ModuleLoader__.load({
       { key: 'qqNumber', label: '快速登录用的 QQ 号', kind: 'text', hint: '需要先在 NapCat 里成功登录过一次。' },
     ]
 
+    function isIdList(kind) {
+      return kind === 'list' || kind === 'group-list'
+    }
+
+    function splitIdText(raw) {
+      return String(raw == null ? '' : raw)
+        .split(/[,，\s]+/)
+        .map((s) => s.trim())
+        .filter((s) => s !== '')
+    }
+
+    /** 全角数字换成半角。对得上群号才返回，否则空串。和宿主的 normalizeGroupId 同一条规则。 */
+    function canonicalGroupId(raw) {
+      const id = String(raw ?? '')
+        .trim()
+        .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+      return /^\d{1,16}$/.test(id) ? id : ''
+    }
+
+    /** 只接受我们自己拼出来的群头像地址，别的来源一律不当图片。 */
+    function safeGroupAvatar(url) {
+      const text = String(url ?? '').trim()
+      const matched = text.match(/^https:\/\/p\.qlogo\.cn\/gh\/(\d{1,16})\/(\d{1,16})\/100$/)
+      if (!matched || matched[1] !== matched[2]) return ''
+      return text
+    }
+
+    /**
+     * 群白名单每一行怎么显示。
+     * 有群名才带头像；没有资料、或头像地址对不上，就只留用户填的群号。
+     */
+    function groupDisplayRows(raw, metas) {
+      const byId = new Map()
+      for (const item of Array.isArray(metas) ? metas : []) {
+        if (!item || typeof item !== 'object') continue
+        const id = String(item.id ?? '').trim()
+        if (id === '') continue
+        byId.set(id, {
+          name: String(item.name ?? '').trim(),
+          avatar: safeGroupAvatar(item.avatar),
+        })
+      }
+      return splitIdText(raw).map((id) => {
+        const key = canonicalGroupId(id) || id
+        const meta = byId.get(key) || byId.get(id)
+        const name = meta?.name || ''
+        return { id, name, avatar: name !== '' ? meta?.avatar || '' : '' }
+      })
+    }
+
     function format(field, raw) {
-      if (field.kind === 'list') return Array.isArray(raw) ? raw.join(', ') : raw == null ? '' : String(raw)
+      if (isIdList(field.kind)) return Array.isArray(raw) ? raw.join(', ') : raw == null ? '' : String(raw)
       if (field.kind === 'boolean') return raw === true
       if (field.kind === 'number') return raw == null || raw === '' ? '' : String(raw)
       return raw == null ? '' : String(raw)
@@ -190,12 +240,7 @@ window.__ModuleLoader__.load({
 
     /** 表单值 → 要写进设置的 JSON；数字不合法返回 undefined（拦住保存）。 */
     function parse(field, raw) {
-      if (field.kind === 'list') {
-        return String(raw == null ? '' : raw)
-          .split(/[,，\s]+/)
-          .map((s) => s.trim())
-          .filter((s) => s !== '')
-      }
+      if (isIdList(field.kind)) return splitIdText(raw)
       if (field.kind === 'boolean') return raw === true
       if (field.kind === 'number') {
         const text = String(raw ?? '').trim()
@@ -332,6 +377,27 @@ window.__ModuleLoader__.load({
         fontSize: '11px',
       },
       ops: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+      groupList: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '6px',
+        marginTop: '8px',
+        maxHeight: '240px',
+        overflowY: 'auto',
+      },
+      groupRow: { display: 'flex', alignItems: 'center', gap: '8px', minHeight: '28px' },
+      groupAvatar: {
+        width: '28px',
+        height: '28px',
+        borderRadius: '6px',
+        objectFit: 'cover',
+        flex: '0 0 auto',
+        background: 'rgba(127,127,127,0.15)',
+      },
+      groupText: { display: 'flex', flexDirection: 'column', minWidth: 0 },
+      groupName: { fontSize: '13px', lineHeight: 1.3 },
+      groupId: { fontSize: '11px', opacity: 0.55, lineHeight: 1.3 },
+      groupIdOnly: { fontSize: '13px', lineHeight: 1.3 },
     }
 
     function disabled(btn, off) {
@@ -362,6 +428,8 @@ window.__ModuleLoader__.load({
       const [updateOffer, setUpdateOffer] = react.useState(null)
       const [updateNote, setUpdateNote] = react.useState('')
       const [updateIsError, setUpdateIsError] = react.useState(false)
+      // 群白名单旁边的群名和头像。拿不到就空着，输入框照常能改、能保存。
+      const [groupMetas, setGroupMetas] = react.useState([])
 
       const current = react.useMemo(() => draftFrom(snap.value), [snap.value])
       const shown = draft ?? current
@@ -401,6 +469,38 @@ window.__ModuleLoader__.load({
         }
       }, [wsStore])
       const workspaceSnapshot = react.useSyncExternalStore(wsSubscribe, wsGetSnapshot)
+
+      // 群白名单的群名和头像。失败就清空，输入框不禁用，保存也不等这次请求。
+      const groupListText = String(shown.groupWhitelist ?? '')
+      react.useEffect(() => {
+        if (!open) return undefined
+        const ids = splitIdText(groupListText)
+        if (ids.length === 0) {
+          setGroupMetas([])
+          return undefined
+        }
+        let alive = true
+        const timer = setTimeout(() => {
+          if (typeof fetch !== 'function') return
+          fetch(`${GROUP_META_API}?ids=${encodeURIComponent(ids.join(','))}`, {
+            credentials: 'include',
+            headers: { accept: 'application/json' },
+          })
+            .then((res) => res.json().catch(() => null))
+            .then((body) => {
+              if (!alive) return
+              if (body && body.ok === true && Array.isArray(body.groups)) setGroupMetas(body.groups)
+              else setGroupMetas([])
+            })
+            .catch(() => {
+              if (alive) setGroupMetas([])
+            })
+        }, 300)
+        return () => {
+          alive = false
+          clearTimeout(timer)
+        }
+      }, [open, groupListText])
 
       /**
        * 拉一次 NapCat 状态（WebUI 地址 + 是否在运行）。
@@ -709,6 +809,50 @@ window.__ModuleLoader__.load({
               h('option', { key: o.value || '(none)', value: o.value }, o.label),
             ),
           )
+        } else if (f.kind === 'group-list') {
+          const groupRows = groupDisplayRows(value, groupMetas)
+          const groupInput = h('input', {
+            type: 'text',
+            style: S.input,
+            value: String(value),
+            disabled: !snap.writable || busy,
+            onChange: change(f.key),
+            spellCheck: false,
+          })
+          const groupList =
+            groupRows.length === 0
+              ? null
+              : h(
+                  'div',
+                  { style: S.groupList },
+                  groupRows.map((row, index) =>
+                    h(
+                      'div',
+                      { key: `${row.id}-${index}`, style: S.groupRow },
+                      row.avatar
+                        ? h('img', {
+                            src: row.avatar,
+                            alt: '',
+                            width: 28,
+                            height: 28,
+                            referrerPolicy: 'no-referrer',
+                            style: S.groupAvatar,
+                            onError: (event) => {
+                              const el = event && event.currentTarget
+                              if (el && el.style) el.style.display = 'none'
+                            },
+                          })
+                        : null,
+                      h(
+                        'div',
+                        { style: S.groupText },
+                        row.name ? h('div', { style: S.groupName }, row.name) : null,
+                        h('div', { style: row.name ? S.groupId : S.groupIdOnly }, row.id),
+                      ),
+                    ),
+                  ),
+                )
+          control = h('div', null, groupInput, groupList)
         } else {
           control = h('input', {
             type: f.kind === 'number' ? 'number' : 'text',
@@ -934,6 +1078,8 @@ window.__ModuleLoader__.load({
     const NAPCAT_API = '/api/qq-bridge/napcat'
     /** 检查更新。GET 只读当前版本；POST 不带 action 只检查。安装要另发 action 为 apply。浏览器不直接访问 npm 或 GitHub。 */
     const UPDATE_API = '/api/qq-bridge/update'
+    /** 群白名单的群名和头像。只读；保存仍走设置接口。 */
+    const GROUP_META_API = '/api/qq-bridge/groups'
     /** 稳定引用：useSyncExternalStore 的 getSnapshot 每次返回新对象会死循环。 */
     const LOADING_SNAPSHOT = { status: 'loading' }
     const UNAVAILABLE_SNAPSHOT = { status: 'unavailable' }
@@ -1263,7 +1409,7 @@ window.__ModuleLoader__.load({
     exports.name = '@fengye_nobug/dsh-qq-bot'
     // 纯函数给离线测试用（test-smoke.mjs 会在假 ctx 里真跑这个 bundle）。
     // Cordis 只认 apply / inject / name / Config，多余的导出它不管。
-    exports.__test = { sessionOptions, draftFrom, parse, fields: FIELDS, bindSettings }
+    exports.__test = { sessionOptions, draftFrom, parse, fields: FIELDS, bindSettings, groupDisplayRows }
     return module.exports
   },
 })
