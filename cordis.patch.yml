@@ -67,5 +67,7 @@
         # 正式使用时填入实际的 QQ openid。
         whitelist: []
         groupWhitelist: []
+        # 哪些 QQ 号能在 QQ 里用「白名单」命令改群白名单。留空 = 谁都不能用。
+        ownerWhitelist: []
         # 启动时向 GitHub 检查一次有没有新版本。默认关。只写日志，不自动安装。
         checkUpdateOnStart: false
