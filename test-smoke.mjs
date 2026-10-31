@@ -1743,8 +1743,22 @@ function sawSentText(s) {
       )
       const cardKeys = (mod.__test?.fields ?? []).map((x) => x.key)
       const schemaKeys = Object.keys(registeredSettings[0]?.schema?.dict ?? {})
-      // 主人 QQ 的卡片输入不在这次改动里，避免和群白名单的名称、头像改同一份 client.js。
-      const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k) && k !== 'ownerWhitelist')
+      const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k))
+      const ownerField = (mod.__test?.fields ?? []).find((x) => x.key === 'ownerWhitelist')
+      check(
+        '主人 QQ：白话名称，并写明留空不会生效',
+        ownerField?.label === '主人 QQ' &&
+          ownerField?.kind === 'list' &&
+          /留空/.test(String(ownerField?.hint ?? '')) &&
+          /不会生效/.test(String(ownerField?.hint ?? '')),
+        JSON.stringify(ownerField),
+      )
+      check(
+        '主人 QQ 留空保存成空数组，多个号按逗号拆开',
+        JSON.stringify(parseField(ownerField, '')) === '[]' &&
+          JSON.stringify(parseField(ownerField, '  ， ')) === '[]' &&
+          JSON.stringify(parseField(ownerField, '900001, 900002')) === '["900001","900002"]',
+      )
       const groupField = (mod.__test?.fields ?? []).find((x) => x.key === 'groupWhitelist')
       const showGroups = mod.__test?.groupDisplayRows
       const sampleAvatar = groupAvatarUrl('900001')

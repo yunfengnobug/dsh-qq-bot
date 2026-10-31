@@ -88,6 +88,12 @@ window.__ModuleLoader__.load({
         hint: '填群号，用逗号分开。留空 = 任何群都不会叫醒机器人。查到群名时，群号旁边会显示名字和头像；没连上或查不到就只显示群号，照样能保存。',
       },
       {
+        key: 'ownerWhitelist',
+        label: '主人 QQ',
+        kind: 'list',
+        hint: '填主人的 QQ 号，用逗号分开。只有这些号能在 QQ 里用「白名单」命令。留空 = 这些命令不会生效。',
+      },
+      {
         key: 'atOnlyInGroup',
         label: '群里必须 @ 才理',
         kind: 'boolean',
