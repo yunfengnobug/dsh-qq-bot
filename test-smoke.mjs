@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import { apply, buildUsagePrompt, extractQQReply, FACE_NAME_TO_ID, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotMessage, mapOneBotNotice, normalizeDelivery, normalizeGroupId, normalizeMaxRecentTurns, normalizeReplyMode, normalizeSessionScope, NS, parseWhitelistCommand, PLUGIN_VERSION, textToOneBotSegments, truncateText } from './index.js'
+import { apply, buildUsagePrompt, extractQQReply, FACE_NAME_TO_ID, groupAvatarUrl, hasLegacySettings, injectedMessageSource, inlineImageNotes, labelForSegment, mapOneBotMessage, mapOneBotNotice, normalizeDelivery, normalizeGroupId, normalizeMaxRecentTurns, normalizeReplyMode, normalizeSessionScope, NS, parseWhitelistCommand, PLUGIN_VERSION, resolveGroupMetas, textToOneBotSegments, truncateText } from './index.js'
 import { hashOfBuffer, isCompleteMface, loadStickers, mfaceSendData, normalizeMface, saveStickers, shortHash, upsertSticker } from './stickers.js'
 
 // 状态文件必须每次从零开始：这个会话的 $env:TEMP 是固定的，
@@ -156,6 +156,207 @@ check(
   'legacy 宿主也挂检查更新路由',
   capturedRoutes.some((r) => r.path === '/api/qq-bridge/update' && r.kind === 'exact' && typeof r.handler === 'function'),
 )
+check(
+  'legacy 宿主也挂群资料路由（卡片不靠设置文件）',
+  capturedRoutes.some((r) => r.path === '/api/qq-bridge/groups' && r.kind === 'exact' && typeof r.handler === 'function'),
+)
+
+{
+  const groupRoute = capturedRoutes.find((r) => r.path === '/api/qq-bridge/groups')
+  const makeRes = () => {
+    const out = { status: 0, body: '' }
+    return {
+      out,
+      writeHead: (status) => {
+        out.status = status
+      },
+      end: (body) => {
+        out.body = String(body ?? '')
+      },
+    }
+  }
+  const req = (method, { addr = '127.0.0.1', url = '/api/qq-bridge/groups?ids=900001,900002', headers = {} } = {}) => ({
+    method,
+    url,
+    socket: { remoteAddress: addr },
+    headers,
+    async *[Symbol.asyncIterator]() {},
+  })
+  if (groupRoute) {
+    const resOk = makeRes()
+    await groupRoute.handler(req('GET'), resOk)
+    const body = JSON.parse(resOk.out.body)
+    check(
+      '桥没连上时群资料接口仍 200，只回群号',
+      resOk.out.status === 200 &&
+        body.ok === true &&
+        JSON.stringify(body.groups) ===
+          JSON.stringify([
+            { id: '900001', name: '', avatar: '' },
+            { id: '900002', name: '', avatar: '' },
+          ]),
+      resOk.out.body.slice(0, 240),
+    )
+    const resSkip = makeRes()
+    await groupRoute.handler(req('GET', { url: '/api/qq-bridge/groups?ids=900001,不是群号,900001' }), resSkip)
+    const skipped = JSON.parse(resSkip.out.body)
+    check(
+      '群资料接口丢掉非群号和重复项',
+      skipped.ok === true && JSON.stringify(skipped.groups) === JSON.stringify([{ id: '900001', name: '', avatar: '' }]),
+      resSkip.out.body.slice(0, 200),
+    )
+    const resEmpty = makeRes()
+    await groupRoute.handler(req('GET', { url: '/api/qq-bridge/groups' }), resEmpty)
+    const emptyBody = JSON.parse(resEmpty.out.body)
+    check('没有群号时群资料接口返回空列表', resEmpty.out.status === 200 && emptyBody.ok === true && emptyBody.groups.length === 0)
+    const resEvil = makeRes()
+    await groupRoute.handler(req('GET', { headers: { origin: 'https://evil.example' } }), resEvil)
+    check('群资料接口拒绝站外页面', resEvil.out.status === 403, String(resEvil.out.status))
+    const resRemote = makeRes()
+    await groupRoute.handler(req('GET', { addr: '10.0.0.9' }), resRemote)
+    check('群资料接口拒绝非本机', resRemote.out.status === 403, String(resRemote.out.status))
+    const resPost = makeRes()
+    await groupRoute.handler(req('POST', { url: '/api/qq-bridge/groups' }), resPost)
+    check('群资料接口不接受 POST（保存仍走设置接口）', resPost.out.status === 405, String(resPost.out.status))
+  }
+
+  check('群头像地址只认数字群号', groupAvatarUrl('900001') === 'https://p.qlogo.cn/gh/900001/900001/100')
+  check('不是群号就没有头像地址', groupAvatarUrl('abc') === '' && groupAvatarUrl('') === '')
+
+  const calls = []
+  const clock = 1_700_000_000_000
+  const cache = {}
+  const first = await resolveGroupMetas(['900001', '900002', 'nope', '900001', '900003', '900004'], {
+    isOpen: () => true,
+    now: () => clock,
+    cache,
+    call: async (action, params) => {
+      calls.push(action)
+      if (action === 'get_group_list') {
+        return [
+          { group_id: 900001, group_name: '甲群' },
+          { group_id: '900003', group_name: '丙群', group_remark: '备注不顶名字' },
+        ]
+      }
+      if (action === 'get_group_info' && String(params?.group_id) === '900002') {
+        return { group_id: '900002', group_name: '', group_remark: '乙群备注' }
+      }
+      throw new Error('missing')
+    },
+  })
+  check(
+    '群资料：名单里的群有名字和头像',
+    first[0]?.id === '900001' && first[0].name === '甲群' && first[0].avatar === groupAvatarUrl('900001'),
+    JSON.stringify(first[0]),
+  )
+  check(
+    '群资料：没有群名时用备注',
+    first.find((row) => row.id === '900002')?.name === '乙群备注' &&
+      first.find((row) => row.id === '900002')?.avatar === groupAvatarUrl('900002'),
+    JSON.stringify(first),
+  )
+  check(
+    '群资料：群名优先于备注',
+    first.find((row) => row.id === '900003')?.name === '丙群',
+    JSON.stringify(first.find((row) => row.id === '900003')),
+  )
+  check(
+    '群资料：不是群号的丢掉，重复的只留一个，查不到的只有群号',
+    first.map((row) => row.id).join(',') === '900001,900002,900003,900004' &&
+      first.find((row) => row.id === '900004')?.name === '' &&
+      first.find((row) => row.id === '900004')?.avatar === '',
+    JSON.stringify(first),
+  )
+  const called = calls.length
+  const second = await resolveGroupMetas(['900001', '900002'], {
+    isOpen: () => true,
+    now: () => clock + 1000,
+    cache,
+    call: async () => {
+      calls.push('again')
+      throw new Error('should use cache')
+    },
+  })
+  check(
+    '群资料：缓存期内不再请求',
+    calls.length === called && second[0]?.name === '甲群' && second[1]?.name === '乙群备注',
+    JSON.stringify({ calls, second }),
+  )
+
+  let offlineCalled = false
+  const offline = await resolveGroupMetas(['900001'], {
+    isOpen: () => false,
+    call: async () => {
+      offlineCalled = true
+      return { group_id: '900001', group_name: '不该用' }
+    },
+    cache: {
+      ok: true,
+      at: clock,
+      byId: new Map([['900001', { id: '900001', name: '旧名' }]]),
+      info: new Map(),
+    },
+    now: () => clock,
+  })
+  check(
+    '群资料：没连上只回群号，不读旧缓存',
+    offlineCalled === false && offline.length === 1 && offline[0].name === '' && offline[0].avatar === '',
+    JSON.stringify(offline),
+  )
+
+  const failed = await resolveGroupMetas(['900001'], {
+    isOpen: () => true,
+    now: () => clock,
+    cache: {},
+    call: async () => {
+      throw new Error('down')
+    },
+  })
+  check(
+    '群资料：查询失败仍返回群号',
+    failed[0]?.id === '900001' && failed[0].name === '' && failed[0].avatar === '',
+    JSON.stringify(failed),
+  )
+
+  const infoOnly = await resolveGroupMetas(['900002'], {
+    isOpen: () => true,
+    now: () => clock,
+    cache: {},
+    call: async (action, params) => {
+      if (action === 'get_group_list') throw new Error('no list')
+      return { group_id: params.group_id, group_name: '单独问到' }
+    },
+  })
+  check(
+    '群资料：群列表失败时改问单个群',
+    infoOnly[0]?.name === '单独问到' && infoOnly[0].avatar === groupAvatarUrl('900002'),
+    JSON.stringify(infoOnly),
+  )
+
+  const seen = []
+  const manyIds = Array.from({ length: 21 }, (_, index) => String(910000 + index))
+  const many = await resolveGroupMetas(manyIds, {
+    isOpen: () => true,
+    now: () => clock,
+    cache: {},
+    call: async (action, params) => {
+      if (action === 'get_group_list') return []
+      seen.push(String(params.group_id))
+      return { group_id: params.group_id, group_name: '有' }
+    },
+  })
+  check(
+    '群资料：不在列表里的最多再问 20 个',
+    seen.length === 20 && many[0]?.name === '有' && many[20]?.name === '' && many.length === 21,
+    JSON.stringify({ seen: seen.length, last: many[20], len: many.length }),
+  )
+  const capped = await resolveGroupMetas(
+    Array.from({ length: 101 }, (_, index) => String(920000 + index)),
+    { isOpen: () => false },
+  )
+  check('群资料：一次最多 100 个群号', capped.length === 100 && capped.every((row) => row.name === '' && row.avatar === ''))
+}
+
 console.log('registered tools:', registered.map((t) => t.name).join(', '))
 check('apply 未抛错且注册了 7 个工具', registered.length === 7)
 
@@ -1542,8 +1743,62 @@ function sawSentText(s) {
       )
       const cardKeys = (mod.__test?.fields ?? []).map((x) => x.key)
       const schemaKeys = Object.keys(registeredSettings[0]?.schema?.dict ?? {})
-      // 主人 QQ 的卡片输入不在这次改动里，避免和群白名单的名称、头像改同一份 client.js。
-      const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k) && k !== 'ownerWhitelist')
+      const notOnCard = schemaKeys.filter((k) => !cardKeys.includes(k))
+      const ownerField = (mod.__test?.fields ?? []).find((x) => x.key === 'ownerWhitelist')
+      check(
+        '主人 QQ：白话名称，并写明留空不会生效',
+        ownerField?.label === '主人 QQ' &&
+          ownerField?.kind === 'list' &&
+          /留空/.test(String(ownerField?.hint ?? '')) &&
+          /不会生效/.test(String(ownerField?.hint ?? '')),
+        JSON.stringify(ownerField),
+      )
+      check(
+        '主人 QQ 留空保存成空数组，多个号按逗号拆开',
+        JSON.stringify(parseField(ownerField, '')) === '[]' &&
+          JSON.stringify(parseField(ownerField, '  ， ')) === '[]' &&
+          JSON.stringify(parseField(ownerField, '900001, 900002')) === '["900001","900002"]',
+      )
+      const groupField = (mod.__test?.fields ?? []).find((x) => x.key === 'groupWhitelist')
+      const showGroups = mod.__test?.groupDisplayRows
+      const sampleAvatar = groupAvatarUrl('900001')
+      check(
+        '群白名单：白话说明查到就显示名字和头像，查不到只显示群号',
+        groupField?.label === '哪些群可以叫醒' &&
+          groupField?.kind === 'group-list' &&
+          /头像/.test(String(groupField?.hint ?? '')) &&
+          /群号/.test(String(groupField?.hint ?? '')) &&
+          /保存/.test(String(groupField?.hint ?? '')),
+        JSON.stringify(groupField),
+      )
+      check(
+        '群白名单留空仍是空数组，逗号（含中文逗号）拆开',
+        JSON.stringify(parseField(groupField, '')) === '[]' &&
+          JSON.stringify(parseField(groupField, '  ， ')) === '[]' &&
+          JSON.stringify(parseField(groupField, '900001，900002')) === '["900001","900002"]',
+      )
+      check(
+        '群白名单展示：有资料时群号旁边有名字和头像',
+        typeof showGroups === 'function' &&
+          JSON.stringify(showGroups('900001, 900002', [{ id: '900001', name: '甲群', avatar: sampleAvatar }])) ===
+            JSON.stringify([
+              { id: '900001', name: '甲群', avatar: sampleAvatar },
+              { id: '900002', name: '', avatar: '' },
+            ]),
+      )
+      check(
+        '群白名单展示：头像地址不对、或没有群名时不显示头像',
+        JSON.stringify(showGroups('900001', [{ id: '900001', name: '甲群', avatar: 'https://evil.example/a.png' }])) ===
+          JSON.stringify([{ id: '900001', name: '甲群', avatar: '' }]) &&
+          JSON.stringify(showGroups('900001', [{ id: '900001', name: '', avatar: sampleAvatar }])) ===
+            JSON.stringify([{ id: '900001', name: '', avatar: '' }]) &&
+          JSON.stringify(showGroups('900001', [])) === JSON.stringify([{ id: '900001', name: '', avatar: '' }]),
+      )
+      check(
+        '卡片向本机接口要群资料，保存仍走设置接口',
+        src.includes("const GROUP_META_API = '/api/qq-bridge/groups'") && src.includes('await scope.set(key, value)'),
+      )
+      check('群头像加载失败就藏起来，不挡住群号', src.includes('onError') && src.includes("el.style.display = 'none'"))
       const replyModeField = (mod.__test?.fields ?? []).find((x) => x.key === 'replyMode')
       const deliveryField = (mod.__test?.fields ?? []).find((x) => x.key === 'delivery')
       const webuiField = (mod.__test?.fields ?? []).find((x) => x.key === 'napcatWebuiUrl')
