@@ -25,7 +25,7 @@
         onebotUrl: ''
         # 存放 access_token 的**凭据引用名**（就是一个环境变量名），不要明文写 token。
         # 它会经 ctx.credentials 解析（进程环境 → 凭据存储 → .env），每次建连重新解析。
-        # 设置方式见 README“配置 access_token”。
+        # 设置方式见 README「配置」。细节在 DESIGN.md「配置 access_token」。
         accessTokenEnv: ''
         # 机器人自己的 QQ 号；留空则连上后自动调 get_login_info 获取。
         selfId: ''

@@ -3,7 +3,7 @@
 // 设计要点（都是被环境逼出来的，改之前先读）：
 //
 //   1) **用 Node 内置的全局 WebSocket，不引 `ws` 依赖。**
-//      插件目录里只挂了一个 `@deepseek-ai` junction（见 README 的 link 安装坑），
+//      插件目录里只挂了一个 `@deepseek-ai` junction（见 DESIGN.md「开发期」），
 //      `ws` 从这个目录解析不到（ERR_MODULE_NOT_FOUND）。Node >= 22 自带
 //      WHATWG WebSocket 客户端，零依赖。
 //
