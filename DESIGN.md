@@ -194,6 +194,8 @@ qq_bridge_napcat
 
 四条路。装完都要让 dsh-web 重新加载插件：
 
+0.2.12 起，插件启动时会看 `$DSH_HOME/.agent-presets/dsh-qq-bridge/skills/qq-session-reply-style/references/reply-style.md`。里面若还有 “Emoji are welcome when they make the answer friendlier.”，只删这一句。这文件不在 npm 包的安装目录里，`dsh plugin add` 不会顺手改它；人设安装时整份复制到 `$DSH_HOME/.agent-presets`，所以要等新版本的插件进程起来才写回。文件不存在就不创建。不要为了这句话删掉整个人设目录，本插件不会把人设的其它文件补回去。
+
 1. 设置卡片里先点「检查更新」。有新正式版时出现「更新到 vX.Y.Z」。点下去优先执行 `dsh plugin --profile web add @fengye_nobug/dsh-qq-bot@X.Y.Z`，走这台机器上 pnpm 已经配置的 registry，然后重启面板。装完会把 profile、`$DSH_HOME/cordis.patch.yml`（写了 `qq-bridge` 才改）和插件补丁里 `qq-bridge` 的 `name` 改成磁盘上的包名，`config` 不动。设置还在，不改 NapCat。重启后刷新页面；登录口令可能会变。
 2. 自己执行同一条命令。npm 上已经发出的是 `@fengye_nobug/dsh-qq-bot@0.2.5`。自己装不会自动改 profile 里的旧 `name`。
 3. 指定 GitHub tag：`dsh plugin --profile web add github:yunfengnobug/dsh-qq-bot#vX.Y.Z`

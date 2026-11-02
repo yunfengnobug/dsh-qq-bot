@@ -42,6 +42,7 @@ import {
   upsertSticker,
 } from './stickers.js'
 import { FACE_NAME_TO_ID, textToOneBotSegments } from './faces.js'
+import { syncInstalledReplyStyle } from './reply-style.js'
 import { applyPluginUpdate, checkPluginUpdate } from './updates.js'
 
 const require = createRequire(import.meta.url)
@@ -726,6 +727,14 @@ export function apply(ctx, config) {
   const legacySettings = hasLegacySettings(settingsService)
 
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+  // 人设文件在 $DSH_HOME/.agent-presets，不随 node_modules 一起换。
+  // 面板升级并重启后，这里只删掉已经复制进去的那句鼓励使用 emoji 的话。
+  try {
+    const refreshed = syncInstalledReplyStyle(home)
+    if (refreshed.changed) logger.info('已去掉 QQ 回复风格里鼓励使用 emoji 的那一句。')
+  } catch (error) {
+    logger.warn(`更新 QQ 回复风格失败：${error?.message ?? error}`)
+  }
   /**
    * 用户设置的落盘位置（0.2.0 专用）。
    * 0.2.0 的宿主设置桥不给第三方插件可写域（见 docs/dsh-0.2.0-migration.md），

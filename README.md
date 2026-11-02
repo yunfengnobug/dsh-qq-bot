@@ -96,6 +96,8 @@ DSH 0.2 的卡片把值写进 `$DSH_HOME/qq-bridge-settings.json`。这份文件
 
 设置卡片里先点「检查更新」。有新正式版时点「更新到 vX.Y.Z」。优先从 npm 安装；这一版还没发到 npm 时，改从 GitHub 下载。装完会自己重启 dsh-web。设置还在，不改 NapCat。刷新页面后，登录口令可能会变。
 
+0.2.12 起，重启后如果 `$DSH_HOME/.agent-presets/dsh-qq-bridge/skills/qq-session-reply-style/references/reply-style.md` 里还有 “Emoji are welcome when they make the answer friendlier.”，会删掉这一句。「Avoid Markdown formatting. Use plain text.」还在，其它行不动，也不另写禁用表情的规矩。这份文件本来没有时不会新建。不用删掉整个人设目录。已经读进当前会话的旧规则，要等下次再读这份说明，或另开一条会话。
+
 「检查更新」和「启动时检查一次」只询问，不会安装。
 
 维护者发版：

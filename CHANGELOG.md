@@ -1,5 +1,9 @@
 # 更新日志
 
+## v0.2.12 — 2026-11-02
+
+- **QQ 回复风格不再鼓励使用 emoji**：`$DSH_HOME/.agent-presets/dsh-qq-bridge/skills/qq-session-reply-style/references/reply-style.md` 若还写着 “Emoji are welcome when they make the answer friendlier.”，插件启动时删掉这一句。「Avoid Markdown formatting. Use plain text.」以及前后其它行保持原样。不另加「默认不要带表情」或「少用某个表情」的规矩。这份文件不在插件目录里，DSH 升级时也不会改写 `.agent-presets`；它是人设安装时复制进去的。面板更新并重启后才会改到磁盘上的那一份。文件本来就不存在时不会新建，也不用删掉整个人设目录。用法说明和 `qq_bridge_send` 的说明不动。
+
 ## v0.2.11 — 2026-11-02
 
 - **轮数上限会用到人设里的压缩**：`maxRecentTurns`（默认 40，填 0 不限制）在 QQ 叫醒的一轮结束并空闲后，压缩更早的内容。标准人设把压缩放在隔离域里，插件所在的宿主上下文看不见，所以 0.2.9 这次调用直接跳过，会话会一直变长，日志里也没有压缩记录。现在先向这条会话的人设要压缩服务，没有再看会话作用域和宿主。已经超限却找不到，或这次压缩没有改动会话时，记一条警告。仍然等这一轮空闲，并带上未取消的取消信号。不必在宿主配置里再打开压缩。哪一层都没有压缩时不影响收发。
